@@ -869,6 +869,11 @@ static void doltliteCommitFuncImpl(
 
   memset(&mutationState, 0, sizeof(mutationState));
 
+  if( db->nVdbeWrite>0 ){
+    sqlite3_result_error(context,
+        "cannot commit while a write statement is active", -1);
+    return;
+  }
   if( doltliteCmdRejectDetached(context) ) return;
   if( doltliteCmdRejectReadOnly(context) ) return;
   if( !cs ){
