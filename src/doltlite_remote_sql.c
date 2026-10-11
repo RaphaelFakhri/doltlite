@@ -936,12 +936,23 @@ static int fetchSpecParseColon(
   return SQLITE_OK;
 }
 
+static int fetchSpecNamePresent(char **azNames, int nNames, const char *zBranch){
+  int k;
+  if( !zBranch || zBranch[0]==0 ) return 0;
+  for(k=0; k<nNames; k++){
+    if( strcmp(azNames[k], zBranch)==0 ) return 1;
+  }
+  return 0;
+}
+
+/* zFmt takes one %s, the spec or the source branch name. */
 static int fetchSpecResultInvalid(
   sqlite3_context *ctx,
   sqlite3 *db,
-  const char *zSpec
+  const char *zFmt,
+  const char *zArg
 ){
-  char *zMsg = sqlite3_mprintf("invalid fetch spec: '%s'", zSpec);
+  char *zMsg = sqlite3_mprintf(zFmt, zArg);
   if( !zMsg ){
     sqlite3_result_error_nomem(ctx);
     return SQLITE_NOMEM;
@@ -968,7 +979,6 @@ static void doltFetchFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
   int nNames = 0;
   int rc;
   int i;
-  int bNeedNames;
 
   if( !cs ){ doltliteVcResultError(ctx, db, "no database"); return; }
   /* A NULL branch has always meant fetch everything. */
@@ -992,15 +1002,8 @@ static void doltFetchFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
     doltliteCmdArgsClear(&args);
     return;
   }
-  bNeedNames = args.nPositional<=1 || bPrune;
-  if( !bNeedNames ){
-    for(i=1; i<args.nPositional; i++){
-      if( strchr(args.azPositional[i], '*') ){ bNeedNames = 1; break; }
-    }
-  }
-  if( bNeedNames ){
-    rc = parseRemoteBranchNames(pRemote, &azNames, &nNames);
-  }
+  /* Explicit refspecs are matched against this list before any fetch. */
+  rc = parseRemoteBranchNames(pRemote, &azNames, &nNames);
   if( rc!=SQLITE_OK ){
     const char *zMsg = remoteSqlRemoteMsg(pRemote, rc);
     char *zOwned = zMsg ? sqlite3_mprintf("%s", zMsg) : 0;
@@ -1032,13 +1035,22 @@ static void doltFetchFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
       char *zDstPat = 0;
       int prc;
       int k;
-      if( !strchr(zSpec, ':') ) continue;
+      /* A name with no colon is one branch. Reject it here so a later
+      ** invalid spec cannot leave this one already installed. */
+      if( !strchr(zSpec, ':') ){
+        const char *zBranch = remoteSqlStripPrefix(zSpec, REMOTE_HEADS_PREFIX);
+        if( !fetchSpecNamePresent(azNames, nNames, zBranch) ){
+          rc = fetchSpecResultInvalid(ctx, db,
+              "fetch failed: invalid ref spec: '%s'", zBranch);
+        }
+        continue;
+      }
       prc = fetchSpecParseColon(zSpec, &bGlob, &zTrackRemote, &zSrcPat, &zDstPat);
       if( prc==SQLITE_NOMEM ){
         rc = SQLITE_NOMEM;
         sqlite3_result_error_nomem(ctx);
       }else if( prc!=SQLITE_OK ){
-        rc = fetchSpecResultInvalid(ctx, db, zSpec);
+        rc = fetchSpecResultInvalid(ctx, db, "invalid fetch spec: '%s'", zSpec);
       }else if( bGlob ){
         int bSeen = 0;
         for(k=0; k<nNames; k++){
@@ -1046,7 +1058,12 @@ static void doltFetchFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
           int nCap = 0;
           if( fetchPatMatch(zSrcPat, azNames[k], &zCap, &nCap) ) bSeen = 1;
         }
-        if( !bSeen ) rc = fetchSpecResultInvalid(ctx, db, zSpec);
+        if( !bSeen ){
+          rc = fetchSpecResultInvalid(ctx, db, "invalid fetch spec: '%s'", zSpec);
+        }
+      }else if( !fetchSpecNamePresent(azNames, nNames, zSrcPat) ){
+        rc = fetchSpecResultInvalid(ctx, db,
+            "fetch failed: invalid ref spec: '%s'", zSrcPat);
       }
       sqlite3_free(zTrackRemote);
       sqlite3_free(zSrcPat);
@@ -1079,7 +1096,8 @@ static void doltFetchFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
       if( prc!=SQLITE_OK ){
         rc = prc==SQLITE_NOMEM ? SQLITE_NOMEM : SQLITE_ERROR;
         if( prc==SQLITE_NOMEM ) sqlite3_result_error_nomem(ctx);
-        else rc = fetchSpecResultInvalid(ctx, db, zSpec);
+        else rc = fetchSpecResultInvalid(ctx, db,
+            "invalid fetch spec: '%s'", zSpec);
       }else if( bGlob ){
         int k;
         for(k=0; k<nNames && rc==SQLITE_OK; k++){

@@ -239,7 +239,8 @@ result=$("$DB" "$TMPDIR/src.db" "SELECT dolt_fetch('origin','main');")
 check "fetch returns 0" "0" "$result"
 
 result=$("$DB" "$TMPDIR/src.db" "SELECT dolt_fetch('origin','main','extra');" 2>&1)
-check_match "fetch of a missing extra refspec errors" "not found" "$result"
+check_match "fetch of a missing extra refspec errors" \
+  "fetch failed: invalid ref spec: 'extra'" "$result"
 
 printf 'not a database' > "$TMPDIR/garbage_remote.db"
 "$DB" "$TMPDIR/garbage_client.db" "SELECT dolt_remote('add','junk','$R/garbage_remote.db');" >/dev/null 2>&1
@@ -1688,8 +1689,8 @@ check_match "a glob that matches nothing is refused" \
   "invalid fetch spec: 'refs/heads/zz\\*:refs/remotes/origin/zz\\*'" "$result"
 result=$("$DB" "$RS/g.db" \
   "SELECT dolt_fetch('origin','refs/heads/nope:refs/remotes/origin/nope');" 2>&1)
-check_match "a missing branch in a full fetch spec is not found" \
-  "branch not found on remote" "$result"
+check_match "a missing branch in a full fetch spec is an invalid ref spec" \
+  "fetch failed: invalid ref spec: 'nope'" "$result"
 result=$("$DB" "$RS/g.db" \
   "SELECT count(*) FROM dolt_remote_branches WHERE name='remotes/origin/mm';")
 check "refused fetch specs did not add a tracking ref" "1" "$result"
@@ -2170,6 +2171,67 @@ check "lazy refusal keeps the peer commit and both rows" "$(cat "$PR/lazy/peer.h
 7" "$result"
 result=$("$DB" "$PR/lazy/t.db" "SELECT count(*) FROM sqlite_master WHERE name='r';")
 check "lazy refusal does not install the remote table" "0" "$result"
+
+echo "=== A fetch checks every refspec before updating tracking refs ==="
+FV="$TMPDIR/fetch_validate"
+mkdir -p "$FV"
+"$DB" "$FV/src.db" <<ENDSQL >/dev/null
+CREATE TABLE t(id INT PRIMARY KEY);
+INSERT INTO t VALUES(1);
+SELECT dolt_commit('-Am','c1');
+SELECT dolt_branch('feat');
+SELECT dolt_remote('add','origin','file://$FV/remote.db');
+SELECT dolt_push('origin','main');
+SELECT dolt_push('origin','feat');
+ENDSQL
+"$DB" "$FV/clone.db" "SELECT dolt_clone('file://$FV/remote.db');" >/dev/null
+"$DB" "$FV/src.db" <<ENDSQL >/dev/null
+SELECT dolt_checkout('feat');
+INSERT INTO t VALUES(2);
+SELECT dolt_commit('-am','c2');
+SELECT dolt_push('origin','feat');
+ENDSQL
+at_c1="remotes/origin/feat|c1
+remotes/origin/main|c1"
+result=$("$DB" "$FV/clone.db" \
+  "SELECT name || '|' || latest_commit_message FROM dolt_remote_branches ORDER BY name;")
+check "clone tracks main and feat at c1" "$at_c1" "$result"
+
+result=$("$DB" "$FV/clone.db" "SELECT dolt_fetch('origin','feat','nope');" 2>&1)
+check_match "a later invalid refspec fails the fetch" \
+  "fetch failed: invalid ref spec: 'nope'" "$result"
+result=$("$DB" "$FV/clone.db" \
+  "SELECT name || '|' || latest_commit_message FROM dolt_remote_branches ORDER BY name;")
+check "a later invalid refspec leaves feat at c1" "$at_c1" "$result"
+
+result=$("$DB" "$FV/clone.db" "SELECT dolt_fetch('origin','nope','feat');" 2>&1)
+check_match "an earlier invalid refspec fails the fetch" \
+  "fetch failed: invalid ref spec: 'nope'" "$result"
+result=$("$DB" "$FV/clone.db" \
+  "SELECT name || '|' || latest_commit_message FROM dolt_remote_branches ORDER BY name;")
+check "an earlier invalid refspec installs nothing" "$at_c1" "$result"
+
+result=$("$DB" "$FV/clone.db" \
+  "SELECT dolt_fetch('origin','feat','refs/heads/nope:refs/remotes/origin/nope');" 2>&1)
+check_match "a missing exact mapping fails with the source branch" \
+  "fetch failed: invalid ref spec: 'nope'" "$result"
+result=$("$DB" "$FV/clone.db" \
+  "SELECT name || '|' || latest_commit_message FROM dolt_remote_branches ORDER BY name;")
+check "a missing exact mapping installs nothing" "$at_c1" "$result"
+
+result=$("$DB" "$FV/clone.db" "SELECT dolt_fetch('origin','refs/heads/nope');" 2>&1)
+check_match "a missing refs/heads branch is an invalid ref spec" \
+  "fetch failed: invalid ref spec: 'nope'" "$result"
+result=$("$DB" "$FV/clone.db" "SELECT dolt_fetch('origin','nope');" 2>&1)
+check_match "a missing branch alone is an invalid ref spec" \
+  "fetch failed: invalid ref spec: 'nope'" "$result"
+
+result=$("$DB" "$FV/clone.db" "SELECT dolt_fetch('origin','main','feat');")
+check "fetch of two branches that exist returns 0" "0" "$result"
+result=$("$DB" "$FV/clone.db" \
+  "SELECT name || '|' || latest_commit_message FROM dolt_remote_branches ORDER BY name;")
+check "the valid fetch advances only feat" "remotes/origin/feat|c2
+remotes/origin/main|c1" "$result"
 
 echo ""
 echo "======================================="
