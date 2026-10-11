@@ -176,10 +176,16 @@ static int modeFailFchmod(int fd, mode_t mode){
   return -1;
 }
 
-static void modeLockPath(const char *zPath, char *zLock, size_t nLock){
+static int modeLockPath(const char *zPath, char *zLock, size_t nLock){
   const char *zBase = strrchr(zPath, '/');
-  int nDir = zBase ? (int)(zBase-zPath)+1 : 0;
-  snprintf(zLock, nLock, "%.*s.%s-lock", nDir, zPath, zBase ? zBase+1 : zPath);
+  size_t nPath = strlen(zPath);
+  size_t nDir = zBase ? (size_t)(zBase-zPath)+1 : 0;
+  if( nPath+7>nLock ) return SQLITE_TOOBIG;
+  memcpy(zLock, zPath, nDir);
+  zLock[nDir] = '.';
+  memcpy(zLock+nDir+1, zPath+nDir, nPath-nDir);
+  memcpy(zLock+nPath+1, "-lock", 6);
+  return SQLITE_OK;
 }
 #endif
 
@@ -196,7 +202,7 @@ static void run_file_modes(void){
   make_dbpath(zPath,sizeof(zPath),"file_modes");
   make_dbpath(zSource,sizeof(zSource),"file_modes_source");
   make_dbpath(zInto,sizeof(zInto),"file_modes_into");
-  modeLockPath(zPath,zLock,sizeof(zLock));
+  check("mode_lock_path",modeLockPath(zPath,zLock,sizeof(zLock))==SQLITE_OK);
   for(i=0; i<2; i++){
     for(j=0; j<2; j++){
       for(k=0; k<2; k++){
