@@ -60,7 +60,9 @@ doltlite my.db/v1.0          # tag: read-only detached snapshot
 doltlite 'my.db/main~1'      # ancestor: read-only detached snapshot
 ```
 
-The same string works in `sqlite3_open()` and every binding. Detached
+The same string works in `sqlite3_open()` and every binding. A `file:` URI
+such as `file:my.db@feature?nolock=1` selects that revision and keeps the
+URI's query parameters. Detached
 connections return `NULL` from `active_branch()`, fail writes with
 `attempt to write a readonly database`, and stay pinned even if a peer moves
 or deletes the ref. A missing revision fails the open:
