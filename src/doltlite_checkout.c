@@ -1237,7 +1237,7 @@ static void checkoutTablesResult(
   if( !db->autoCommit || db->pSavepoint ){
     rc = doltliteVcSealBranchStyleTxn(db);
     if( rc!=SQLITE_OK ){
-      sqlite3_result_error_code(ctx, rc);
+      doltliteVcResultSealError(ctx, db, rc);
       return;
     }
   }
@@ -1537,7 +1537,7 @@ checkout_done:
   if( hadExplicitTxn ){
     rc = doltliteVcSealBranchStyleTxn(db);
     if( rc!=SQLITE_OK ){
-      sqlite3_result_error_code(ctx, rc);
+      doltliteVcResultSealError(ctx, db, rc);
       return;
     }
   }

@@ -98,7 +98,7 @@ static void doltTagParsedFunc(
     }
     rc = doltliteVcSealActiveSavepoints(db);
     if( rc!=SQLITE_OK ){
-      sqlite3_result_error_code(ctx, rc);
+      doltliteVcResultSealError(ctx, db, rc);
       return;
     }
     sqlite3_result_int(ctx, 0);
@@ -155,7 +155,7 @@ static void doltTagParsedFunc(
   }
   rc = doltliteVcSealActiveSavepoints(db);
   if( rc!=SQLITE_OK ){
-    sqlite3_result_error_code(ctx, rc);
+    doltliteVcResultSealError(ctx, db, rc);
     return;
   }
   sqlite3_result_int(ctx, 0);

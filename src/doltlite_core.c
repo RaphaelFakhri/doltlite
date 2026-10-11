@@ -1386,6 +1386,14 @@ void doltliteVcResultError(sqlite3_context *ctx, sqlite3 *db, const char *zMsg){
   sqlite3_result_error(ctx, zMsg, -1);
 }
 
+/* The seal's internal COMMIT left its refusal on the connection; a result
+** that only carries the code would read "0" or the generic code text. */
+void doltliteVcResultSealError(sqlite3_context *ctx, sqlite3 *db, int rc){
+  sqlite3_result_error(ctx,
+      sqlite3_errcode(db)==rc ? sqlite3_errmsg(db) : sqlite3_errstr(rc), -1);
+  sqlite3_result_error_code(ctx, rc);
+}
+
 /* For sites relaying a result code rather than reporting a usage error.
 ** The code goes on after the message so the message survives; NOTFOUND is an
 ** internal sentinel and SQLITE_ERROR is what a bare message already gives.

@@ -1387,7 +1387,7 @@ static int mergeRefCreateMergeCommit(
   }
   rc = doltliteVcSealEnclosingTxn(db);
   if( rc!=SQLITE_OK ){
-    sqlite3_result_error_code(context, rc);
+    doltliteVcResultSealError(context, db, rc);
     return SQLITE_ERROR;
   }
   doltliteTxnStateClear(pSaved);
@@ -1449,7 +1449,7 @@ static int mergeRefLeaveUncommitted(
   }
   if( db->autoCommit ) rc = doltliteVcSealEnclosingTxn(db);
   if( rc!=SQLITE_OK ){
-    sqlite3_result_error_code(context, rc);
+    doltliteVcResultSealError(context, db, rc);
     return SQLITE_ERROR;
   }
   doltliteTxnStateClear(pSaved);

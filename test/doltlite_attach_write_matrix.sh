@@ -308,6 +308,19 @@ done
 R=$(dl_last "SELECT group_concat(name,',') FROM dolt_branches;" "$VC_MAIN")
 want_eq "main_vtab_still_available" "$R" "main,main_only_branch"
 
+for call in "dolt_reset('--hard')" "dolt_reset('t')" "dolt_checkout('t')" \
+            "dolt_branch('-f','b','main')"; do
+  VC_SEAL_MAIN="$TMP/seal_main.db"; VC_SEAL_AUX="$TMP/seal_aux.db"
+  rm -f "$VC_SEAL_MAIN" "$VC_SEAL_AUX"
+  dl_all "CREATE TABLE t(id INTEGER PRIMARY KEY);" "$VC_SEAL_AUX" >/dev/null
+  dl_all "CREATE TABLE t(id INTEGER PRIMARY KEY); SELECT dolt_commit('-Am','base'); SELECT dolt_branch('b'); INSERT INTO t VALUES(5);" "$VC_SEAL_MAIN" >/dev/null
+  R=$(dl_last "ATTACH '$VC_SEAL_AUX' AS aux; BEGIN; INSERT INTO aux.t VALUES(1); INSERT INTO t VALUES(6); SELECT $call;" "$VC_SEAL_MAIN")
+  want_contains "vc_seal_multi_file_message/$call" "$R" \
+    "atomic commit across multiple file-backed databases is not supported"
+  R=$(dl_last "SELECT group_concat(id) FROM t;" "$VC_SEAL_MAIN")
+  want_eq "vc_seal_multi_file_unchanged/$call" "$R" "5"
+done
+
 echo ""
 echo "============================="
 echo "Results: $PASS passed, $FAIL failed, $SKIP skipped"
