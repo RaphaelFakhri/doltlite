@@ -193,6 +193,7 @@ struct DoltliteFileMode {
   int bLock;
 };
 int sqlite3OsDoltliteModeOf(sqlite3_file *, const char *, int);
+#define SQLITE_FCNTL_DOLTLITE_GRAPH_LOCK 0x444c4701
 #endif
 int sqlite3OsSectorSize(sqlite3_file *id);
 int sqlite3OsDeviceCharacteristics(sqlite3_file *id);

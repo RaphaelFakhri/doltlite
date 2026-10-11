@@ -92,7 +92,7 @@ static int csScrubFailedRootLocked(ChunkStore *cs){
 
 /* Only on the handle that wrote it: a reopen by path may be another file. */
 int csScrubFailedRoot(ChunkStore *cs){
-  sqlite3_file *pLock = 0;
+  CsFileLock pLock = 0;
   char *zLock = 0;
   int rc;
   if( !cs->iFailedRootOff ) return SQLITE_OK;
@@ -102,7 +102,7 @@ int csScrubFailedRoot(ChunkStore *cs){
     return SQLITE_OK;
   }
   if( cs->lockDepth<=0 ){
-    rc = csFileLock(cs->file.pVfs, cs->file.zFilename, &pLock, &zLock);
+    rc = csFileLock(cs->file.pVfs, cs->file.zFilename, 0, &pLock, &zLock);
     if( rc!=SQLITE_OK ) return rc;
   }
   rc = csScrubFailedRootLocked(cs);
@@ -195,7 +195,7 @@ static int csCommitResolveAppendPoint(
   }
 
   if( !lockHeld ){
-    rc = csFileLock(cs->file.pVfs, cs->file.zFilename, pLockFd, pzLockName);
+    rc = csFileLock(cs->file.pVfs, cs->file.zFilename, 0, pLockFd, pzLockName);
     if( rc!=SQLITE_OK ) return rc;
   }
 

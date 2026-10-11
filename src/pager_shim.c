@@ -1360,8 +1360,7 @@ int sqlite3_backup_step(sqlite3_backup *pBackup, int nPage){
     csCloseFile(chunkFileGetHandle(&destCs->file));
     chunkFileSetHandle(&destCs->file, 0);
 #endif
-    rc = sqlite3OsReplaceFile(pDestVfs, zTmpFile, zDestFile,
-                              &retainTmp);
+    rc = chunkStoreReplaceLockedFile(destCs, zTmpFile, &retainTmp);
     if( rc==SQLITE_OK ){
       doltliteBtreeInstallBackupBranch(pDestBt, zPreparedBranch);
       zPreparedBranch = 0;

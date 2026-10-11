@@ -425,6 +425,10 @@ static int csSourceOpenWriter(
   if( cs->file.pFile==0 ) return SQLITE_OK;
   if( cs->lockDepth>0 ) return SQLITE_BUSY;
   rc = csSourceLockAndRefresh(cs, p, &changed);
+  if( rc==SQLITE_READONLY && cs->movedReadOnly ){
+    p->memoryOnly = 1;
+    return SQLITE_OK;
+  }
   if( rc!=SQLITE_OK ) return rc;
   if( cs->movedReadOnly ){
     p->memoryOnly = 1;
@@ -462,8 +466,9 @@ static int csSourcePersistMany(
   rc = csSourceOpenWriter(cs, p, 0);
   if( rc!=SQLITE_OK || !p->writerOpen ) return rc;
   rc = csSourceLockAndRefresh(&p->writer, p, 0);
-  if( rc==SQLITE_OK && p->writer.movedReadOnly ){
+  if( (rc==SQLITE_OK || rc==SQLITE_READONLY) && p->writer.movedReadOnly ){
     p->memoryOnly = 1;
+    rc = SQLITE_OK;
   }
   if( rc==SQLITE_OK && !p->memoryOnly ){
     rc = chunkStoreForceRefresh(&p->writer);
