@@ -98,6 +98,7 @@ static void test_busy_code(const char *zBase, const char *zWork){
     "SELECT dolt_tag('-d','v1')",
     "SELECT dolt_reset('--hard')",
     "SELECT dolt_clean()",
+    "SELECT dolt_gc()",
     0
   };
   sqlite3 *db = 0;
@@ -410,6 +411,131 @@ static void test_ref_busy_handler(const char *zPath){
   remove(zPath);
 }
 
+/* A lock dolt_gc cannot take is retryable, including gc inside the caller's
+** own write transaction. */
+static void test_gc_busy(const char *zPath){
+  sqlite3 *db = 0;
+  sqlite3 *peer = 0;
+  char *zErr = 0;
+  int rc;
+
+  remove(zPath);
+  checkRc("gc_busy: open", sqlite3_open(zPath, &db), SQLITE_OK);
+  sqlite3_extended_result_codes(db, 1);
+  checkRc("gc_busy: seed", exec(db, seedSql), SQLITE_OK);
+  checkRc("gc_busy: begin", exec(db, "BEGIN"), SQLITE_OK);
+  rc = sqlite3_exec(db, "SELECT dolt_gc()", 0, 0, &zErr);
+  checkRc("gc_busy: own txn", rc, SQLITE_BUSY);
+  check("gc_busy: own txn says exclusive",
+        zErr && strstr(zErr, "gc requires exclusive access")!=0);
+  sqlite3_free(zErr);
+  zErr = 0;
+  checkRc("gc_busy: rollback", exec(db, "ROLLBACK"), SQLITE_OK);
+
+  checkRc("gc_busy: peer open", sqlite3_open(zPath, &peer), SQLITE_OK);
+  checkRc("gc_busy: peer lock",
+          exec(peer, "BEGIN IMMEDIATE; INSERT INTO t VALUES(50,'peer')"),
+          SQLITE_OK);
+  sqlite3_busy_timeout(db, 20);
+  rc = sqlite3_exec(db, "SELECT dolt_gc()", 0, 0, &zErr);
+  checkRc("gc_busy: peer holds lock", rc, SQLITE_BUSY);
+  check("gc_busy: peer lock names the lock",
+        zErr && strstr(zErr, "failed to acquire lock for gc")!=0);
+  sqlite3_free(zErr);
+  sqlite3_close(db);
+  sqlite3_close(peer);
+  remove(zPath);
+}
+
+/* A clean session that read before a peer commit must cherry-pick that
+** peer's tip, not report the peer commit as local uncommitted changes. */
+static void test_stale_cherry_pick(const char *zPath){
+  static const char *zSetup =
+    "CREATE TABLE t(id INTEGER PRIMARY KEY);"
+    "CREATE TABLE u(x INTEGER PRIMARY KEY);"
+    "INSERT INTO t VALUES(1);"
+    "SELECT dolt_commit('-Am','init');"
+    "SELECT dolt_branch('f');"
+    "SELECT dolt_checkout('f');"
+    "INSERT INTO u VALUES(9);"
+    "SELECT dolt_commit('-am','f1');"
+    "SELECT dolt_checkout('main');";
+  sqlite3 *db = 0;
+  sqlite3 *peer = 0;
+  char *zErr = 0;
+  int rc;
+
+  remove(zPath);
+  checkRc("stale_pick: open", sqlite3_open(zPath, &db), SQLITE_OK);
+  sqlite3_extended_result_codes(db, 1);
+  checkRc("stale_pick: seed", exec(db, zSetup), SQLITE_OK);
+  checkRc("stale_pick: read", exec(db, "SELECT count(*) FROM t"), SQLITE_OK);
+  checkRc("stale_pick: peer open", sqlite3_open(zPath, &peer), SQLITE_OK);
+  checkRc("stale_pick: peer commit",
+          exec(peer, "INSERT INTO t VALUES(900);"
+                     "SELECT dolt_commit('-am','peer')"), SQLITE_OK);
+  sqlite3_close(peer);
+  rc = sqlite3_exec(db, "SELECT dolt_cherry_pick('f')", 0, 0, &zErr);
+  checkRc("stale_pick: cherry-pick", rc, SQLITE_OK);
+  check("stale_pick: not a false dirty tree",
+        zErr==0 || strstr(zErr, "uncommitted changes")==0);
+  sqlite3_free(zErr);
+  zErr = 0;
+  check("stale_pick: picked row", scalarInt(db, "SELECT x FROM u")==9);
+  check("stale_pick: peer row kept", scalarInt(db, "SELECT count(*) FROM t")==2);
+
+  checkRc("stale_pick: local edit",
+          exec(db, "INSERT INTO t VALUES(3)"), SQLITE_OK);
+  rc = sqlite3_exec(db, "SELECT dolt_cherry_pick('HEAD')", 0, 0, &zErr);
+  checkRc("stale_pick: real dirt stays an error", rc, SQLITE_ERROR);
+  check("stale_pick: real dirt names uncommitted changes",
+        zErr && strstr(zErr, "uncommitted changes")!=0);
+  sqlite3_free(zErr);
+  sqlite3_close(db);
+  remove(zPath);
+}
+
+/* The retry message is SQLITE_BUSY, including merge, cherry-pick and revert. */
+static void test_peer_branch_busy_code(const char *zPath){
+  static const char *zSetup =
+    "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);"
+    "INSERT INTO t VALUES(1,'a');"
+    "SELECT dolt_commit('-Am','init');"
+    "SELECT dolt_branch('f');"
+    "SELECT dolt_checkout('f');"
+    "INSERT INTO t VALUES(2,'f');"
+    "SELECT dolt_commit('-am','f1');"
+    "SELECT dolt_checkout('main');"
+    "UPDATE t SET v='m' WHERE id=1;"
+    "SELECT dolt_commit('-am','m1');";
+  static const char *azSql[] = {
+    "SELECT dolt_merge('f')",
+    "SELECT dolt_cherry_pick('f')",
+    "SELECT dolt_revert('HEAD')",
+    0
+  };
+  int i;
+
+  for(i=0; azSql[i]; i++){
+    sqlite3 *db = 0;
+    char *zErr = 0;
+    int rc;
+    remove(zPath);
+    checkRc("peer_busy: open", sqlite3_open(zPath, &db), SQLITE_OK);
+    sqlite3_extended_result_codes(db, 1);
+    checkRc("peer_busy: seed", exec(db, zSetup), SQLITE_OK);
+    doltliteTestFailNextHeadConfirm();
+    rc = sqlite3_exec(db, azSql[i], 0, 0, &zErr);
+    checkRc(azSql[i], rc, SQLITE_BUSY);
+    check("peer_busy: asks for a retry",
+          zErr && strstr(zErr, "another connection committed")!=0);
+    sqlite3_free(zErr);
+    doltliteTestClearFaults();
+    sqlite3_close(db);
+  }
+  remove(zPath);
+}
+
 int main(void){
   char zPath[256];
   char zBase[256];
@@ -422,6 +548,9 @@ int main(void){
 
   test_readonly_code(zPath);
   test_busy_code(zBase, zWork);
+  test_gc_busy(zPath);
+  test_stale_cherry_pick(zPath);
+  test_peer_branch_busy_code(zPath);
   test_no_internal_code_escapes(zPath);
   test_commit_busy(zPath);
   test_ref_busy_handler(zPath);

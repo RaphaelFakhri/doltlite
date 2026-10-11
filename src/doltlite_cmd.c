@@ -697,6 +697,9 @@ void doltliteCmdResultPeerBranchBusy(sqlite3_context *ctx, const char *zOp){
   if( zErr ){
     sqlite3_result_error(ctx, zErr, -1);
     sqlite3_free(zErr);
+    /* The message says to retry. A bare sqlite3_result_error is rc=1, which
+    ** a BUSY retry loop treats as a hard failure. */
+    sqlite3_result_error_code(ctx, SQLITE_BUSY);
   }else{
     sqlite3_result_error_nomem(ctx);
   }
