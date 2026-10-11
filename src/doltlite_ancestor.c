@@ -376,12 +376,14 @@ static void doltMergeBaseFunc(
 
   rc = doltliteResolveRef(db,zRef1, &hash1);
   if( rc!=SQLITE_OK ){
-    sqlite3_result_error(ctx, "could not resolve first argument to a commit", -1);
+    doltliteLookupResultError(ctx, rc,
+        "could not resolve first argument to a commit");
     return;
   }
   rc = doltliteResolveRef(db,zRef2, &hash2);
   if( rc!=SQLITE_OK ){
-    sqlite3_result_error(ctx, "could not resolve second argument to a commit", -1);
+    doltliteLookupResultError(ctx, rc,
+        "could not resolve second argument to a commit");
     return;
   }
 
@@ -396,7 +398,7 @@ static void doltMergeBaseFunc(
       sqlite3_result_null(ctx);
     }
   }else{
-    sqlite3_result_error(ctx, "error finding common ancestor", -1);
+    doltliteVcResultErrorCode(ctx, db, "error finding common ancestor", rc);
   }
 }
 

@@ -94,7 +94,7 @@ static void doltliteHashofFunc(sqlite3_context *ctx, int argc, sqlite3_value **a
     return;
   }
   if( rc!=SQLITE_OK ){
-    sqlite3_result_error(ctx, "dolt_hashof: invalid ancestor spec", -1);
+    doltliteLookupResultError(ctx, rc, "dolt_hashof: invalid ancestor spec");
     return;
   }
   doltliteHashToHex(&commitHash, hex);
@@ -880,13 +880,13 @@ static int hashofResolveRefCatalog(
   }
   if( rc!=SQLITE_OK ){
     sqlite3_snprintf(sizeof(zErr), zErr, "%s: invalid ancestor spec", zFn);
-    sqlite3_result_error(ctx, zErr, -1);
+    doltliteLookupResultError(ctx, rc, zErr);
     return 1;
   }
   rc = doltliteCommitCatalogHash(db, &commitHash, pCatHash);
   if( rc!=SQLITE_OK ){
     sqlite3_snprintf(sizeof(zErr), zErr, "%s: commit load failed", zFn);
-    sqlite3_result_error(ctx, zErr, -1);
+    doltliteVcResultErrorCode(ctx, db, zErr, rc);
     return 1;
   }
   return 0;

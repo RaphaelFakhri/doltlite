@@ -455,7 +455,7 @@ static int addStageAllTables(
                                        &aWorking, &nWorking,
                                        &aStaged, &nStaged);
   if( rc!=SQLITE_OK ){
-    sqlite3_result_error(context, "failed to load staged catalog", -1);
+    doltliteVcResultErrorCode(context, db, "failed to load staged catalog", rc);
     return rc;
   }
   rc = addNameIndexInit(&stagedIdx, aStaged, nStaged);
@@ -816,7 +816,7 @@ int doltliteStageNamedTables(
                                        &aWorking, &nWorking,
                                        &aStaged, &nStaged);
   if( rc!=SQLITE_OK ){
-    sqlite3_result_error(context, "failed to load staged catalog", -1);
+    doltliteVcResultErrorCode(context, db, "failed to load staged catalog", rc);
     return rc;
   }
 
@@ -859,7 +859,7 @@ int doltliteStageNamedTables(
     }
     if( rc!=SQLITE_OK ){
       ADDNAMED_FREE_ALL();
-      sqlite3_result_error(context, "failed to load schema for staging", -1);
+      doltliteVcResultErrorCode(context, db, "failed to load schema for staging", rc);
       return rc;
     }
   }

@@ -10268,6 +10268,71 @@ static void run_open_reader_across_catalog_swap(void){
   removeDbFiles(dbpath);
 }
 
+static void run_vc_read_error_keeps_ioerr(void){
+  static const char *azOps[] = {
+    "SELECT dolt_reset('--hard','HEAD~1')",
+    "SELECT dolt_reset('--soft','HEAD~1')",
+    "SELECT dolt_reset('--hard')",
+    "SELECT dolt_branch('-f','feat','main')",
+    "SELECT dolt_branch('nb','main')",
+    "SELECT dolt_tag('v9','HEAD~1')",
+    "SELECT dolt_commit('-am','c3')",
+    "SELECT dolt_commit('--amend','-m','c3')",
+    "SELECT dolt_merge('feat')",
+    "SELECT dolt_hashof('HEAD~1')",
+    "SELECT dolt_merge_base('main','feat')",
+    "SELECT dolt_checkout('feat'); SELECT dolt_rebase('main')",
+    0
+  };
+  char dbpath[512];
+  int op, nth;
+
+  check("vc_read_ioerr_register", registerFailVfs()==SQLITE_OK);
+  gFailNoFetch = 1;
+  make_dbpath(dbpath, sizeof(dbpath), "vc_read_ioerr");
+  for(op=0; azOps[op]; op++){
+    for(nth=1; nth<400; nth++){
+      sqlite3 *db = 0;
+      int rc, ext, hits;
+      removeDbFiles(dbpath);
+      check("vc_read_ioerr_open", open_db(dbpath, &db)==SQLITE_OK);
+      if( !db ) break;
+      execSql(db,
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);"
+        "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x<300)"
+        " INSERT INTO t SELECT x, hex(zeroblob(40)) FROM c;"
+        "CREATE TABLE u(x); INSERT INTO u VALUES(1);"
+        "SELECT dolt_commit('-Am','init');"
+        "SELECT dolt_checkout('-b','feat');"
+        "INSERT INTO t VALUES(1001,'f'); SELECT dolt_commit('-am','feat1');"
+        "SELECT dolt_checkout('main');"
+        "UPDATE t SET v='m' WHERE id=5; SELECT dolt_commit('-am','main2');"
+        "UPDATE u SET x=2;");
+      sqlite3_close(db);
+      db = 0;
+      check("vc_read_ioerr_open", open_fail_db(dbpath, &db)==SQLITE_OK);
+      if( !db ) break;
+      sqlite3_extended_result_codes(db, 1);
+      queryScalarText(db, "SELECT count(*) FROM t");
+      gFailHits = 0;
+      gFailReadNth = nth;
+      rc = execSqlSilent(db, azOps[op]);
+      hits = gFailHits;
+      gFailReadNth = 0;
+      ext = sqlite3_extended_errcode(db);
+      if( rc!=SQLITE_OK && (ext&0xff)!=SQLITE_IOERR ){
+        printf("op=%d nth=%d ext=%d %s\n", op, nth, ext, sqlite3_errmsg(db));
+      }
+      check("vc_read_ioerr_reports_ioerr",
+            rc==SQLITE_OK || (ext&0xff)==SQLITE_IOERR);
+      sqlite3_close(db);
+      if( hits==0 ) break;
+    }
+  }
+  gFailNoFetch = 0;
+  removeDbFiles(dbpath);
+}
+
 static void run_vc_late_io_failure(void){
   const char *azOps[] = {
     "SELECT dolt_reset('--hard')",
@@ -17187,6 +17252,8 @@ static const RegressionCase aCases[] = {
   { "commit_publication", "Commit Publication Test", run_commit_publication },
   { "vc_interrupt", "VC Interrupt Test", run_vc_interrupt },
   { "vc_late_io_failure", "VC Late IO Failure Test", run_vc_late_io_failure },
+  { "vc_read_error_keeps_ioerr", "VC Read Error Keeps IOERR Test",
+    run_vc_read_error_keeps_ioerr },
   { "open_reader_across_catalog_swap", "Open Reader Across Catalog Swap Test",
     run_open_reader_across_catalog_swap },
   { "commit_stage_read_failure", "Commit Stage Read Failure Test",

@@ -1557,7 +1557,8 @@ int doltliteMergeRef(
   rc = doltliteResolveRef(db, zBranch, &theirHead);
   if( rc!=SQLITE_OK || prollyHashIsEmpty(&theirHead) ){
     return mergeRefAbortAfterWriteTxn(db, context,
-        "merge source not found", rc);
+        doltliteLookupRcIsStoreError(rc) ? sqlite3_errstr(rc)
+                                         : "merge source not found", rc);
   }
 
   if( prollyHashCompare(&ourHead, &theirHead)==0 ){

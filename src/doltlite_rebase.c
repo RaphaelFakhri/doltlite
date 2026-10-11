@@ -636,12 +636,12 @@ static int doltliteRebaseLinearReplay(
   rc = doltliteResolveRef(db, zUpstream, &upstreamHash);
   if( rc!=SQLITE_OK ){
     char *zErr = sqlite3_mprintf("branch not found: %s", zUpstream);
-    sqlite3_result_error(context, zErr ? zErr : "branch not found", -1);
+    doltliteLookupResultError(context, rc, zErr ? zErr : "branch not found");
     sqlite3_free(zErr);
     sqlite3_free(zOrig);
     sqlite3_free(zWorking);
     if( sealTopLevel ) (void)doltliteVcSealTopLevelSavepointTxn(db);
-    return SQLITE_ERROR;
+    return doltliteLookupRcIsStoreError(rc) ? rc : SQLITE_ERROR;
   }
 
   doltliteGetSessionHead(db, &headHash);
@@ -2094,7 +2094,7 @@ static void doltliteRebaseInteractiveStart(
   rc = doltliteResolveRef(db, zUpstream, &upstreamHash);
   if( rc!=SQLITE_OK ){
     char *zErr = sqlite3_mprintf("branch not found: %s", zUpstream);
-    sqlite3_result_error(context, zErr ? zErr : "branch not found", -1);
+    doltliteLookupResultError(context, rc, zErr ? zErr : "branch not found");
     sqlite3_free(zErr);
     return;
   }

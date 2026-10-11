@@ -596,6 +596,25 @@ static SQLITE_INLINE void doltliteRefResultError(
   }
 }
 
+/* A failed lookup is "not found" only when the store answered; an I/O or
+** memory failure must surface as itself. */
+static SQLITE_INLINE int doltliteLookupRcIsStoreError(int rc){
+  return rc!=SQLITE_OK && rc!=SQLITE_ERROR && rc!=SQLITE_NOTFOUND;
+}
+
+static SQLITE_INLINE void doltliteLookupResultError(
+  sqlite3_context *ctx,
+  int rc,
+  const char *zNotFound
+){
+  if( doltliteLookupRcIsStoreError(rc) ){
+    sqlite3_result_error(ctx, sqlite3_errstr(rc), -1);
+    sqlite3_result_error_code(ctx, rc);
+  }else{
+    sqlite3_result_error(ctx, zNotFound, -1);
+  }
+}
+
 static SQLITE_INLINE int doltliteVtabDisconnect(sqlite3_vtab *pVtab){
   sqlite3_free(pVtab);
   return SQLITE_OK;
