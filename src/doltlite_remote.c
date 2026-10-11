@@ -2234,11 +2234,37 @@ lazy_clone_done:
   return rc;
 }
 
+/* The checkout branch has to be in the refs about to be committed. A miss
+** is a failed clone and must not land on disk. */
+static int cloneCheckoutBranchMissing(
+  ChunkStore *pLocal,
+  const char *zKeep
+){
+  const char *zNeed;
+  ProllyHash commitHash;
+  int nBr;
+  const BranchRef *aBr;
+
+  nBr = 0;
+  aBr = 0;
+  zNeed = zKeep ? zKeep : chunkStoreGetDefaultBranch(pLocal);
+  if( !zNeed ){
+    refsTableGetBranches(&pLocal->refs, &nBr, &aBr);
+    if( nBr>0 ) zNeed = aBr[0].zName;
+  }
+  if( !zNeed ) return 1;
+  memset(&commitHash, 0, sizeof(commitHash));
+  if( chunkStoreFindBranch(pLocal, zNeed, &commitHash)!=SQLITE_OK ) return 1;
+  if( prollyHashIsEmpty(&commitHash) ) return 1;
+  return 0;
+}
+
 int doltliteClone(
   ChunkStore *pLocal,
   DoltliteRemote *pRemote,
   const char *zUrl,
-  const char *zKeepBranch
+  const char *zKeepBranch,
+  int *pbMissingBranch
 ){
   u8 *refsData = 0;
   int nRefsData = 0;
@@ -2258,8 +2284,10 @@ int doltliteClone(
          sizeof(ProllyHash));
   memset(&savedRefs, 0, sizeof(savedRefs));
   oldRefsStale = pLocal->bRefsStale;
+  if( pbMissingBranch ) *pbMissingBranch = 0;
   if( !zUrl ) return SQLITE_MISUSE;
 
+  doltliteTestRunBeforeCloneRefsHook();
   rc = pRemote->xGetRefs(pRemote, &refsData, &nRefsData);
   if( rc!=SQLITE_OK ) return rc;
 
@@ -2336,6 +2364,12 @@ int doltliteClone(
       rc = chunkStoreSerializeRefs(pLocal);
     }
     if( rc!=SQLITE_OK ) goto clone_restore_refs;
+  }
+
+  if( cloneCheckoutBranchMissing(pLocal, zKeepBranch) ){
+    if( pbMissingBranch ) *pbMissingBranch = 1;
+    rc = SQLITE_ERROR;
+    goto clone_restore_refs;
   }
 
   rc = chunkStoreCommit(pLocal);

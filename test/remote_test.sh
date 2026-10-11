@@ -2061,6 +2061,32 @@ check_match "a revision that does not resolve is not found" \
 result=$("$DB" "$DIV/src.db" "SELECT count(*) FROM dolt_remote_branches WHERE name='remotes/origin/nowhere';")
 check "an unresolved push source creates no remote branch" "0" "$result"
 
+echo "=== Clone of a tag-only remote installs nothing ==="
+TG="$TMPDIR/tagonly"
+mkdir -p "$TG"
+"$DB" "$TG/src.db" <<ENDSQL >/dev/null
+CREATE TABLE t(id INT PRIMARY KEY);
+INSERT INTO t VALUES(1);
+SELECT dolt_commit('-Am','c1');
+SELECT dolt_remote('add','origin','file://$TG/remote.db');
+SELECT dolt_tag('v1');
+SELECT dolt_push('origin','v1');
+ENDSQL
+result=$("$DB" "$TG/c.db" "SELECT dolt_clone('file://$TG/remote.db');" 2>&1)
+check_match "tag-only clone reports the missing default branch" \
+  "default branch missing from cloned refs" "$result"
+result=$("$DB" "$TG/c.db" \
+  "SELECT count(*) FROM dolt_tags; SELECT count(*) FROM dolt_remotes; SELECT count(*) FROM sqlite_master WHERE name='t';")
+check "tag-only clone leaves no tag, remote, or table" "0
+0
+0" "$result"
+"$DB" "$TG/src.db" "SELECT dolt_push('origin','main');" >/dev/null
+result=$("$DB" "$TG/c.db" "SELECT dolt_clone('file://$TG/remote.db');")
+check "clone succeeds in the database a tag-only clone refused" "0" "$result"
+result=$("$DB" "$TG/c.db" "SELECT id FROM t; SELECT count(*) FROM dolt_tags;")
+check "retried clone has the row and the tag" "1
+1" "$result"
+
 echo ""
 echo "======================================="
 echo "Results: $pass passed, $fail failed"

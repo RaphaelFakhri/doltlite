@@ -1886,6 +1886,8 @@ void doltliteTestCrashFinalize(const char *zOperation);
 void doltliteTestFailNextVcSeal(void);
 void doltliteTestSetBeforeRefInstallHook(void (*xHook)(void*), void *pArg);
 void doltliteTestRunBeforeRefInstallHook(void);
+void doltliteTestSetBeforeCloneRefsHook(void (*xHook)(void*), void *pArg);
+void doltliteTestRunBeforeCloneRefsHook(void);
 void doltliteTestFailNextHeadConfirm(void);
 void doltliteTestFailNextRestore(void);
 void doltliteTestFailNextCreateCommit(void);

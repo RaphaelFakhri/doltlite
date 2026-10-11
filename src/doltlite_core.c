@@ -94,6 +94,24 @@ void doltliteTestRunBeforeRefInstallHook(void){
   }
 }
 
+static void (*xTestBeforeCloneRefs)(void*) = 0;
+static void *pTestBeforeCloneRefsArg = 0;
+
+/* One-shot hook before clone reads the remote refs. A test deletes a branch
+** here, after the caller's existence check and before that read. */
+void doltliteTestSetBeforeCloneRefsHook(void (*xHook)(void*), void *pArg){
+  xTestBeforeCloneRefs = xHook;
+  pTestBeforeCloneRefsArg = pArg;
+}
+
+void doltliteTestRunBeforeCloneRefsHook(void){
+  void (*xHook)(void*) = xTestBeforeCloneRefs;
+  if( xHook ){
+    xTestBeforeCloneRefs = 0;
+    xHook(pTestBeforeCloneRefsArg);
+  }
+}
+
 void doltliteTxnStateClear(DoltliteTxnState *p){
   assert( p!=0 );
   sqlite3_free(p->zSessionBranch);
