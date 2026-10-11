@@ -585,6 +585,18 @@ int doltliteCmdRejectReadOnly(sqlite3_context *ctx){
   return 1;
 }
 
+/* A command that replaces the session catalog frees the table entries an
+** enclosing write statement's cursors still use. */
+int doltliteCmdRejectInWriteStatement(sqlite3_context *ctx, const char *zVerb){
+  sqlite3 *db = sqlite3_context_db_handle(ctx);
+  char *zErr;
+  if( db->nVdbeWrite<=0 ) return 0;
+  zErr = sqlite3_mprintf("cannot %s while a write statement is active", zVerb);
+  doltliteVcResultError(ctx, db, zErr ? zErr : "write statement is active");
+  sqlite3_free(zErr);
+  return 1;
+}
+
 static void doltliteCmdResultUnknownOption(sqlite3_context *ctx, const char *zOpt){
   char *zErr = sqlite3_mprintf("unknown option `%s`", zOpt ? zOpt : "");
   if( zErr ){

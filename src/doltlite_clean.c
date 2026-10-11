@@ -231,6 +231,7 @@ static void doltliteCleanFunc(
   int rc;
   int bBegan = 0;
 
+  if( doltliteCmdRejectInWriteStatement(context, "clean") ) return;
   memset(&args, 0, sizeof(args));
   memset(&staged, 0, sizeof(staged));
   memset(&selected, 0, sizeof(selected));

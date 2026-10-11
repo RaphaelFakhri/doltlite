@@ -149,6 +149,7 @@ static void doltliteRevertFunc(
   char *zApplyErr = 0;
   char hexBuf[PROLLY_HASH_SIZE*2+1];
 
+  if( doltliteCmdRejectInWriteStatement(context, "revert") ) return;
   memset(&revertCommit, 0, sizeof(revertCommit));
   memset(&parentCommit, 0, sizeof(parentCommit));
   memset(&ourCommit, 0, sizeof(ourCommit));
