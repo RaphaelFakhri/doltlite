@@ -1,0 +1,185 @@
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+
+proc ref_gc_busy {attempt} {
+  incr ::refGcBusyCalls
+  if {$attempt>0} {return 1}
+  peer eval {ROLLBACK}
+  peer eval $::refGcSql
+  return 0
+}
+
+foreach maintenance {gc vacuum} {
+  foreach scenario {main dev deleted} {
+    foreach timing {before wait} {
+      foreach operation {tag branch force} {
+        foreach target {default head lower zero named ancestor raw other} {
+          set prefix ref-peer-gc-$maintenance.$scenario.$timing.$operation.$target
+          reset_db
+          db eval {
+            CREATE TABLE t(id INTEGER PRIMARY KEY,v TEXT);
+            CREATE INDEX tv ON t(v);
+            INSERT INTO t VALUES(1,'a');
+            SELECT dolt_commit('-Am','c1');
+          }
+          set base [db one {SELECT dolt_hashof('HEAD')}]
+          set initial [db one {SELECT dolt_hashof('HEAD~1')}]
+          set sessionBranch main
+          if {$scenario ne "main"} {
+            db eval {SELECT dolt_branch('dev'); SELECT dolt_checkout('dev')}
+            set sessionBranch dev
+          }
+          db eval {UPDATE t SET v='b'; SELECT dolt_commit('-am','c2')}
+          set stale [db one {SELECT dolt_hashof('HEAD')}]
+          if {$operation eq "force"} {
+            db eval "SELECT dolt_branch('target','$base')"
+          }
+          if {$scenario eq "deleted"} {
+            sqlite3 peer test.db/main
+            set refGcSql {SELECT dolt_branch('-D','dev');}
+          } else {
+            sqlite3 peer test.db/$sessionBranch
+            set refGcSql {SELECT dolt_reset('--hard','HEAD~1');}
+          }
+          append refGcSql "INSERT INTO t VALUES(99,'peer working');"
+          if {$maintenance eq "gc"} {
+            append refGcSql {SELECT dolt_gc();}
+          } else {
+            append refGcSql {VACUUM;}
+          }
+          set args {}
+          switch $target {
+            head {set args ",'HEAD'"}
+            lower {set args ",'hEaD'"}
+            zero {set args ",'HEAD~0'"}
+            named {set args ",'$sessionBranch'"}
+            ancestor {set args ",'HEAD~1'"}
+            raw {set args ",'$stale'"}
+            other {set args ",'main'"}
+          }
+          switch $operation {
+            tag {set sql "SELECT dolt_tag('target'$args)"}
+            branch {set sql "SELECT dolt_branch('target'$args)"}
+            force {set sql "SELECT dolt_branch('-f','target'$args)"}
+          }
+          set refused [expr {$target eq "raw"
+            || ($scenario eq "deleted" && $target ne "other")}]
+          set expected $base
+          if {$target eq "ancestor" && !$refused} {set expected $initial}
+          if {$refused && $operation ne "force"} {set expected {}}
+          set refGcBusyCalls 0
+          if {$timing eq "wait"} {
+            peer eval {BEGIN IMMEDIATE; INSERT INTO t VALUES(98,'rolled back')}
+            db busy ref_gc_busy
+          } else {
+            peer eval $refGcSql
+          }
+          do_test $prefix.operation {
+            set failed [catch {db eval $sql} message]
+            set failed
+          } $refused
+          db busy {}
+          if {$timing eq "wait"} {
+            do_test $prefix.waited {set refGcBusyCalls} 1
+          }
+          do_test $prefix.collected {
+            catch {peer eval "SELECT count(*) FROM dolt_log('$stale')"}
+          } 1
+          sqlite3 observer test.db/main
+          if {$operation eq "tag"} {
+            set query {SELECT tag_hash FROM dolt_tags WHERE tag_name='target'}
+          } else {
+            set query {SELECT hash FROM dolt_branches WHERE name='target'}
+          }
+          do_test $prefix.target {observer one $query} $expected
+          do_test $prefix.peer-kept {
+            list [peer eval {SELECT id,v FROM t INDEXED BY tv ORDER BY id}] \
+                 [peer one {PRAGMA integrity_check}] \
+                 [observer one {PRAGMA integrity_check}]
+          } {{1 a 99 {peer working}} ok ok}
+          if {$expected ne {}} {
+            do_test $prefix.qualified-open {
+              set failed [catch {sqlite3 qualified test.db@target} message]
+              if {$failed} {set message} else {
+                set hash [qualified one {SELECT dolt_hashof('HEAD')}]
+                qualified close
+                expr {$hash eq $expected}
+              }
+            } 1
+          }
+          do_test $prefix.recover {
+            db close
+            sqlite3 db test.db/main
+            db eval {INSERT INTO t VALUES(100,'next write')}
+            list [db one {SELECT v FROM t WHERE id=100}] \
+                 [observer one {PRAGMA integrity_check}]
+          } {{next write} ok}
+          if {$scenario eq "deleted"} {
+            do_test $prefix.no-resurrection {
+              observer one {SELECT count(*) FROM dolt_branches WHERE name='dev'}
+            } 0
+          }
+          observer close
+          peer close
+          db close
+          sqlite3 db test.db/main
+          do_test $prefix.reopen {
+            list [db one {PRAGMA integrity_check}] [db one $query]
+          } [list ok $expected]
+        }
+      }
+    }
+  }
+}
+
+foreach txn {begin savepoint} {
+  foreach operation {tag branch force} {
+    foreach target {default head ancestor} {
+      set prefix ref-peer-gc-snapshot-$txn.$operation.$target
+      reset_db
+      db eval {
+        CREATE TABLE t(id INTEGER PRIMARY KEY,v TEXT);
+        INSERT INTO t VALUES(1,'a');
+        SELECT dolt_commit('-Am','c1');
+        SELECT dolt_branch('target');
+        UPDATE t SET v='b';
+        SELECT dolt_commit('-am','c2');
+      }
+      set head [db one {SELECT dolt_hashof('HEAD')}]
+      set parent [db one {SELECT dolt_hashof('HEAD~1')}]
+      if {$txn eq "begin"} {db eval {BEGIN}} else {db eval {SAVEPOINT s}}
+      db eval {SELECT * FROM t}
+      sqlite3 peer test.db
+      peer eval {
+        UPDATE t SET v='peer';
+        SELECT dolt_commit('-am','c3');
+        SELECT dolt_gc();
+      }
+      set args {}
+      if {$target eq "head"} {set args ",'HEAD'"}
+      if {$target eq "ancestor"} {set args ",'HEAD~1'"}
+      switch $operation {
+        tag {set sql "SELECT dolt_tag('snapshot'$args)"}
+        branch {set sql "SELECT dolt_branch('snapshot'$args)"}
+        force {set sql "SELECT dolt_branch('-f','target'$args)"}
+      }
+      do_test $prefix.operation {db eval $sql} 0
+      if {$operation eq "tag"} {
+        set query {SELECT tag_hash FROM dolt_tags WHERE tag_name='snapshot'}
+      } elseif {$operation eq "branch"} {
+        set query {SELECT hash FROM dolt_branches WHERE name='snapshot'}
+      } else {
+        set query {SELECT hash FROM dolt_branches WHERE name='target'}
+      }
+      do_test $prefix.target {peer one $query} \
+        [expr {$target eq "ancestor" ? $parent : $head}]
+      catch {db eval {ROLLBACK}}
+      do_test $prefix.peer-kept {
+        list [peer one {SELECT v FROM t}] [peer one {PRAGMA integrity_check}]
+      } {peer ok}
+      peer close
+    }
+  }
+}
+
+finish_test

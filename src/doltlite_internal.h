@@ -1654,6 +1654,9 @@ int doltliteSaveTxnState(sqlite3 *db, DoltliteTxnState *p);
 int doltliteRestoreTxnState(sqlite3 *db, DoltliteTxnState *p);
 
 int doltliteResolveRef(sqlite3 *db, const char *zRef, ProllyHash *pCommit);
+int doltliteResolveRefForMutation(
+  sqlite3 *db, const char *zRef, ProllyHash *pCommit
+);
 int doltliteUserRefNameIsValid(const char *zName);
 
 typedef struct DoltliteCommit DoltliteCommit;
