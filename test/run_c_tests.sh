@@ -33,6 +33,7 @@ COVERAGE_TESTS=(
   count_range_override_test
   vc_cas_swallow_test
   remote_push_lock_busy_test
+  fetch_tracking_order_test
   record_info_stack_test
   prolly_cache_budget_test
   prolly_hashset_test
