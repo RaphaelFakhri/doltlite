@@ -458,6 +458,13 @@ static int csCommitToFile(ChunkStore *cs, int (*xBusy)(void*), void *pBusyArg){
     }
     publicationLocked = 1;
     pPublicationFile = cs->file.pFile;
+    /* Publication is serialized on the database file itself. A writer whose
+    ** sidecar was deleted under it may share the graph lock with a peer
+    ** that already appended past the size it planned against. */
+    if( csFileLockStale(lockHeld ? CS_GRAPH_LOCK(cs) : lockFd) ){
+      rc = SQLITE_BUSY;
+      goto commit_done;
+    }
   }
 
 #ifdef SQLITE_TEST

@@ -57,6 +57,16 @@ static int csFileRelock(sqlite3_file *pFile){
   return rc;
 }
 
+/* The graph lock is only as good as the sidecar inode: once the path names
+** a different file (deleted, replaced), a peer locking that file is not
+** excluded by ours. */
+int csFileLockStale(sqlite3_file *pFile){
+  int bMoved = 0;
+  if( !pFile ) return 0;
+  sqlite3OsFileControlHint(pFile, SQLITE_FCNTL_HAS_MOVED, &bMoved);
+  return bMoved;
+}
+
 static char *csLockPath(const char *path){
   const char *zBase = strrchr(path, '/');
   int nDir = 0;
@@ -118,6 +128,7 @@ int csFileLock(sqlite3_vfs *pVfs, const char *path,
   sqlite3_file *pFile = 0;
   int flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
             | SQLITE_OPEN_MAIN_DB;
+  int nRetry = 0;
   int rc;
 
   *ppFile = 0;
@@ -127,6 +138,7 @@ int csFileLock(sqlite3_vfs *pVfs, const char *path,
   rc = chunkStoreDupFilenameDoubleNul(zRaw, &zLock);
   sqlite3_free(zRaw);
   if( rc!=SQLITE_OK ) return rc;
+relock:
   rc = sqlite3OsOpenMalloc(pVfs, zLock, &pFile, flags, 0);
   if( rc!=SQLITE_OK ){
     int exists = 0;
@@ -146,6 +158,12 @@ int csFileLock(sqlite3_vfs *pVfs, const char *path,
     sqlite3OsCloseFree(pFile);
     sqlite3_free(zLock);
     return rc;
+  }
+  if( csFileLockStale(pFile) && nRetry++<3 ){
+    sqlite3OsUnlock(pFile, SQLITE_LOCK_NONE);
+    sqlite3OsCloseFree(pFile);
+    pFile = 0;
+    goto relock;
   }
   *ppFile = pFile;
   /* unixFile.zPath aliases this buffer until close; caller frees it. */
@@ -235,6 +253,12 @@ static int csLockForReplacementProof(ChunkStore *cs, int *pAcquired){
   }
   if( csFileLockHeld(CS_GRAPH_LOCK(cs)) ){
     rc = csFileRelock(CS_GRAPH_LOCK(cs));
+    if( rc==SQLITE_OK && csFileLockStale(CS_GRAPH_LOCK(cs)) ){
+      csFileUnlock(CS_GRAPH_LOCK(cs), &cs->pGraphLockName);
+      CS_GRAPH_LOCK(cs) = CS_FILE_LOCK_INIT;
+      rc = csFileLockNB(cs->file.pVfs, cs->file.zFilename,
+                        &CS_GRAPH_LOCK(cs), &cs->pGraphLockName);
+    }
   }else{
     rc = csFileLockNB(cs->file.pVfs, cs->file.zFilename,
                       &CS_GRAPH_LOCK(cs), &cs->pGraphLockName);
@@ -443,6 +467,12 @@ int chunkStoreLockAndRefreshChanged(ChunkStore *cs, int *pChanged){
   }
   if( csFileLockHeld(CS_GRAPH_LOCK(cs)) ){
     rc = csFileRelock(CS_GRAPH_LOCK(cs));
+    if( rc==SQLITE_OK && csFileLockStale(CS_GRAPH_LOCK(cs)) ){
+      csFileUnlock(CS_GRAPH_LOCK(cs), &cs->pGraphLockName);
+      CS_GRAPH_LOCK(cs) = CS_FILE_LOCK_INIT;
+      rc = csFileLockNB(cs->file.pVfs, cs->file.zFilename,
+                        &CS_GRAPH_LOCK(cs), &cs->pGraphLockName);
+    }
   }else{
     rc = csFileLockNB(cs->file.pVfs, cs->file.zFilename,
                       &CS_GRAPH_LOCK(cs), &cs->pGraphLockName);

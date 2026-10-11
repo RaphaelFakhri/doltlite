@@ -74,4 +74,19 @@ run_test "s6_healthy_reopen_value" "SELECT v FROM t WHERE id=2;" "b" "$DB"
 
 db_rm "$DB"
 
+DB=/tmp/test_lock_sidecar_unlink_$$.db; db_rm "$DB"
+LOCKF="$(dirname "$DB")/.$(basename "$DB")-lock"
+$DOLTLITE "$DB" "CREATE TABLE t(k INTEGER PRIMARY KEY, v TEXT); SELECT dolt_commit('-Am','x');" > /dev/null 2>&1
+(echo "BEGIN IMMEDIATE; INSERT INTO t VALUES(1,'A');"; sleep 2; echo "COMMIT;") \
+  | $DOLTLITE "$DB" > /dev/null 2>&1 &
+HOLDER=$!
+sleep 0.5
+rm -f "$LOCKF"
+$DOLTLITE "$DB" ".timeout 10000" "INSERT INTO t VALUES(2,'B');" > /dev/null 2>&1
+wait $HOLDER
+run_test "lock_sidecar_unlinked_keeps_store_intact" \
+  "PRAGMA integrity_check; SELECT count(*) FROM t WHERE k=2;" "ok
+1" "$DB"
+db_rm "$DB"; rm -f "$LOCKF"
+
 dltest_finish

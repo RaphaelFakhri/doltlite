@@ -30,6 +30,7 @@ int csReadLock(ChunkStore *cs, CsReadLock *pLock);
 int csReadUnlock(ChunkStore *cs, CsReadLock *pLock);
 int csFileLockPromote(sqlite3_file *pFile);
 void csFileUnlock(sqlite3_file *pFile, char **pzName);
+int csFileLockStale(sqlite3_file *pFile);
 int csReloadFromDiskPreservingLocalRefs(ChunkStore *cs);
 int csRestoreOrMergeLocalRefs(ChunkStore *cs, SavedRefsState *pSaved,
                               const ProllyHash *pSavedRefsHash,
