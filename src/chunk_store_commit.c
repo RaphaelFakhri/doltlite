@@ -711,7 +711,15 @@ int chunkStoreCommitWithBusyHandler(
     if( acquiredLock ) chunkStoreUnlock(cs);
     return SQLITE_READONLY;
   }
-  rc = csCommitToFile(cs, xBusy, pBusyArg);
+  if( cs->file.pFile && cs->wal.nWalData>0
+   && cs->staging.nPending==0 && cs->staging.nRecentUncommitted==0
+   && !cs->bRefsStale
+   && prollyHashCompare(&cs->refs.refsHash,
+                        &cs->refs.committedRefsHash)==0 ){
+    rc = SQLITE_OK;
+  }else{
+    rc = csCommitToFile(cs, xBusy, pBusyArg);
+  }
   if( acquiredLock ) chunkStoreUnlock(cs);
   return rc;
 }

@@ -1,0 +1,123 @@
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+
+db eval {
+  CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);
+  WITH RECURSIVE c(x) AS (
+    SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x<300
+  ) INSERT INTO t SELECT x, printf('v%05d-%s',x,hex(zeroblob(40))) FROM c;
+  CREATE TABLE u(k TEXT PRIMARY KEY, n INT);
+  INSERT INTO u VALUES('a',1),('b',2);
+  CREATE TABLE local(id INTEGER PRIMARY KEY);
+  SELECT dolt_commit('-Am','init');
+  SELECT dolt_checkout('-b','feat');
+  INSERT INTO t VALUES(1001,'f1');
+  UPDATE u SET n=20 WHERE k='b';
+  SELECT dolt_commit('-am','feat1');
+  SELECT dolt_checkout('main');
+  UPDATE t SET v='m' WHERE id=5;
+  SELECT dolt_commit('-am','main2');
+}
+db close
+file copy -force test.db vc-txn-base.db
+
+set armed 0
+proc vc_txn_error {method filename args} {
+  if {$::armed && $method eq $::kind && [file tail $filename] eq "test.db"} {
+    incr ::calls
+    if {$::calls==$::fault} {
+      incr ::hits
+      return SQLITE_IOERR
+    }
+  }
+  return SQLITE_OK
+}
+testvfs vctxnio
+vctxnio filter {xWrite xSync}
+vctxnio script vc_txn_error
+
+set state {
+  SELECT name,sql FROM sqlite_master ORDER BY name;
+  SELECT count(*),md5sum(id,v) FROM t;
+  SELECT k,n FROM u ORDER BY k;
+  SELECT id FROM local ORDER BY id;
+  SELECT message FROM dolt_log ORDER BY message;
+  SELECT name,latest_commit_message FROM dolt_branches ORDER BY name;
+  SELECT table_name,staged,status FROM dolt_status ORDER BY table_name,staged;
+  PRAGMA integrity_check;
+}
+set failed 0
+foreach op {merge reset cherry-pick revert} {
+  switch $op {
+    merge {set sql {SELECT dolt_merge('feat')}}
+    reset {set sql {SELECT dolt_reset('--hard','HEAD~1')}}
+    cherry-pick {set sql {SELECT dolt_cherry_pick('feat')}}
+    revert {set sql {SELECT dolt_revert('HEAD')}}
+  }
+  set dirtyCases {0 1}
+  if {$op eq "cherry-pick"} {set dirtyCases {0}}
+  foreach boundary {begin nested} {
+    foreach dirty $dirtyCases {
+      set start BEGIN
+      if {$dirty} {append start {; INSERT INTO local VALUES(99)}}
+      if {$boundary eq "nested"} {append start {; SAVEPOINT before_vc}}
+      forcedelete test.db
+      file copy -force vc-txn-base.db test.db
+      sqlite3 db test.db
+      set before [db eval $state]
+      db eval $start
+      set sessionBefore [db eval $state]
+      db eval $sql
+      if {![sqlite3_get_autocommit db]} {db eval ROLLBACK}
+      db close
+      sqlite3 db test.db
+      set success [db eval $state]
+      db close
+      foreach kind {xWrite xSync} {
+        for {set fault 1} {$fault<=100} {incr fault} {
+          forcedelete test.db
+          file copy -force vc-txn-base.db test.db
+          sqlite3 db test.db -vfs vctxnio
+          db eval {SELECT * FROM dolt_status}
+          db eval $start
+          set calls 0
+          set hits 0
+          set armed 1
+          set result [catchsql $sql]
+          set armed 0
+          set prefix vc-txn-$op-$boundary-$dirty-$kind-$fault
+          sqlite3 observer test.db -readonly 1
+          if {[lindex $result 0]} {
+            incr failed
+            do_test $prefix.txn {sqlite3_get_autocommit db} 0
+            do_test $prefix.message {
+              expr {[lindex $result 1] ne "" && [lindex $result 1] ne "0"}
+            } 1
+            do_test $prefix.session {catchsql $state} [list 0 $sessionBefore]
+            do_test $prefix.disk {observer eval $state} $before
+            observer close
+            do_test $prefix.retry {lindex [catchsql $sql] 0} 0
+            sqlite3 observer test.db -readonly 1
+          }
+          do_test $prefix.live-success {catchsql $state} [list 0 $success]
+          do_test $prefix.durable-success {observer eval $state} $success
+          observer close
+          if {![sqlite3_get_autocommit db]} {db eval ROLLBACK}
+          db close
+          sqlite3 db test.db
+          do_test $prefix.reopen {db eval $state} $success
+          db close
+          if {$hits==0} break
+        }
+        do_test vc-txn-$op-$boundary-$dirty-$kind-exhausted {
+          expr {$fault<=100}
+        } 1
+      }
+    }
+  }
+}
+do_test vc-txn-errors-exercised {expr {$failed>0}} 1
+vctxnio delete
+forcedelete vc-txn-base.db
+sqlite3 db test.db
+finish_test
