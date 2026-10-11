@@ -104,6 +104,7 @@ doltlite_blame_seek
 doltlite_blame_affinity
 doltlite_blame_columns
 doltlite_merge_transactions
+doltlite_vc_txn_ioerr
 doltlite_reset_schema
 doltlite_cache_budget
 doltlite_merge_schema_relayout

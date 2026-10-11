@@ -143,7 +143,7 @@ static int cherryPickRestoreAndPersist(
   restoreRc = doltliteRestoreTxnStateOnFailure(db, pSaved, opRc);
   /* BUSY means a peer moved the tip or the working set; the disk holds its
   ** write, and persisting the pre-op catalog over it would erase it. */
-  if( restoreRc==opRc && opRc!=SQLITE_BUSY
+  if( db->autoCommit && restoreRc==opRc && opRc!=SQLITE_BUSY
    && !prollyHashIsEmpty(&restoredCat) ){
     int bLocked, bPeerWrote;
     persistRc = doltliteLockForRestore(db, &savedHead, &wsBasis,
