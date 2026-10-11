@@ -236,7 +236,7 @@ struct ChunkStore {
   SequenceRef *aTxnSequences;
   int nTxnSequences;
   u8 bTxnSequences;
-  u8 bRefsStale;          /* OOM cleared refs; reload from refsHash */
+  u8 bRefsStale;          /* Reload refsHash before use */
   /* A refs merge failed and reinstated refs that never reached disk; the
   ** next refresh must reload so the session does not write over the peer. */
   u8 bReloadAfterRefsConflict;
