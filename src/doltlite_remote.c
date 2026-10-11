@@ -1893,12 +1893,16 @@ static int installFetchedRefs(
   const char *zRemoteName,
   const char *zBranch,
   const ProllyHash *pRemoteCommit,
-  int bSkipGraphValidation
+  int bSkipGraphValidation,
+  int bHasSeen,
+  const ProllyHash *pSeenCommit,
+  int *pSettled
 ){
   ChunkStore nextRefs;
   SavedRefsState savedRefs;
   ProllyHash oldRefsHash;
   ProllyHash oldCommittedRefsHash;
+  ProllyHash currentTracking;
   u8 *currentData = 0;
   u8 *nextData = 0;
   int nCurrentData = 0;
@@ -1909,11 +1913,20 @@ static int installFetchedRefs(
   int nRemTag = 0;
   int refsDetached = 0;
   int locked = 0;
+  int updateTracking;
+  int commitRefs;
+  int descends;
+  int ahead;
+  int findRc;
   int i;
   int rc;
 
   memset(&nextRefs, 0, sizeof(nextRefs));
   memset(&savedRefs, 0, sizeof(savedRefs));
+  memset(&currentTracking, 0, sizeof(currentTracking));
+  updateTracking = 0;
+  commitRefs = 0;
+  if( pSettled ) *pSettled = 0;
 
   rc = localLockWithBusy(pRemote, pLocal);
   if( rc==SQLITE_OK ){
@@ -1978,13 +1991,55 @@ static int installFetchedRefs(
     }
   }
   if( rc==SQLITE_OK ){
+    findRc = chunkStoreFindTracking(
+        &nextRefs, zRemoteName, zBranch, &currentTracking);
+    if( findRc==SQLITE_NOTFOUND ){
+      updateTracking = 1;
+      commitRefs = 1;
+      if( pSettled ) *pSettled = 1;
+    }else if( findRc!=SQLITE_OK ){
+      rc = findRc;
+    }else if( prollyHashCompare(&currentTracking, pRemoteCommit)==0
+           || (bHasSeen && pSeenCommit
+               && prollyHashCompare(&currentTracking, pSeenCommit)==0) ){
+      /* Still the commit this fetch observed, or already at the fetched
+      ** tip. A remote reset installs when nobody else moved the ref. */
+      updateTracking = 1;
+      commitRefs = 1;
+      if( pSettled ) *pSettled = 1;
+    }else{
+      descends = 0;
+      rc = syncIsAncestor(
+          pLocal, &currentTracking, pRemoteCommit, &descends, 0);
+      if( rc==SQLITE_NOTFOUND ) rc = SQLITE_OK;
+      if( rc==SQLITE_OK && descends ){
+        updateTracking = 1;
+        commitRefs = 1;
+        if( pSettled ) *pSettled = 1;
+      }else if( rc==SQLITE_OK ){
+        ahead = 0;
+        rc = syncIsAncestor(
+            pLocal, pRemoteCommit, &currentTracking, &ahead, 0);
+        if( rc==SQLITE_NOTFOUND ) rc = SQLITE_OK;
+        if( rc==SQLITE_OK && ahead ){
+          /* The tracking ref moved past this fetch. Do not commit the
+          ** older refs snapshot, or its tags and sequences would follow. */
+          if( pSettled ) *pSettled = 1;
+        }else if( rc==SQLITE_OK ){
+          /* Diverged. The caller re-reads the remote and tries again. */
+          if( pSettled ) *pSettled = 0;
+        }
+      }
+    }
+  }
+  if( rc==SQLITE_OK && updateTracking ){
     rc = chunkStoreUpdateTracking(
         &nextRefs, zRemoteName, zBranch, pRemoteCommit);
   }
-  if( rc==SQLITE_OK ){
+  if( rc==SQLITE_OK && commitRefs ){
     rc = chunkStoreSerializeRefsToBlob(&nextRefs, &nextData, &nNextData);
   }
-  if( rc==SQLITE_OK ){
+  if( rc==SQLITE_OK && commitRefs ){
     memcpy(&oldRefsHash, refsTableGetHash(&pLocal->refs),
            sizeof(oldRefsHash));
     memcpy(&oldCommittedRefsHash, &pLocal->refs.committedRefsHash,
@@ -1993,7 +2048,7 @@ static int installFetchedRefs(
     refsDetached = 1;
     rc = chunkStoreInstallRefsBlob(pLocal, nextData, nNextData);
   }
-  if( rc==SQLITE_OK ) rc = chunkStoreCommit(pLocal);
+  if( rc==SQLITE_OK && commitRefs ) rc = chunkStoreCommit(pLocal);
 
   if( refsDetached ){
     if( rc==SQLITE_OK ){
@@ -2022,7 +2077,9 @@ int doltliteFetch(
   return doltliteFetchInto(pLocal, pRemote, zRemoteName, zBranch, zBranch);
 }
 
-/* Fetch remote branch zBranch into the tracking ref zRemoteName/zTrack. */
+/* Fetch remote branch zBranch into the tracking ref zRemoteName/zTrack.
+** A tracking ref that diverged during the download is re-read. A commit
+** the ref has already moved past is left in place. */
 int doltliteFetchInto(
   ChunkStore *pLocal,
   DoltliteRemote *pRemote,
@@ -2030,87 +2087,99 @@ int doltliteFetchInto(
   const char *zBranch,
   const char *zTrack
 ){
-  u8 *refsData = 0;
-  int nRefsData = 0;
-  ProllyHash remoteCommit;
-  ProllyHash trackingCommit;
-  DoltliteRemote *pLocalDst = 0;
-  ChunkStore remoteRefs;
-  int bLazyOrigin;
+  int attempt;
   int rc;
 
-  memset(&remoteCommit, 0, sizeof(remoteCommit));
-  memset(&trackingCommit, 0, sizeof(trackingCommit));
-  memset(&remoteRefs, 0, sizeof(remoteRefs));
-  bLazyOrigin = chunkStoreOriginSourceEnabled(pLocal)
-             && strcmp(zRemoteName, "origin")==0;
+  rc = SQLITE_OK;
+  for(attempt=0; attempt<8; attempt++){
+    u8 *refsData = 0;
+    int nRefsData = 0;
+    ProllyHash remoteCommit;
+    ProllyHash trackingCommit;
+    DoltliteRemote *pLocalDst = 0;
+    ChunkStore remoteRefs;
+    int bLazyOrigin;
+    int bHasSeen;
+    int settled;
 
-  rc = pRemote->xGetRefs(pRemote, &refsData, &nRefsData);
-  if( rc!=SQLITE_OK ) return rc;
+    memset(&remoteCommit, 0, sizeof(remoteCommit));
+    memset(&trackingCommit, 0, sizeof(trackingCommit));
+    memset(&remoteRefs, 0, sizeof(remoteRefs));
+    bLazyOrigin = chunkStoreOriginSourceEnabled(pLocal)
+               && strcmp(zRemoteName, "origin")==0;
+    bHasSeen = 0;
+    settled = 0;
 
-  rc = chunkStoreLoadRefsFromBlob(&remoteRefs, refsData, nRefsData);
-  sqlite3_free(refsData);
-  if( rc==SQLITE_OK ){
-    rc = chunkStoreFindBranch(&remoteRefs, zBranch, &remoteCommit);
-  }
-  if( rc!=SQLITE_OK ){
-    chunkStoreClose(&remoteRefs);
-    return rc==SQLITE_NOTFOUND ? SQLITE_NOTFOUND : rc;
-  }
+    rc = pRemote->xGetRefs(pRemote, &refsData, &nRefsData);
+    if( rc!=SQLITE_OK ) return rc;
 
-  if( prollyHashIsEmpty(&remoteCommit) ){
-    chunkStoreClose(&remoteRefs);
-    return SQLITE_NOTFOUND;
-  }
-
-  rc = chunkStoreFindTracking(pLocal, zRemoteName, zTrack, &trackingCommit);
-  if( rc==SQLITE_OK ){
-    if( prollyHashCompare(&trackingCommit, &remoteCommit)==0 ){
-      int seqWouldAdvance = 0;
-      int tagWouldInstall = 0;
-      rc = remoteSequencesWouldAdvance(pLocal, &remoteRefs, &seqWouldAdvance);
-      if( rc!=SQLITE_OK ){
-        chunkStoreClose(&remoteRefs);
-        return rc;
-      }
-      rc = remoteTagsWouldInstall(pLocal, &remoteRefs, &tagWouldInstall);
-      if( rc!=SQLITE_OK ){
-        chunkStoreClose(&remoteRefs);
-        return rc;
-      }
-      if( !seqWouldAdvance && !tagWouldInstall ){
-        chunkStoreClose(&remoteRefs);
-        return SQLITE_OK;
-      }
+    rc = chunkStoreLoadRefsFromBlob(&remoteRefs, refsData, nRefsData);
+    sqlite3_free(refsData);
+    if( rc==SQLITE_OK ){
+      rc = chunkStoreFindBranch(&remoteRefs, zBranch, &remoteCommit);
     }
-  }else if( rc!=SQLITE_NOTFOUND ){
-    chunkStoreClose(&remoteRefs);
-    return rc;
-  }
-
-  if( !bLazyOrigin ){
-    pLocalDst = doltliteLocalAsRemote(pLocal, pRemote);
-    if( !pLocalDst ){
+    if( rc!=SQLITE_OK ){
       chunkStoreClose(&remoteRefs);
-      return SQLITE_NOMEM;
+      return rc==SQLITE_NOTFOUND ? SQLITE_NOTFOUND : rc;
     }
 
-    rc = doltliteSyncChunks(pRemote, pLocalDst, &remoteCommit, 1);
+    if( prollyHashIsEmpty(&remoteCommit) ){
+      chunkStoreClose(&remoteRefs);
+      return SQLITE_NOTFOUND;
+    }
 
-    if( rc==SQLITE_OK ) rc = pLocalDst->xCommit(pLocalDst);
-    pLocalDst->xClose(pLocalDst);
-  }else{
-    rc = SQLITE_OK;
-  }
-  if( rc==SQLITE_OK ){
-    doltliteTestRunBeforeRefInstallHook();
-    rc = installFetchedRefs(
-        pLocal, pRemote, &remoteRefs, zRemoteName, zTrack,
-        &remoteCommit, bLazyOrigin);
-  }
+    rc = chunkStoreFindTracking(pLocal, zRemoteName, zTrack, &trackingCommit);
+    if( rc==SQLITE_OK ){
+      bHasSeen = 1;
+      if( prollyHashCompare(&trackingCommit, &remoteCommit)==0 ){
+        int seqWouldAdvance = 0;
+        int tagWouldInstall = 0;
+        rc = remoteSequencesWouldAdvance(pLocal, &remoteRefs, &seqWouldAdvance);
+        if( rc!=SQLITE_OK ){
+          chunkStoreClose(&remoteRefs);
+          return rc;
+        }
+        rc = remoteTagsWouldInstall(pLocal, &remoteRefs, &tagWouldInstall);
+        if( rc!=SQLITE_OK ){
+          chunkStoreClose(&remoteRefs);
+          return rc;
+        }
+        if( !seqWouldAdvance && !tagWouldInstall ){
+          chunkStoreClose(&remoteRefs);
+          return SQLITE_OK;
+        }
+      }
+    }else if( rc!=SQLITE_NOTFOUND ){
+      chunkStoreClose(&remoteRefs);
+      return rc;
+    }
 
-  chunkStoreClose(&remoteRefs);
-  return rc;
+    if( !bLazyOrigin ){
+      pLocalDst = doltliteLocalAsRemote(pLocal, pRemote);
+      if( !pLocalDst ){
+        chunkStoreClose(&remoteRefs);
+        return SQLITE_NOMEM;
+      }
+
+      rc = doltliteSyncChunks(pRemote, pLocalDst, &remoteCommit, 1);
+
+      if( rc==SQLITE_OK ) rc = pLocalDst->xCommit(pLocalDst);
+      pLocalDst->xClose(pLocalDst);
+    }else{
+      rc = SQLITE_OK;
+    }
+    if( rc==SQLITE_OK ){
+      doltliteTestRunBeforeRefInstallHook();
+      rc = installFetchedRefs(
+          pLocal, pRemote, &remoteRefs, zRemoteName, zTrack,
+          &remoteCommit, bLazyOrigin,
+          bHasSeen, bHasSeen ? &trackingCommit : 0, &settled);
+    }
+
+    chunkStoreClose(&remoteRefs);
+    if( rc!=SQLITE_OK || settled ) return rc;
+  }
+  return SQLITE_OK;
 }
 
 static int remotePrepareCloneRefs(
