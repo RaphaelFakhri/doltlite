@@ -681,6 +681,10 @@ static int csOpen(
           rc = sqlite3OsAccess(pVfs, zDir, SQLITE_ACCESS_EXISTS, &exists);
         }
         sqlite3_free(zDir);
+        if( rc==SQLITE_NOMEM || rc==SQLITE_IOERR_NOMEM ){
+          chunkStoreClose(cs);
+          return rc;
+        }
         if( rc==SQLITE_OK ){
           parentOk = canWrite || exists;
           if( !parentOk ){

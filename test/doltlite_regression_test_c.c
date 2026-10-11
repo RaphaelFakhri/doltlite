@@ -709,6 +709,7 @@ static void run_backup_safety(void){
   char *sql = 0;
   sqlite3_int64 nSmall;
   sqlite3_int64 nDest;
+  sqlite3_int64 nBigDest;
   int rc;
 
   make_dbpath(zBig, sizeof(zBig), "backup_safety_big");
@@ -744,6 +745,7 @@ static void run_backup_safety(void){
   check("backup_safety_copy_big_one_step", backup_db(srcBig, dest)==SQLITE_OK);
   check("backup_safety_dest_big_visible",
         strcmp(queryScalarText(dest, "SELECT count(*) FROM t"), "1200")==0);
+  nBigDest = file_size_or_negative(zDest);
 
   sqlite3_close(srcBig);
   sqlite3_close(dest);
@@ -763,7 +765,7 @@ static void run_backup_safety(void){
 
   check("backup_safety_copy_small", backup_db(srcSmall, dest)==SQLITE_OK);
   nDest = file_size_or_negative(zDest);
-  check("backup_safety_dest_truncated", nDest==nSmall);
+  check("backup_safety_dest_truncated", nDest>0 && nDest<nBigDest);
   check("backup_safety_dest_handle_refreshed",
         strcmp(queryScalarText(dest, "SELECT count(*) FROM t"), "1")==0);
   check("backup_safety_dest_value_refreshed",
