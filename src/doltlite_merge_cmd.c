@@ -1,6 +1,7 @@
 #ifdef DOLTLITE_PROLLY
 
 #include "sqliteInt.h"
+#include "vdbeInt.h"
 #include "prolly_hash.h"
 #include "prolly_hashset.h"
 #include "chunk_store.h"
@@ -1752,7 +1753,8 @@ int doltliteMergeRef(
     ProllyHash trackedBase = mergedCatHash;
     ProllyHash ignoredOut;
     char *zSplitErr = 0;
-    rc = doltliteFlushCatalogToHash(db, &workingCatHash);
+    rc = sqlite3VtabSync(db, context->pVdbe);
+    if( rc==SQLITE_OK ) rc = doltliteFlushCatalogToHash(db, &workingCatHash);
     if( rc==SQLITE_OK ){
       mergedCatHash = workingCatHash;
       if( !prollyHashIsEmpty(&ignoredCatHash) ){
