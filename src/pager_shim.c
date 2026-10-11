@@ -1446,19 +1446,22 @@ backup_step_done:
   if( rc == SQLITE_OK && !memoryAdopted ){
     int rcRefresh;
     /* The copied file is already installed. This refresh only re-reads its
-    ** manifest into the destination connection. A failure leaves that
+    ** manifest into the destination connection. A disk I/O error leaves that
     ** connection stale; the next use adopts the path. It is not a failed
-    ** backup. */
+    ** backup. An allocation failure still is: the caller has to see NOMEM. */
     destCs->adoptReplacement = 1;
     rcRefresh = chunkStoreLockAndRefresh(destCs);
     if( rcRefresh==SQLITE_OK ){
       /* Dest now reflects the renamed file; reload catalog next txn. */
       doltliteInvalidateBtreeWorkingState(pDestBt);
       chunkStoreUnlock(destCs);
-    }else{
+    }else if( (rcRefresh&0xff)==SQLITE_IOERR
+           && rcRefresh!=SQLITE_IOERR_NOMEM ){
       /* Cleared inside the refresh before the failed reload, and
       ** LockAndRefresh released the lock. */
       destCs->adoptReplacement = 1;
+    }else{
+      rc = rcRefresh;
     }
   }
 
