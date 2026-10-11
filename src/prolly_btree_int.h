@@ -190,6 +190,7 @@ struct BtShared {
   int nRef;
   int nIncrblobCur;
   u8 inCatalogSerialize;
+  u8 bCommitAbortedUnlocked;
   ProllyStats stats;
 };
 

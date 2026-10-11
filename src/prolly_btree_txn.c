@@ -690,6 +690,7 @@ int prollyBtreeBeginTrans(Btree *p, int wrFlag, int *pSchemaVersion){
   if( p->inTrans==TRANS_WRITE ){
     return SQLITE_OK;
   }
+  pBt->bCommitAbortedUnlocked = 0;
 
   if( p->inTrans==TRANS_READ && !wrFlag ){
     /* Another statement still reading keeps this snapshot, as in stock WAL:
@@ -896,6 +897,7 @@ static void commitPhaseTwoAbort(
   }
   chunkStoreRollback(&pBt->store);
   commitPhaseTwoReleaseGraph(pBt);
+  pBt->bCommitAbortedUnlocked = 1;
 }
 
 static int commitPhaseTwoStageCatalog(
@@ -1364,7 +1366,10 @@ int prollyBtreeRollback(Btree *p, int tripCode, int writeOnly){
   if( pBt->inCatalogSerialize ) return SQLITE_OK;
 
   if( p->inTrans==TRANS_WRITE ){
-    PROLLY_ASSERT_GRAPH_LOCKED(pBt);
+    /* A commit that aborted before publishing already released the lock;
+    ** the rollback SQLite answers it with still has to undo the txn. */
+    if( !pBt->bCommitAbortedUnlocked ) PROLLY_ASSERT_GRAPH_LOCKED(pBt);
+    pBt->bCommitAbortedUnlocked = 0;
     {
       BtCursor *pC;
       if( tripCode==SQLITE_OK || writeOnly ){

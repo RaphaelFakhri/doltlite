@@ -9684,6 +9684,56 @@ static void run_vc_interrupt(void){
   removeDbFiles(dbpath);
 }
 
+static void run_commit_stage_read_failure(void){
+  char dbpath[512];
+  int nth;
+
+  check("commit_stage_read_register", registerFailVfs()==SQLITE_OK);
+  make_dbpath(dbpath, sizeof(dbpath), "commit_stage_read");
+  for(nth=1; nth<400; nth++){
+    sqlite3 *db = 0, *fresh = 0;
+    int rc, hits;
+    const char *zWant;
+    removeDbFiles(dbpath);
+    check("commit_stage_read_open", open_db(dbpath, &db)==SQLITE_OK);
+    if( !db ) break;
+    execSql(db,
+      "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);"
+      "CREATE TABLE u(id INTEGER PRIMARY KEY, v TEXT);"
+      "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x<300)"
+      " INSERT INTO t SELECT x, hex(zeroblob(40)) FROM c;"
+      "INSERT INTO u SELECT * FROM t;"
+      "SELECT dolt_commit('-Am','init');");
+    sqlite3_close(db);
+    db = 0;
+    check("commit_stage_read_open", open_fail_db(dbpath, &db)==SQLITE_OK);
+    if( !db ) break;
+    gFailHits = 0;
+    gFailReadNth = nth;
+    rc = execSqlSilent(db, "UPDATE t SET v='x' WHERE id=150");
+    hits = gFailHits;
+    gFailReadNth = 0;
+    zWant = rc==SQLITE_OK ? "x" : "0";
+    check("commit_stage_read_live",
+          strcmp(queryScalarText(db,
+            "SELECT CASE WHEN v='x' THEN 'x' ELSE replace(v,'0','') || '0' END"
+            " FROM t WHERE id=150"), zWant)==0);
+    check("commit_stage_read_retry",
+          execSql(db, "UPDATE t SET v='y' WHERE id=150")==SQLITE_OK);
+    sqlite3_close(db);
+    check("commit_stage_read_reopen", open_db(dbpath, &fresh)==SQLITE_OK);
+    if( fresh ){
+      check("commit_stage_read_durable",
+            strcmp(queryScalarText(fresh, "SELECT v FROM t WHERE id=150"), "y")==0);
+      check("commit_stage_read_integrity",
+            strcmp(queryScalarText(fresh, "PRAGMA integrity_check"), "ok")==0);
+      sqlite3_close(fresh);
+    }
+    if( hits==0 ) break;
+  }
+  removeDbFiles(dbpath);
+}
+
 static void run_vc_late_io_failure(void){
   const char *azOps[] = {
     "SELECT dolt_reset('--hard')",
@@ -16437,6 +16487,8 @@ static const RegressionCase aCases[] = {
   { "commit_publication", "Commit Publication Test", run_commit_publication },
   { "vc_interrupt", "VC Interrupt Test", run_vc_interrupt },
   { "vc_late_io_failure", "VC Late IO Failure Test", run_vc_late_io_failure },
+  { "commit_stage_read_failure", "Commit Stage Read Failure Test",
+    run_commit_stage_read_failure },
   { "amend_all_read_failure_keeps_changes", "Amend -a Read Failure Keeps Working Changes Test", run_amend_all_read_failure_keeps_changes },
   { "clean_write_failure_is_atomic", "Clean Write Failure Is Atomic Test", run_clean_write_failure_is_atomic },
   { "amend_persist_failure_preserves_durable_state", "Amend Persist Failure Preserves Durable State Test", run_amend_persist_failure_preserves_durable_state },
