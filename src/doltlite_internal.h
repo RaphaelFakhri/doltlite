@@ -1562,6 +1562,8 @@ int doltliteMergeRef(
   sqlite3_context *context,
   const char *zBranch,
   const char *zMessage,
+  const char *zAuthorName,
+  const char *zAuthorEmail,
   int noFastForward,
   int noCommit,
   int squash

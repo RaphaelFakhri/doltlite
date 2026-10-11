@@ -2296,4 +2296,40 @@ SELECT dolt_merge('feat');
           (SELECT COUNT(*) FROM information_schema.statistics WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='parent' AND INDEX_NAME='parent_payload'), '|',
           (SELECT COUNT(*) FROM parent WHERE payload='one'));"
 
+AUTHOR_BASE="
+CREATE TABLE t(id INTEGER PRIMARY KEY, v INT);
+INSERT INTO t VALUES (1, 10);
+SELECT dolt_commit('-Am', 'base');
+SELECT dolt_checkout('-b', 'feature');
+INSERT INTO t VALUES (2, 20);
+SELECT dolt_commit('-Am', 'feat1');
+SELECT dolt_checkout('main');
+"
+
+oracle_error_poststate "merge_author_sets_merge_commit_author" "
+$AUTHOR_BASE
+INSERT INTO t VALUES (3, 30);
+SELECT dolt_commit('-Am', 'main2');
+SELECT dolt_merge('feature', '--author', 'Merger <merger@example.com>', '-m', 'merge feature');
+" "SELECT committer || '|' || email || '|' || message FROM dolt_log LIMIT 1" \
+"SELECT CONCAT(committer, '|', email, '|', message) FROM dolt_log ORDER BY commit_order DESC LIMIT 1"
+
+oracle_error_poststate "merge_author_fast_forward_keeps_commit" "
+$AUTHOR_BASE
+SELECT dolt_merge('feature', '--author', 'Merger <merger@example.com>');
+" "SELECT message FROM dolt_log LIMIT 1" \
+"SELECT message FROM dolt_log ORDER BY commit_order DESC LIMIT 1"
+
+oracle_dual_error "merge_author_malformed_errors" "
+$AUTHOR_BASE
+INSERT INTO t VALUES (3, 30);
+SELECT dolt_commit('-Am', 'main2');
+SELECT dolt_merge('feature', '--author', 'no email');
+" "
+$AUTHOR_BASE
+INSERT INTO t VALUES (3, 30);
+SELECT dolt_commit('-Am', 'main2');
+SELECT dolt_merge('feature', '--author', 'no email');
+"
+
 vc_oracle_finish
