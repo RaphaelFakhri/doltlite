@@ -219,12 +219,13 @@ static int doltliteCommitStageModifiedOnly(
 
   rc = doltliteFlushCatalogToHash(db, &workingHash);
   if( rc!=SQLITE_OK ){
-    sqlite3_result_error(context, "failed to flush", -1);
+    doltliteVcResultErrorCode(context, sqlite3_context_db_handle(context),
+        "failed to flush", rc);
     return rc;
   }
   rc = doltliteLoadCatalog(db, &workingHash, &aWorking, &nWorking, 0);
   if( rc!=SQLITE_OK ){
-    sqlite3_result_error(context, "failed to load working catalog", -1);
+    doltliteVcResultErrorCode(context, db, "failed to load working catalog", rc);
     FREE_ADD_MODIFIED_CATALOGS();
     return rc;
   }
@@ -239,7 +240,7 @@ static int doltliteCommitStageModifiedOnly(
   if( !prollyHashIsEmpty(&headCatHash) ){
     rc = doltliteLoadCatalog(db, &headCatHash, &aHead, &nHead, 0);
     if( rc!=SQLITE_OK ){
-      sqlite3_result_error(context, "failed to load HEAD catalog", -1);
+      doltliteVcResultErrorCode(context, db, "failed to load HEAD catalog", rc);
       FREE_ADD_MODIFIED_CATALOGS();
       return rc;
     }
@@ -252,7 +253,7 @@ static int doltliteCommitStageModifiedOnly(
     rc = doltliteLoadCatalog(db, &headCatHash, &aStaged, &nStaged, 0);
   }
   if( rc!=SQLITE_OK ){
-    sqlite3_result_error(context, "failed to load staged catalog", -1);
+    doltliteVcResultErrorCode(context, db, "failed to load staged catalog", rc);
     FREE_ADD_MODIFIED_CATALOGS();
     return rc;
   }
@@ -397,7 +398,7 @@ static int doltliteCommitStageModifiedOnly(
     if( rc!=SQLITE_OK ){
       freeSchemaEntries(aWorkSchema, nWorkSchema);
       freeSchemaEntries(aOldSchema, nOldSchema);
-      sqlite3_result_error(context, "failed to load schema for staging", -1);
+      doltliteVcResultErrorCode(context, db, "failed to load schema for staging", rc);
       FREE_ADD_MODIFIED_CATALOGS();
       return rc;
     }
@@ -586,8 +587,8 @@ static int doltliteCommitCreateObject(
     }
     rc = doltliteLoadCommit(db, &headHash, &headCommit);
     if( rc!=SQLITE_OK ){
-      sqlite3_result_error(context,
-        "cannot --amend: failed to load HEAD commit", -1);
+      doltliteVcResultErrorCode(context, db,
+        "cannot --amend: failed to load HEAD commit", rc);
       return rc;
     }
     if( doltliteCommitParentCount(&headCommit)==0 ){
@@ -1012,7 +1013,8 @@ static void doltliteCommitFuncImpl(
     }else{
       rc = doltliteFlushCatalogToHash(db, &catalogHash);
       if( rc!=SQLITE_OK ){
-        sqlite3_result_error(context, "failed to flush", -1);
+        doltliteVcResultErrorCode(context, sqlite3_context_db_handle(context),
+            "failed to flush", rc);
         return;
       }
       rc = doltliteSetSessionStaged(db, &catalogHash);

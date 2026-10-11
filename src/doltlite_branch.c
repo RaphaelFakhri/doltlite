@@ -231,9 +231,11 @@ static int mutateBranchDelete(sqlite3 *db, ChunkStore *cs, void *pArg){
     if( rc!=SQLITE_OK ) return rc;
     if( !p->force ){
       rc = doltliteFindAncestor(db, &currentHead, &branchHead, &ancestor);
-      if( rc!=SQLITE_OK || prollyHashCompare(&ancestor, &branchHead)!=0 ){
+      if( rc!=SQLITE_OK && rc!=SQLITE_NOTFOUND ) return rc;
+      if( rc==SQLITE_NOTFOUND
+       || prollyHashCompare(&ancestor, &branchHead)!=0 ){
         p->notMerged = 1;
-        return rc==SQLITE_OK ? SQLITE_CONSTRAINT : rc;
+        return SQLITE_CONSTRAINT;
       }
     }
   }

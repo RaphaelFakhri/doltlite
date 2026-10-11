@@ -765,13 +765,13 @@ static void doltliteResetFunc(
 
     rc = doltliteResolveRef(db,zRef, &targetCommit);
     if( rc!=SQLITE_OK ){
-      sqlite3_result_error(context, "commit not found", -1);
+      doltliteLookupResultError(context, rc, "commit not found");
       goto reset_cleanup;
     }
 
     rc = doltliteLoadCommit(db, &targetCommit, &commit);
     if( rc!=SQLITE_OK ){
-      sqlite3_result_error(context, "failed to load commit", -1);
+      doltliteVcResultErrorCode(context, db, "failed to load commit", rc);
       goto reset_cleanup;
     }
     memcpy(&targetCatHash, &commit.catalogHash, sizeof(ProllyHash));
@@ -779,7 +779,7 @@ static void doltliteResetFunc(
   }else{
     rc = doltliteGetHeadCatalogHash(db, &targetCatHash);
     if( rc!=SQLITE_OK ){
-      sqlite3_result_error(context, "failed to read HEAD", -1);
+      doltliteVcResultErrorCode(context, db, "failed to read HEAD", rc);
       goto reset_cleanup;
     }
   }

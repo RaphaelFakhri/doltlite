@@ -963,7 +963,8 @@ static int mergeFastForward(
 
   rc = doltliteLoadCommit(db, pTheirHead, &theirCommit);
   if( rc!=SQLITE_OK ){
-    sqlite3_result_error(context, "failed to load commit", -1);
+    doltliteVcResultErrorCode(context, sqlite3_context_db_handle(context),
+        "failed to load commit", rc);
     return rc;
   }
   rc = doltliteSaveTxnState(db, &savedState);
@@ -1557,7 +1558,8 @@ int doltliteMergeRef(
   rc = doltliteResolveRef(db, zBranch, &theirHead);
   if( rc!=SQLITE_OK || prollyHashIsEmpty(&theirHead) ){
     return mergeRefAbortAfterWriteTxn(db, context,
-        "merge source not found", rc);
+        doltliteLookupRcIsStoreError(rc) ? sqlite3_errstr(rc)
+                                         : "merge source not found", rc);
   }
 
   if( prollyHashCompare(&ourHead, &theirHead)==0 ){
