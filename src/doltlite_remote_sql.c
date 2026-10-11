@@ -426,7 +426,7 @@ static void doltRemoteFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv)
 
   rc = doltliteVcSealActiveSavepoints(db);
   if( rc!=SQLITE_OK ){
-    sqlite3_result_error_code(ctx, rc);
+    doltliteVcResultSealError(ctx, db, rc);
     return;
   }
   sqlite3_result_int(ctx, 0);
@@ -1401,7 +1401,7 @@ static void doltPullParsed(
   doltliteTxnStateClear(&savedState);
   rc = doltliteVcSealBranchStyleTxn(db);
   if( rc!=SQLITE_OK ){
-    sqlite3_result_error_code(ctx, rc);
+    doltliteVcResultSealError(ctx, db, rc);
     return;
   }
   sqlite3_result_int(ctx, 0);

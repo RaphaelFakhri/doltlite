@@ -445,7 +445,8 @@ static void doltBranchParsedFunc(
   if( hadExplicitTxn ){
     rc = doltliteVcSealBranchStyleTxn(db);
     if( rc!=SQLITE_OK ){
-      branchErrorCode(ctx, hadSavepoint, rc);
+      doltliteVcResultSealError(ctx, db, rc);
+      branchSealSavepointsOnError(ctx, hadSavepoint);
       return;
     }
   }

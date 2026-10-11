@@ -943,7 +943,7 @@ reset_cleanup:
     rc = doltliteVcSealTopLevelSavepointTxn(db);
   }
   if( rc!=SQLITE_OK ){
-    sqlite3_result_error_code(context, rc);
+    doltliteVcResultSealError(context, db, rc);
   }
 }
 

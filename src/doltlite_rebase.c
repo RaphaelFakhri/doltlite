@@ -854,7 +854,7 @@ static int doltliteRebaseLinearReplay(
   sqlite3_free(zApplyErr);
   rc = doltliteVcSealEnclosingTxn(db);
   if( rc!=SQLITE_OK ){
-    sqlite3_result_error_code(context, rc);
+    doltliteVcResultSealError(context, db, rc);
     sqlite3_free(zOrig);
     sqlite3_free(zWorking);
     return rc;
