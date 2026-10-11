@@ -1574,10 +1574,11 @@ int chunkStoreReloadRefs(ChunkStore *cs){
   if( prollyHashIsEmpty(&cs->refs.refsHash) ) return SQLITE_OK;
 
   rc = chunkStoreGet(cs, &cs->refs.refsHash, &refsData, &nRefsData);
-  if( rc!=SQLITE_OK ) return rc;
-
-  rc = csReplaceRefsStateFromBlob(cs, refsData, nRefsData, 0);
+  if( rc==SQLITE_OK ){
+    rc = csReplaceRefsStateFromBlob(cs, refsData, nRefsData, 0);
+  }
   sqlite3_free(refsData);
+  cs->bRefsStale = rc!=SQLITE_OK;
   return rc;
 }
 

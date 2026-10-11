@@ -1,0 +1,113 @@
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+
+db eval {
+  CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);
+  WITH RECURSIVE c(x) AS (
+    SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x<300
+  ) INSERT INTO t SELECT x, printf('v%05d-%s',x,hex(zeroblob(40))) FROM c;
+  CREATE TABLE u(k TEXT PRIMARY KEY, n INT);
+  INSERT INTO u VALUES('a',1),('b',2);
+  SELECT dolt_commit('-Am','init');
+  SELECT dolt_checkout('-b','feat');
+  INSERT INTO t VALUES(1001,'f1');
+  UPDATE u SET n=20 WHERE k='b';
+  SELECT dolt_commit('-am','feat1');
+  SELECT dolt_checkout('main');
+  UPDATE t SET v='m' WHERE id=5;
+  SELECT dolt_commit('-am','main2');
+  INSERT INTO t VALUES(2001,'w');
+}
+db close
+file copy -force test.db reset-read-base.db
+
+set armed 0
+proc reset_read_error {method filename args} {
+  if {$::armed && [file tail $filename] eq "test.db"} {
+    incr ::reads
+    if {$::reads >= $::fault && $::reads < $::fault+$::width} {
+      incr ::hits
+      return SQLITE_IOERR
+    }
+  }
+  return SQLITE_OK
+}
+testvfs resetio
+resetio filter {xRead}
+resetio script reset_read_error
+
+set refs {
+  SELECT name,hash,latest_commit_message FROM dolt_branches ORDER BY name;
+  SELECT commit_hash,message FROM dolt_log;
+  SELECT dolt_hashof('HEAD');
+}
+set state {
+  SELECT name,sql FROM sqlite_master ORDER BY name;
+  SELECT count(*),md5sum(id,v) FROM t;
+  SELECT k,n FROM u ORDER BY k;
+  SELECT table_name,staged,status FROM dolt_status ORDER BY table_name,staged;
+  PRAGMA integrity_check;
+}
+set rejected 0
+foreach mode {hard mixed soft} {
+  switch $mode {
+    hard {set sql {SELECT dolt_reset('--hard','HEAD~1')}}
+    mixed {set sql {SELECT dolt_reset('HEAD~1')}}
+    soft {set sql {SELECT dolt_reset('--soft','HEAD~1')}}
+  }
+  foreach access {read write} {
+    foreach width {1 2 3 8} {
+      for {set fault 1} {$fault<=500} {incr fault} {
+        forcedelete test.db
+        file copy -force reset-read-base.db test.db
+        sqlite3 db test.db -vfs resetio
+        db eval {SELECT * FROM dolt_status}
+        set reads 0
+        set hits 0
+        set armed 1
+        set result [catchsql $sql]
+        set armed 0
+        if {[lindex $result 0]} {incr rejected}
+        sqlite3 observer test.db -readonly 1
+        set expectedRefs [observer eval $refs]
+        set expectedState [observer eval $state]
+        set expectedHead [observer one {SELECT dolt_hashof('HEAD')}]
+        set expectedRows [observer eval {SELECT count(*),md5sum(id,v) FROM t}]
+        set expectedU [observer eval {SELECT k,n FROM u ORDER BY k}]
+        observer close
+        set prefix reset-read-$mode.$access.$width.$fault
+        if {$access eq "read"} {
+          do_test $prefix.refs {catchsql $refs} [list 0 $expectedRefs]
+          do_test $prefix.session {catchsql $state} [list 0 $expectedState]
+        }
+        do_test $prefix.commit {
+          lindex [catchsql {
+            INSERT INTO u VALUES('c',3);
+            SELECT dolt_commit('-am','routine commit');
+          }] 0
+        } 0
+        do_test $prefix.parent {
+          db one {SELECT dolt_hashof('HEAD~1')}
+        } $expectedHead
+        do_test $prefix.reopen {
+          db close
+          sqlite3 db test.db
+          list [db one {SELECT dolt_hashof('HEAD~1')}] \
+               [db eval {SELECT count(*),md5sum(id,v) FROM t}] \
+               [db eval {SELECT k,n FROM u ORDER BY k}] \
+               [db one {SELECT count(*) FROM dolt_status}] \
+               [db one {PRAGMA integrity_check}]
+        } [list $expectedHead $expectedRows [linsert $expectedU end c 3] 0 ok]
+        db close
+        if {$hits==0} break
+      }
+      do_test reset-read-$mode.$access.$width.exhausted {expr {$fault<=500}} 1
+      do_test reset-read-$mode.$access.$width.success {lindex $result 0} 0
+    }
+  }
+}
+do_test reset-read.rejected {expr {$rejected>0}} 1
+resetio delete
+forcedelete reset-read-base.db
+sqlite3 db test.db
+finish_test
