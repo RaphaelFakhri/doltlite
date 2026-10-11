@@ -1230,7 +1230,7 @@ static void doltPullParsed(
         sqlite3_result_error_nomem(ctx);
         return;
       }
-      rc = doltliteMergeRef(db, ctx, zTrackingHash, zMergeMsg,
+      rc = doltliteMergeRef(db, ctx, zTrackingHash, zMergeMsg, 0, 0,
                             bNoFf, 0, bSquash);
       sqlite3_free(zMergeMsg);
       if( rc!=SQLITE_OK ){

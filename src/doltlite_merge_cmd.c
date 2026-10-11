@@ -1326,6 +1326,8 @@ static int mergeRefCreateMergeCommit(
   const ProllyHash *pCleanWorkingSet,
   const char *zBranch,
   const char *zMessage,
+  const char *zAuthorName,
+  const char *zAuthorEmail,
   int nExtraParents
 ){
   ProllyHash commitHash;
@@ -1348,8 +1350,8 @@ static int mergeRefCreateMergeCommit(
              zBranch, doltliteGetSessionBranch(db));
   }
   rc = doltliteCreateAndStoreCommit(db, pOurHead, pMergedCat,
-      msg, NULL, NULL, nExtraParents ? pTheirHead : NULL, nExtraParents,
-      &commitHash);
+      msg, zAuthorName, zAuthorEmail, nExtraParents ? pTheirHead : NULL,
+      nExtraParents, &commitHash);
   if( rc!=SQLITE_OK ){
     /* Catalog is already live; leaving it lets dolt_commit drop theirHead
     ** from ancestry. Restore first, and surface a restore failure. */
@@ -1486,6 +1488,8 @@ int doltliteMergeRef(
   sqlite3_context *context,
   const char *zBranch,
   const char *zMessage,
+  const char *zAuthorName,
+  const char *zAuthorEmail,
   int noFastForward,
   int noCommit,
   int squash
@@ -1798,7 +1802,7 @@ int doltliteMergeRef(
   return mergeRefCreateMergeCommit(
       db, context, &savedState, &ourHead, &theirHead, &mergedCatHash,
       &workingCatHash, &cleanWorkingSet,
-      zBranch, zMessage, squash ? 0 : 1);
+      zBranch, zMessage, zAuthorName, zAuthorEmail, squash ? 0 : 1);
 
 merge_fail:
   doltliteFreeCatalog(aLocal, nLocal);
@@ -1847,6 +1851,9 @@ static void doltliteMergeFunc(
   sqlite3 *db = sqlite3_context_db_handle(context);
   const char *zBranch = 0;
   const char *zMessage = 0;
+  const char *zAuthor = 0;
+  char *zAuthorName = 0;
+  char *zAuthorEmail = 0;
   DoltliteCmdArgs args;
   int isAbort = 0;
   int noFastForward = 0;
@@ -1857,7 +1864,8 @@ static void doltliteMergeFunc(
     { "no-ff", 0, DOLTLITE_CMD_OPTION_FLAG, &noFastForward, 0 },
     { "no-commit", 0, DOLTLITE_CMD_OPTION_FLAG, &noCommit, 0 },
     { "squash", 0, DOLTLITE_CMD_OPTION_FLAG, &squash, 0 },
-    { "message", 'm', DOLTLITE_CMD_OPTION_VALUE, 0, &zMessage }
+    { "message", 'm', DOLTLITE_CMD_OPTION_VALUE, 0, &zMessage },
+    { "author", 0, DOLTLITE_CMD_OPTION_VALUE, 0, &zAuthor }
   };
   u8 isMerging = 0;
   int rc;
@@ -1884,7 +1892,7 @@ static void doltliteMergeFunc(
   if( args.nPositional==1 ) zBranch = args.azPositional[0];
 
   if( isAbort ){
-    if( zBranch || zMessage || noFastForward || noCommit || squash ){
+    if( zBranch || zMessage || zAuthor || noFastForward || noCommit || squash ){
       sqlite3_result_error(context,
         "--abort does not take other arguments", -1);
       doltliteCmdArgsClear(&args);
@@ -1914,8 +1922,16 @@ static void doltliteMergeFunc(
     return;
   }
 
-  (void)doltliteMergeRef(db, context, zBranch, zMessage, noFastForward,
-                         noCommit, squash);
+  if( zAuthor
+   && doltliteCmdParseAuthor(context, zAuthor, &zAuthorName, &zAuthorEmail)
+      !=SQLITE_OK ){
+    doltliteCmdArgsClear(&args);
+    return;
+  }
+  (void)doltliteMergeRef(db, context, zBranch, zMessage, zAuthorName,
+                         zAuthorEmail, noFastForward, noCommit, squash);
+  sqlite3_free(zAuthorName);
+  sqlite3_free(zAuthorEmail);
   doltliteCmdArgsClear(&args);
 }
 
