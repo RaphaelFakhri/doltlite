@@ -467,7 +467,19 @@ static inline struct TableEntry *addTable(Btree *p, Pgno iTable, u8 flags){
 static inline void removeTable(Btree *p, Pgno iTable){
   catRemove(&p->cat, iTable);
 }
+/* Cursors alias the pending map of a TableEntry; a statement left open
+** across a catalog swap would otherwise reach the freed entry. */
 static inline void btreeFreeCatalogTables(Btree *p){
+  BtCursor *pC;
+  for(pC = p->pBt ? p->pBt->pCursor : 0; pC; pC = pC->pNext){
+    if( pC->pBtree!=p || pC->pMutMap==0 ) continue;
+    pC->pMutMap = 0;
+    pC->mmActive = 0;
+    pC->mmPhysActive = 0;
+    pC->deferredTreeSeek = 0;
+    pC->mmIdx = -1;
+    pC->mmPhysIdx = -1;
+  }
   catFree(&p->cat);
 }
 

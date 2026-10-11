@@ -10228,6 +10228,46 @@ static void run_failed_refs_restore_keeps_refs(void){
   removeDbFiles(dbpath);
 }
 
+static void run_open_reader_across_catalog_swap(void){
+  static const char *azOps[] = {
+    "SELECT dolt_checkout('t')",
+    "SELECT dolt_reset('--hard')",
+    0
+  };
+  char dbpath[512];
+  int op;
+
+  make_dbpath(dbpath, sizeof(dbpath), "open_reader_swap");
+  for(op=0; azOps[op]; op++){
+    sqlite3 *db = 0;
+    sqlite3_stmt *pStmt = 0;
+    removeDbFiles(dbpath);
+    check("open_reader_swap_open", open_db(dbpath, &db)==SQLITE_OK);
+    if( !db ) continue;
+    execSql(db,
+      "CREATE TABLE t(id INTEGER PRIMARY KEY, v INT);"
+      "INSERT INTO t VALUES(1,1),(2,2),(3,3);"
+      "SELECT dolt_commit('-Am','c');");
+    check("open_reader_swap_prepare",
+          sqlite3_prepare_v2(db, "SELECT * FROM t", -1, &pStmt, 0)==SQLITE_OK);
+    check("open_reader_swap_step", sqlite3_step(pStmt)==SQLITE_ROW);
+    check("open_reader_swap_write",
+          execSql(db, "INSERT INTO t VALUES(10,10)")==SQLITE_OK);
+    check("open_reader_swap_vc", execSql(db, azOps[op])==SQLITE_OK);
+    check("open_reader_swap_rows",
+          strcmp(queryScalarText(db, "SELECT group_concat(id) FROM t"),
+                 "1,2,3")==0);
+    check("open_reader_swap_next_write",
+          execSql(db, "INSERT INTO t VALUES(11,11)")==SQLITE_OK);
+    sqlite3_finalize(pStmt);
+    check("open_reader_swap_after",
+          strcmp(queryScalarText(db, "SELECT group_concat(id) FROM t"),
+                 "1,2,3,11")==0);
+    sqlite3_close(db);
+  }
+  removeDbFiles(dbpath);
+}
+
 static void run_vc_late_io_failure(void){
   const char *azOps[] = {
     "SELECT dolt_reset('--hard')",
@@ -17147,6 +17187,8 @@ static const RegressionCase aCases[] = {
   { "commit_publication", "Commit Publication Test", run_commit_publication },
   { "vc_interrupt", "VC Interrupt Test", run_vc_interrupt },
   { "vc_late_io_failure", "VC Late IO Failure Test", run_vc_late_io_failure },
+  { "open_reader_across_catalog_swap", "Open Reader Across Catalog Swap Test",
+    run_open_reader_across_catalog_swap },
   { "commit_stage_read_failure", "Commit Stage Read Failure Test",
     run_commit_stage_read_failure },
   { "failed_refs_restore_keeps_refs", "Failed Refs Restore Keeps Refs Test",
