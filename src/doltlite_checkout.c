@@ -1189,13 +1189,22 @@ int doltliteCheckoutTables(
     }
     sqlite3_free(buf);
     if( rc==SQLITE_OK ){
-      rc = doltliteSwitchCatalog(db, &newWorkingHash);
+      DoltliteTxnState savedState;
+      rc = doltliteSaveTxnState(db, &savedState);
+      if( rc==SQLITE_OK ){
+        rc = doltliteSwitchCatalog(db, &newWorkingHash);
+        if( rc==SQLITE_OK && zSourceRef ){
+          rc = doltliteStageNamedTables(db, context, cs, &newWorkingHash,
+                                        nNames, argv+iFirstName, 0, bDropIfAbsent);
+        }
+        if( rc==SQLITE_OK ) rc = doltlitePersistWorkingSetConfirmed(db, &cleanWs);
+        if( rc!=SQLITE_OK ){
+          rc = doltliteRestoreTxnStateOnFailure(db, &savedState, rc);
+        }else{
+          doltliteTxnStateClear(&savedState);
+        }
+      }
     }
-    if( rc==SQLITE_OK && zSourceRef ){
-      rc = doltliteStageNamedTables(db, context, cs, &newWorkingHash,
-                                    nNames, argv+iFirstName, 0, bDropIfAbsent);
-    }
-    if( rc==SQLITE_OK ) rc = doltlitePersistWorkingSetConfirmed(db, &cleanWs);
   }
 
   freeSchemaEntries(aSourceSchema, nSourceSchema);

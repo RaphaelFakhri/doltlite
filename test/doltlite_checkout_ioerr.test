@@ -1,0 +1,156 @@
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+
+db eval {
+  CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);
+  CREATE INDEX tv ON t(v);
+  CREATE TABLE u(k TEXT PRIMARY KEY, n INT);
+  INSERT INTO t VALUES(1,'base');
+  INSERT INTO u VALUES('a',1);
+  SELECT dolt_commit('-Am','init');
+  SELECT dolt_checkout('-b','feat');
+  UPDATE t SET v='feature' WHERE id=1;
+  SELECT dolt_commit('-am','feature');
+  SELECT dolt_checkout('main');
+  INSERT INTO t VALUES(2,'staged');
+  SELECT dolt_add('t');
+  INSERT INTO t VALUES(2001,'precious');
+  UPDATE u SET n=10 WHERE k='a';
+}
+db close
+file copy -force test.db checkout-io-base.db
+
+set armed 0
+proc checkout_error {method filename args} {
+  if {$::armed && $method eq $::kind && [file tail $filename] eq "test.db"} {
+    incr ::calls
+    if {$::calls >= $::fault && $::calls < $::fault+$::width} {
+      incr ::hits
+      return SQLITE_IOERR
+    }
+  }
+  return SQLITE_OK
+}
+testvfs checkoutio
+checkoutio filter {xWrite xSync}
+checkoutio script checkout_error
+
+set state {
+  SELECT name,sql FROM sqlite_master ORDER BY name;
+  SELECT id,v FROM t ORDER BY id;
+  SELECT id,v FROM t INDEXED BY tv ORDER BY v;
+  SELECT k,n FROM u ORDER BY k;
+  SELECT dolt_hashof('HEAD'),dolt_hashof_db('STAGED');
+  SELECT table_name,staged,status FROM dolt_status ORDER BY table_name,staged;
+  PRAGMA integrity_check;
+}
+set failed 0
+foreach source {staged ref multiple dot} {
+  switch $source {
+    staged {set sql {SELECT dolt_checkout('t')}}
+    ref {set sql {SELECT dolt_checkout('feat','t')}}
+    multiple {set sql {SELECT dolt_checkout('t','u')}}
+    dot {set sql {SELECT dolt_checkout('.')}}
+  }
+  foreach next {insert commit retry} {
+    foreach kind {xWrite xSync} {
+      foreach width {1 3 8} {
+        for {set fault 1} {$fault<=100} {incr fault} {
+          forcedelete test.db
+          file copy -force checkout-io-base.db test.db
+          sqlite3 db test.db -vfs checkoutio
+          set before [db eval $state]
+          set calls 0
+          set hits 0
+          set armed 1
+          set result [catchsql $sql]
+          set armed 0
+          set prefix checkout-io-$source-$next-$kind-$width-$fault
+          if {[lindex $result 0]} {
+            incr failed
+            do_test $prefix.session {catchsql $state} [list 0 $before]
+            sqlite3 observer test.db -readonly 1
+            do_test $prefix.disk {observer eval $state} $before
+            observer close
+            switch $next {
+              insert {set followup {INSERT INTO u VALUES('b',20)}}
+              commit {set followup {SELECT dolt_commit('-am','next')}}
+              retry {set followup $sql}
+            }
+            do_test $prefix.next {lindex [catchsql $followup] 0} 0
+            if {$next ne "retry"} {
+              do_test $prefix.kept {
+                db eval {SELECT id,v FROM t ORDER BY id}
+              } {1 base 2 staged 2001 precious}
+            }
+          }
+          set expected [db eval $state]
+          db close
+          sqlite3 db test.db
+          do_test $prefix.reopen {db eval $state} $expected
+          db close
+          if {$hits==0} break
+        }
+        do_test checkout-io-$source-$next-$kind-$width-exhausted {
+          expr {$fault<=100}
+        } 1
+      }
+    }
+  }
+}
+do_test checkout-io-errors-exercised {expr {$failed>0}} 1
+checkoutio delete
+
+proc checkout_peer_write {} {
+  incr ::steps
+  if {$::steps==$::step} {
+    set ::fired 1
+    set ::acked [expr {![catch {peer eval {INSERT INTO t VALUES(900,'peer')}}]}]
+  }
+  return 0
+}
+set acknowledged 0
+foreach next {insert commit} {
+  for {set step 1} {$step<=1000} {incr step} {
+    forcedelete test.db
+    file copy -force checkout-io-base.db test.db
+    sqlite3 db test.db
+    sqlite3 peer test.db
+    db eval {SELECT * FROM dolt_status}
+    set steps 0
+    set fired 0
+    set acked 0
+    db progress 1 checkout_peer_write
+    catchsql {SELECT dolt_checkout('u')}
+    db progress 0 {}
+    set prefix checkout-peer-$next-$step
+    if {$acked} {
+      incr acknowledged
+      if {$next eq "insert"} {
+        do_test $prefix.next {catchsql {INSERT INTO u VALUES('b',20)}} {0 {}}
+      } else {
+        do_test $prefix.next {
+          lindex [catchsql {SELECT dolt_commit('-am','next')}] 0
+        } 0
+      }
+      do_test $prefix.peer-kept {
+        db eval {SELECT count(*) FROM t WHERE id=900}
+      } 1
+    }
+    peer close
+    db close
+    sqlite3 db test.db
+    if {$acked} {
+      do_test $prefix.reopen {
+        db eval {SELECT count(*) FROM t WHERE id=900; PRAGMA integrity_check}
+      } {1 ok}
+    }
+    db close
+    if {!$fired} break
+  }
+  do_test checkout-peer-$next-exhausted {expr {$step<=1000}} 1
+}
+do_test checkout-peer-acknowledged {expr {$acknowledged>0}} 1
+forcedelete checkout-io-base.db
+sqlite3 db test.db
+finish_test
