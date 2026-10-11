@@ -12,7 +12,9 @@
 typedef struct TagMutationCtx TagMutationCtx;
 struct TagMutationCtx {
   const char *zName;
+  const char *zCommitRef;
   ProllyHash commitHash;
+  int resolveRc;
   const char *zTagger;
   const char *zEmail;
   i64 timestamp;
@@ -26,8 +28,10 @@ static void tagSealSavepointError(sqlite3_context *ctx){
 
 static int mutateTagRef(sqlite3 *db, ChunkStore *cs, void *pArg){
   TagMutationCtx *p = (TagMutationCtx*)pArg;
-  (void)db;
   if( !doltliteUserRefNameIsValid(p->zName) ) return SQLITE_CONSTRAINT;
+  p->resolveRc = doltliteResolveRefForMutation(db, p->zCommitRef,
+                                             &p->commitHash);
+  if( p->resolveRc!=SQLITE_OK ) return p->resolveRc;
   return chunkStoreAddTagFull(cs, p->zName, &p->commitHash,
                               p->zTagger, p->zEmail,
                               p->timestamp, p->zMessage);
@@ -112,26 +116,7 @@ static void doltTagParsedFunc(
     return;
   }
 
-  if( zCommitRef ){
-    rc = doltliteResolveRef(db, zCommitRef, &m.commitHash);
-    if( rc!=SQLITE_OK ){
-      doltliteVcResultError(ctx, db, "commit not found");
-      return;
-    }
-  }else{
-    rc = doltliteSyncSessionToBranchTip(db);
-    if( rc!=SQLITE_OK ){
-      tagSealSavepointError(ctx);
-      sqlite3_result_error_code(ctx, rc);
-      return;
-    }
-    doltliteGetSessionHead(db, &m.commitHash);
-    if( prollyHashIsEmpty(&m.commitHash) ){
-      doltliteVcResultError(ctx, db, "no commits to tag");
-      return;
-    }
-  }
-
+  m.zCommitRef = zCommitRef;
   if( zAuthor ){
     rc = doltliteCmdParseAuthor(ctx, zAuthor,
                                 &zParsedTagger, &zParsedEmail);
@@ -152,6 +137,12 @@ static void doltTagParsedFunc(
   rc = doltliteMutateRefs(db, mutateTagRef, &m);
   sqlite3_free(zParsedTagger);
   sqlite3_free(zParsedEmail);
+  if( m.resolveRc!=SQLITE_OK ){
+    tagSealSavepointError(ctx);
+    doltliteRefResultError(ctx, m.resolveRc,
+                           "commit not found", "commit not found");
+    return;
+  }
   if( rc==SQLITE_CONSTRAINT && doltliteSessionHasUnresolvedConflicts(db) ){
     doltliteVcResultError(ctx, db,
       "cannot update refs: unresolved merge conflicts");

@@ -378,6 +378,26 @@ int doltliteResolveRef(sqlite3 *db, const char *zRef, ProllyHash *pCommit){
   return rc;
 }
 
+/* The caller holds the refreshed refs lock through the ref install. */
+int doltliteResolveRefForMutation(
+  sqlite3 *db, const char *zRef, ProllyHash *pCommit
+){
+  char *zBranchRef = 0;
+  int rc;
+  if( !zRef ) zRef = "HEAD";
+  if( db->autoCommit && sqlite3_txn_state(db, "main")==SQLITE_TXN_NONE
+   && sqlite3_strnicmp(zRef, "HEAD", 4)==0
+   && (zRef[4]==0 || zRef[4]=='~' || zRef[4]=='^') ){
+    zBranchRef = sqlite3_mprintf("%s%s", doltliteGetSessionBranch(db), zRef+4);
+    if( !zBranchRef ) return SQLITE_NOMEM;
+    zRef = zBranchRef;
+  }
+  rc = doltliteResolveRef(db, zRef, pCommit);
+  sqlite3_free(zBranchRef);
+  if( rc==SQLITE_OK ) rc = doltliteValidateCommitHash(db, pCommit);
+  return rc;
+}
+
 int doltliteLoadCommit(sqlite3 *db, const ProllyHash *pHash,
                        DoltliteCommit *pCommit){
   ChunkStore *cs = doltliteGetChunkStore(db);

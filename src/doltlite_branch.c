@@ -112,6 +112,20 @@ int mutateBranchRef(sqlite3 *db, ChunkStore *cs, void *pArg){
   return chunkStoreAddBranch(cs, p->zName, &p->head);
 }
 
+typedef struct BranchCreateCtx BranchCreateCtx;
+struct BranchCreateCtx {
+  BranchMutationCtx ref;
+  const char *zStart;
+  int resolveRc;
+};
+
+static int mutateBranchCreate(sqlite3 *db, ChunkStore *cs, void *pArg){
+  BranchCreateCtx *p = (BranchCreateCtx*)pArg;
+  p->resolveRc = doltliteResolveRefForMutation(db, p->zStart, &p->ref.head);
+  if( p->resolveRc!=SQLITE_OK ) return p->resolveRc;
+  return mutateBranchRef(db, cs, &p->ref);
+}
+
 typedef struct BranchCopyCtx BranchCopyCtx;
 struct BranchCopyCtx {
   const char *zSrc;
@@ -383,7 +397,7 @@ static void doltBranchParsedFunc(
     }
 
     case MODE_CREATE: {
-      BranchMutationCtx m;
+      BranchCreateCtx m;
       const char *zName, *zStart;
       if( nPositional>2 ){
         branchError(ctx, hadSavepoint, "too many arguments");
@@ -401,26 +415,9 @@ static void doltBranchParsedFunc(
       }
       zStart = nPositional>=2 ? aPositional[1] : 0;
       memset(&m, 0, sizeof(m));
-      if( zStart ){
-        rc = doltliteResolveRef(db, zStart, &m.head);
-        if( rc!=SQLITE_OK ){
-          branchError(ctx, hadSavepoint, "start point not found");
-          return;
-        }
-      }else{
-        rc = doltliteSyncSessionToBranchTip(db);
-        if( rc!=SQLITE_OK ){
-          branchErrorCode(ctx, hadSavepoint, rc);
-          return;
-        }
-        doltliteGetSessionHead(db, &m.head);
-        if( prollyHashIsEmpty(&m.head) ){
-          branchError(ctx, hadSavepoint, "no commits yet — commit first");
-          return;
-        }
-      }
-      m.zName = zName;
-      m.force = force;
+      m.zStart = zStart;
+      m.ref.zName = zName;
+      m.ref.force = force;
       if( force
        && strcmp(zName, doltliteGetSessionBranch(db))==0
        && chunkStoreFindBranch(cs, zName, 0)==SQLITE_OK ){
@@ -428,8 +425,13 @@ static void doltBranchParsedFunc(
           "cannot force-update the current branch");
         return;
       }
-      rc = doltliteMutateRefs(db, mutateBranchRef, &m);
+      rc = doltliteMutateRefs(db, mutateBranchCreate, &m);
       if( rc!=SQLITE_OK ){
+        if( m.resolveRc!=SQLITE_OK ){
+          branchNamedResultError(ctx, hadSavepoint, m.resolveRc,
+            "start point not found", "start point not found");
+          return;
+        }
         branchNamedResultError(ctx, hadSavepoint, rc,
           "branch not found", "branch already exists");
         return;
