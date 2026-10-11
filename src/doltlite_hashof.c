@@ -83,6 +83,11 @@ static void doltliteHashofFunc(sqlite3_context *ctx, int argc, sqlite3_value **a
     return;
   }
   db = sqlite3_context_db_handle(ctx);
+  rc = doltliteRefreshAutocommitWorkingState(db);
+  if( rc!=SQLITE_OK ){
+    sqlite3_result_error_code(ctx, rc);
+    return;
+  }
   rc = hashofResolveRef(db, zRef, &commitHash);
   if( rc==SQLITE_NOTFOUND ){
     sqlite3_result_error(ctx, "dolt_hashof: invalid ref spec", -1);
@@ -850,6 +855,11 @@ static int hashofResolveRefCatalog(
   zRef = (const char*)sqlite3_value_text(pRefArg);
   if( !zRef ){
     sqlite3_result_null(ctx);
+    return 1;
+  }
+  rc = doltliteRefreshAutocommitWorkingState(db);
+  if( rc!=SQLITE_OK ){
+    sqlite3_result_error_code(ctx, rc);
     return 1;
   }
   if( zRef[0]==0 || doltliteRefIsWorking(zRef) || doltliteRefIsStaged(zRef) ){

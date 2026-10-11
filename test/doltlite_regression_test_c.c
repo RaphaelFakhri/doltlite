@@ -1976,11 +1976,73 @@ static void test_concurrent_refs_checkout_refreshes_branch(void){
   removeDbFiles(dbpath);
 }
 
+static void test_concurrent_refs_hashof_sees_peer_commit(void){
+  static const char *azForm[] = {
+    "SELECT dolt_hashof('HEAD')",
+    "SELECT dolt_hashof('main')",
+    "SELECT dolt_hashof('HEAD~1')",
+    "SELECT dolt_hashof_db('HEAD')",
+    "SELECT dolt_hashof_table('t', 'HEAD')",
+  };
+  sqlite3 *db1 = 0, *db2 = 0;
+  char dbpath[256];
+  char before[128];
+  char peer[128];
+  char name[96];
+  int i;
+
+  printf("--- Test 2b: dolt_hashof sees a peer commit ---\n");
+  make_dbpath(dbpath, sizeof(dbpath), "test_concurrent_refs_hashof");
+  removeDbFiles(dbpath);
+
+  check("hashof_open_db1", open_db(dbpath, &db1)==SQLITE_OK);
+  check("hashof_setup", execSql(db1,
+    "CREATE TABLE t(id INTEGER PRIMARY KEY);"
+    "INSERT INTO t VALUES(1);"
+    "SELECT dolt_commit('-A', '-m', 'init');"
+    "INSERT INTO t VALUES(2);"
+    "SELECT dolt_commit('-A', '-m', 'second');")==SQLITE_OK);
+  check("hashof_open_db2", open_db(dbpath, &db2)==SQLITE_OK);
+
+  for(i=0; i<(int)(sizeof(azForm)/sizeof(azForm[0])); i++){
+    char sql[128];
+    snprintf(before, sizeof(before), "%s", queryScalarText(db2, azForm[i]));
+    snprintf(sql, sizeof(sql), "INSERT INTO t VALUES(%d)", 10+i);
+    execSql(db1, sql);
+    snprintf(peer, sizeof(peer), "%s",
+             queryScalarText(db1, "SELECT dolt_commit('-A', '-m', 'peer')"));
+    queryScalarText(db2, azForm[i]);
+    snprintf(name, sizeof(name), "hashof_form_%d_sees_peer_commit", i);
+    check(name, strlen(before)==40 && strcmp(gBuf, before)!=0);
+    if( i<2 ){
+      snprintf(name, sizeof(name), "hashof_form_%d_is_peer_commit", i);
+      check(name, strcmp(gBuf, peer)==0);
+    }
+  }
+
+  check("hashof_pin_db2", execSql(db2, "BEGIN")==SQLITE_OK);
+  snprintf(before, sizeof(before), "%s",
+           queryScalarText(db2, "SELECT dolt_hashof('HEAD')"));
+  execSql(db1, "INSERT INTO t VALUES(99)");
+  snprintf(peer, sizeof(peer), "%s",
+           queryScalarText(db1, "SELECT dolt_commit('-A', '-m', 'peer in txn')"));
+  check("hashof_pinned_keeps_snapshot",
+    strcmp(queryScalarText(db2, "SELECT dolt_hashof('HEAD')"), before)==0);
+  check("hashof_unpin_db2", execSql(db2, "COMMIT")==SQLITE_OK);
+  check("hashof_after_commit_sees_peer",
+    strcmp(queryScalarText(db2, "SELECT dolt_hashof('HEAD')"), peer)==0);
+
+  sqlite3_close(db1);
+  sqlite3_close(db2);
+  removeDbFiles(dbpath);
+}
+
 static void run_concurrent_refs(void){
   printf("=== Concurrent Refs Test ===\n\n");
   test_concurrent_refs_stale_reset_is_rejected();
   test_concurrent_refs_informed_reset_moves_branch();
   test_concurrent_refs_checkout_refreshes_branch();
+  test_concurrent_refs_hashof_sees_peer_commit();
 }
 
 static void run_checkout_persist_failure(void){
