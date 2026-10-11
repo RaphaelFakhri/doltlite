@@ -70,6 +70,12 @@ do_test backup2-2 {
 # Delete the original.  Restore from backup.  Verify the content is
 # unchanged.
 #
+set restore_busy_result {1 {restore failed: source database busy}}
+set restore_source_prolly [expr {
+  [llength [info commands doltlite_test_engine]] &&
+  [doltlite_test_engine db2] ne "orig"
+}]
+if {$restore_source_prolly} {set restore_busy_result {0 {}}}
 do_test backup2-3.1 {
   db close
   forcedelete test.db test.db-journal
@@ -79,7 +85,10 @@ do_test backup2-3.1 {
   lappend rc $res
   db2 eval {ROLLBACK}
   set rc
-} {1 {restore failed: source database busy}}
+} $restore_busy_result
+if {$restore_source_prolly} {
+  do_test backup2-3.1.copy {dbcksum db main} $cksum
+}
 do_test backup2-3.2 {
   db close
   forcedelete test.db test.db-journal

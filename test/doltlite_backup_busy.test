@@ -1,0 +1,180 @@
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+
+foreach location {source destination own} {
+  foreach dest {file memory attached} {
+    if {$location eq "destination" && $dest eq "memory"} continue
+    foreach action {finish retry} {
+      set prefix backup-busy-$location.$dest.$action
+      reset_db
+      forcedelete backup-source.db backup-dest.db
+      sqlite3 src backup-source.db
+      src eval {
+        CREATE TABLE t(id INTEGER PRIMARY KEY,v BLOB);
+        CREATE INDEX tv ON t(v);
+        INSERT INTO t VALUES(1,'a'),(2,'b'),(3,'c');
+        SELECT dolt_commit('-Am','base');
+      }
+      set schema main
+      if {$dest eq "memory"} {
+        db close
+        sqlite3 db :memory:
+      } elseif {$dest eq "attached"} {
+        db eval {
+          CREATE TABLE sentinel(id INTEGER PRIMARY KEY);
+          INSERT INTO sentinel VALUES(77);
+          ATTACH 'backup-dest.db' AS aux;
+        }
+        set schema aux
+      }
+      db eval "CREATE TABLE $schema.t(id INTEGER PRIMARY KEY,v BLOB)"
+      db eval "INSERT INTO $schema.t VALUES(9,'dest')"
+      set writer src
+      if {$location ne "own"} {
+        set writer peer
+        if {$location eq "source"} {
+          sqlite3 peer backup-source.db
+        } elseif {$dest eq "attached"} {
+          sqlite3 peer backup-dest.db
+        } else {
+          sqlite3 peer test.db
+        }
+      }
+      $writer eval {BEGIN IMMEDIATE; INSERT INTO t VALUES(10,zeroblob(2000000))}
+      sqlite3_backup B db $schema src main
+      if {$location eq "source"} {
+        do_test $prefix.step {B step -1} SQLITE_DONE
+        do_test $prefix.finish {list [B finish] [sqlite3_errcode db]} \
+          {SQLITE_OK SQLITE_OK}
+        do_test $prefix.committed-only {
+          db eval "SELECT id,v FROM $schema.t INDEXED BY tv ORDER BY id"
+        } {1 a 2 b 3 c}
+        do_test $prefix.writer-kept {
+          $writer one {SELECT length(v) FROM t WHERE id=10}
+        } 2000000
+      } else {
+        do_test $prefix.busy {B step -1} SQLITE_BUSY
+        do_test $prefix.busy-again {B step -1} SQLITE_BUSY
+        if {$action eq "finish"} {
+          do_test $prefix.finish {
+            list [B finish] [sqlite3_errcode db]
+          } {SQLITE_BUSY SQLITE_BUSY}
+        }
+        do_test $prefix.destination-kept {
+          db eval "SELECT id,v FROM $schema.t ORDER BY id"
+        } {9 dest}
+      }
+      $writer eval {ROLLBACK}
+      if {$writer eq "peer"} {peer close}
+      if {$location ne "source" && $action eq "retry"} {
+        do_test $prefix.retry {B step -1} SQLITE_DONE
+        do_test $prefix.retry-finish {
+          list [B finish] [sqlite3_errcode db]
+        } {SQLITE_OK SQLITE_OK}
+        do_test $prefix.retry-rows {
+          db eval "SELECT id,v FROM $schema.t INDEXED BY tv ORDER BY id"
+        } {1 a 2 b 3 c}
+      }
+      do_test $prefix.source-writable {
+        src eval {INSERT INTO t VALUES(20,'after'); SELECT id FROM t ORDER BY id}
+      } {1 2 3 20}
+      do_test $prefix.integrity {db one "PRAGMA $schema.integrity_check"} ok
+      if {$dest eq "attached"} {
+        do_test $prefix.main-kept {db one {SELECT id FROM sentinel}} 77
+      }
+      src close
+      do_test $prefix.no-temp {glob -nocomplain *-backup-*} {}
+    }
+  }
+}
+
+foreach dest {file memory} {
+  set prefix backup-busy-snapshot-$dest
+  reset_db
+  forcedelete backup-source.db
+  sqlite3 src backup-source.db
+  src eval {
+    CREATE TABLE t(id INTEGER PRIMARY KEY);
+    INSERT INTO t VALUES(1);
+    SELECT dolt_commit('-Am','base');
+    BEGIN;
+    SELECT * FROM t;
+  }
+  sqlite3 peer backup-source.db
+  peer eval {INSERT INTO t VALUES(2); SELECT dolt_commit('-am','peer')}
+  if {$dest eq "memory"} {
+    db close
+    sqlite3 db :memory:
+  }
+  sqlite3_backup B db main src main
+  do_test $prefix.step {B step -1} SQLITE_DONE
+  do_test $prefix.finish {B finish} SQLITE_OK
+  do_test $prefix.snapshot {
+    db eval {SELECT id FROM t; SELECT message FROM dolt_log LIMIT 1}
+  } {1 base}
+  do_test $prefix.transaction-kept {
+    src eval {SELECT id FROM t; COMMIT; SELECT id FROM t ORDER BY id}
+  } {1 1 2}
+  do_test $prefix.writer-kept {peer eval {SELECT id FROM t ORDER BY id}} {1 2}
+  do_test $prefix.integrity {db one {PRAGMA integrity_check}} ok
+  peer close
+  src close
+}
+
+testvfs backupvfs
+backupvfs filter xWrite
+proc backup_snapshot_write {method file args} {
+  if {$::backupArmed && [string match *-backup-* $file]} {
+    set ::backupArmed 0
+    set ::backupRace [catch {peer eval $::backupPeerSql} ::backupMessage]
+  }
+  return SQLITE_OK
+}
+backupvfs script backup_snapshot_write
+set ::backupArmed 0
+foreach maintenance {commit gc vacuum} {
+  set prefix backup-busy-race-$maintenance
+  reset_db
+  forcedelete backup-source.db
+  sqlite3 src backup-source.db
+  src eval {
+    CREATE TABLE t(id INTEGER PRIMARY KEY,v BLOB);
+    INSERT INTO t VALUES(1,zeroblob(100000));
+    SELECT dolt_commit('-Am','base');
+    BEGIN;
+    SELECT * FROM t;
+  }
+  sqlite3 peer backup-source.db
+  set ::backupPeerSql {INSERT INTO t VALUES(2,'peer');
+                       SELECT dolt_commit('-am','peer');}
+  if {$maintenance eq "gc"} {append ::backupPeerSql {SELECT dolt_gc();}}
+  if {$maintenance eq "vacuum"} {append ::backupPeerSql {VACUUM;}}
+  db close
+  sqlite3 db test.db -vfs backupvfs
+  set ::backupRace -1
+  set ::backupArmed 1
+  sqlite3_backup B db main src main
+  do_test $prefix.step {B step -1} SQLITE_DONE
+  set ::backupArmed 0
+  do_test $prefix.raced {set ::backupRace} 0
+  do_test $prefix.finish {B finish} SQLITE_OK
+  do_test $prefix.snapshot {
+    db eval {SELECT id,length(v) FROM t; SELECT message FROM dolt_log LIMIT 1}
+  } {1 100000 base}
+  do_test $prefix.writer-kept {
+    peer eval {SELECT id FROM t ORDER BY id; PRAGMA integrity_check}
+  } {1 2 ok}
+  do_test $prefix.transaction-kept {
+    src eval {SELECT id FROM t; COMMIT; SELECT id FROM t ORDER BY id}
+  } {1 1 2}
+  peer close
+  src close
+  do_test $prefix.reopen {
+    db close
+    sqlite3 db test.db
+    db eval {SELECT id,length(v) FROM t; PRAGMA integrity_check}
+  } {1 100000 ok}
+}
+backupvfs delete
+
+finish_test

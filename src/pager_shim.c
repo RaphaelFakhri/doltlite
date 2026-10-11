@@ -1155,16 +1155,13 @@ int sqlite3_backup_step(sqlite3_backup *pBackup, int nPage){
   Btree *pDestBt = 0;
   sqlite3_vfs *pDestVfs = 0;
   const char *zDestFile = 0;
-  sqlite3_file *pSrc = 0;
-  sqlite3_file *pTmp = 0;
   char *zTmpFile = 0;
   char *zPreparedBranch = 0;
   ProllyHash replacementProofTip;
   int retainTmp = 0;
-  i64 fileSize = 0;
   int rc;
   int openFlags;
-  int srcLocked = 0;
+  int closeSrcTxn = 0;
   int destLocked = 0;
   int tmpStoreOpen = 0;
   int memoryAdopted = 0;
@@ -1177,7 +1174,9 @@ int sqlite3_backup_step(sqlite3_backup *pBackup, int nPage){
   if( p && p->pOrig ) return orig_sqlite3_backup_step(p->pOrig, nPage);
   if( !p ) return SQLITE_DONE;
   if( p->done ) return SQLITE_DONE;
-  if( p->rc!=SQLITE_OK ) return p->rc;
+  if( p->rc!=SQLITE_OK && p->rc!=SQLITE_BUSY && p->rc!=SQLITE_LOCKED ){
+    return p->rc;
+  }
 
   sqlite3_mutex_enter(p->pSrcDb->mutex);
   sqlite3BtreeEnter(p->pSrcBt);
@@ -1277,15 +1276,14 @@ int sqlite3_backup_step(sqlite3_backup *pBackup, int nPage){
     }
   }
 
-  rc = chunkStoreLockAndRefresh(srcCs);
-  if( rc!=SQLITE_OK ){
-    goto backup_step_done;
+  if( sqlite3BtreeTxnState(p->pSrcBt)==SQLITE_TXN_NONE ){
+    closeSrcTxn = 1;
+    rc = sqlite3BtreeBeginTrans(p->pSrcBt, 0, 0);
+    if( rc!=SQLITE_OK ) goto backup_step_done;
   }
-  srcLocked = 1;
 
   rc = chunkStoreLockAndRefresh(destCs);
   if( rc!=SQLITE_OK ){
-    if( rc!=SQLITE_BUSY && rc!=SQLITE_LOCKED ) p->rc = rc;
     goto backup_step_done;
   }
   destLocked = 1;
@@ -1340,62 +1338,16 @@ int sqlite3_backup_step(sqlite3_backup *pBackup, int nPage){
   if( rc==SQLITE_IOERR_DELETE_NOENT ) rc = SQLITE_OK;
   if( rc!=SQLITE_OK ) goto backup_step_done;
 
-  if( srcCs->isMemory ){
-    openFlags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
-              | SQLITE_OPEN_EXCLUSIVE | SQLITE_OPEN_MAIN_DB;
-    rc = chunkStoreOpen(&tmpStore, pDestVfs, zTmpFile, openFlags);
-    if( rc!=SQLITE_OK ) goto backup_step_done;
-    tmpStoreOpen = 1;
-    rc = chunkStoreCopyIntoEmpty(srcCs, &tmpStore);
-    if( rc!=SQLITE_OK ) goto backup_step_done;
-    chunkStoreClose(&tmpStore);
-    tmpStoreOpen = 0;
-  }else{
-    openFlags = SQLITE_OPEN_READONLY | SQLITE_OPEN_MAIN_DB;
-    rc = sqlite3OsOpenMalloc(p->pSrcVfs, p->zSrcFile, &pSrc, openFlags, 0);
-    if( rc != SQLITE_OK ) goto backup_step_done;
-
-    rc = sqlite3OsFileSize(pSrc, &fileSize);
-    if( rc != SQLITE_OK ){
-      goto backup_step_done;
-    }
-
-    openFlags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
-              | SQLITE_OPEN_EXCLUSIVE | SQLITE_OPEN_MAIN_DB;
-    rc = sqlite3OsOpenMalloc(pDestVfs, zTmpFile, &pTmp, openFlags, 0);
-    if( rc != SQLITE_OK ) goto backup_step_done;
-
-    {
-      u8 *buf = (u8*)sqlite3_malloc(65536);
-      i64 off = 0;
-      if( !buf ){
-        rc = SQLITE_NOMEM;
-        goto backup_step_done;
-      }
-      while( off < fileSize ){
-        int toRead = (fileSize - off) > 65536 ? 65536 : (int)(fileSize - off);
-        rc = sqlite3OsRead(pSrc, buf, toRead, off);
-        if( rc != SQLITE_OK ) break;
-        rc = sqlite3OsWrite(pTmp, buf, toRead, off);
-        if( rc != SQLITE_OK ) break;
-        off += toRead;
-      }
-      sqlite3_free(buf);
-    }
-
-    if( rc == SQLITE_OK ){
-      rc = sqlite3OsTruncate(pTmp, fileSize);
-    }
-    if( rc == SQLITE_OK ){
-      rc = sqlite3OsSync(pTmp,
-          destCs->fullFsync ? SQLITE_SYNC_FULL : SQLITE_SYNC_NORMAL);
-    }
-    if( pTmp ){
-      sqlite3OsClose(pTmp);
-      sqlite3_free(pTmp);
-      pTmp = 0;
-    }
-  }
+  openFlags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
+            | SQLITE_OPEN_EXCLUSIVE | SQLITE_OPEN_MAIN_DB;
+  rc = chunkStoreOpen(&tmpStore, pDestVfs, zTmpFile, openFlags);
+  if( rc!=SQLITE_OK ) goto backup_step_done;
+  tmpStoreOpen = 1;
+  tmpStore.fullFsync = destCs->fullFsync;
+  rc = chunkStoreCopyIntoEmpty(srcCs, &tmpStore);
+  if( rc!=SQLITE_OK ) goto backup_step_done;
+  chunkStoreClose(&tmpStore);
+  tmpStoreOpen = 0;
   if( rc == SQLITE_OK ){
 #if SQLITE_OS_WIN
     csCloseFile(chunkFileGetHandle(&destCs->file));
@@ -1427,8 +1379,6 @@ int sqlite3_backup_step(sqlite3_backup *pBackup, int nPage){
   }
 
 backup_step_done:
-  if( pSrc ) sqlite3OsCloseFree(pSrc);
-  if( pTmp ) sqlite3OsCloseFree(pTmp);
   if( tmpStoreOpen ) chunkStoreClose(&tmpStore);
   sqlite3_free(zPreparedBranch);
   if( zTmpFile ){
@@ -1465,17 +1415,23 @@ backup_step_done:
     }
   }
 
-  if( srcLocked ) chunkStoreUnlock(srcCs);
+  if( closeSrcTxn ){
+    int rcClose = sqlite3BtreeCommitPhaseOne(p->pSrcBt, 0);
+    if( rcClose==SQLITE_OK ){
+      rcClose = sqlite3BtreeCommitPhaseTwo(p->pSrcBt, 0);
+    }
+    if( rc==SQLITE_OK ) rc = rcClose;
+  }
 
   sqlite3_mutex_leave(p->pDestDb->mutex);
   sqlite3BtreeLeave(p->pSrcBt);
   sqlite3_mutex_leave(p->pSrcDb->mutex);
 
+  p->rc = rc;
   if( rc == SQLITE_OK ){
     p->done = 1;
     return SQLITE_DONE;
   }
-  if( rc!=SQLITE_BUSY && rc!=SQLITE_LOCKED ) p->rc = rc;
   return rc;
 }
 
