@@ -1,0 +1,107 @@
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+
+db eval {
+  CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);
+  WITH RECURSIVE c(x) AS (
+    SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x<300
+  ) INSERT INTO t SELECT x, printf('v%05d-%s',x,hex(zeroblob(40))) FROM c;
+  CREATE TABLE u(k TEXT PRIMARY KEY, n INT);
+  INSERT INTO u VALUES('a',1),('b',2);
+  SELECT dolt_commit('-Am','init');
+  SELECT dolt_checkout('-b','feat');
+  INSERT INTO t VALUES(1001,'f1');
+  UPDATE u SET n=20 WHERE k='b';
+  SELECT dolt_commit('-am','feat1');
+  SELECT dolt_checkout('main');
+  UPDATE t SET v='m' WHERE id=5;
+  SELECT dolt_commit('-am','main2');
+}
+db close
+file copy -force test.db apply-read-base.db
+
+set armed 0
+proc apply_read_error {method filename args} {
+  if {$::armed && [file tail $filename] eq "test.db"} {
+    incr ::reads
+    if {$::reads >= $::fault && $::reads < $::fault+$::width} {
+      incr ::hits
+      return SQLITE_IOERR
+    }
+  }
+  return SQLITE_OK
+}
+testvfs applyio
+applyio filter {xRead}
+applyio script apply_read_error
+
+set state {
+  SELECT name,sql FROM sqlite_master ORDER BY name;
+  SELECT count(*),md5sum(id,v) FROM t;
+  SELECT k,n FROM u ORDER BY k;
+  SELECT dolt_hashof('HEAD');
+  SELECT table_name,staged,status FROM dolt_status ORDER BY table_name,staged;
+  PRAGMA integrity_check;
+}
+set rejected 0
+foreach op {cherry-pick revert rollback} {
+  switch $op {
+    cherry-pick {set sql {SELECT dolt_cherry_pick('feat')}}
+    revert {set sql {SELECT dolt_revert('HEAD')}}
+    rollback {set sql ROLLBACK}
+  }
+  foreach width {1 3 8} {
+    for {set fault 1} {$fault <= 500} {incr fault} {
+      forcedelete test.db
+      file copy -force apply-read-base.db test.db
+      sqlite3 db test.db -vfs applyio
+      db eval {SELECT * FROM dolt_status; SELECT * FROM u}
+      if {$op eq "rollback"} {
+        db eval {BEGIN; ALTER TABLE t RENAME TO renamed; DROP TABLE u}
+      }
+      set reads 0
+      set hits 0
+      set armed 1
+      set result [catchsql $sql]
+      set armed 0
+      sqlite3 observer test.db -readonly 1
+      set expected [observer eval $state]
+      observer close
+      set prefix apply-read-$op.$width.$fault
+      do_test $prefix.session {catchsql $state} [list 0 $expected]
+      if {[lindex $result 0]} {
+        incr rejected
+      }
+      do_test $prefix.routine-commit {
+        lindex [catchsql {SELECT dolt_commit('-am','routine')}] 0
+      } 1
+      do_test $prefix.write {
+        lindex [catchsql {
+          INSERT INTO u VALUES('c',3);
+          SELECT dolt_commit('-am','user edit');
+        }] 0
+      } 0
+      do_test $prefix.reopen {
+        db close
+        sqlite3 db test.db
+        set actual [db eval {
+          SELECT name,sql FROM sqlite_master ORDER BY name;
+          SELECT count(*),md5sum(id,v) FROM t;
+          SELECT k,n FROM u WHERE k<>'c' ORDER BY k;
+          SELECT dolt_hashof('HEAD~1');
+          SELECT table_name,staged,status FROM dolt_status ORDER BY table_name,staged;
+          PRAGMA integrity_check;
+        }]
+        list [expr {$actual eq $expected}] [db one {SELECT n FROM u WHERE k='c'}]
+      } {1 3}
+      db close
+      if {$hits==0} break
+    }
+    do_test apply-read-$op.$width.exhausted {expr {$fault<=500}} 1
+  }
+}
+do_test apply-read.rejected {expr {$rejected>0}} 1
+applyio delete
+forcedelete apply-read-base.db
+sqlite3 db test.db
+finish_test

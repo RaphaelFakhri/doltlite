@@ -529,7 +529,8 @@ int btreeReloadBranchWorkingStateInto(
 
   if( bLoadCatalog
    && !prollyHashIsEmpty(&state.catalog)
-   && (p->bForceCatalogReload
+   && (p->bCatalogDropped
+       || p->bForceCatalogReload
        || prollyHashIsEmpty(&p->committedCatalogHash)
        || prollyHashCompare(&state.catalog, &p->committedCatalogHash)!=0) ){
     u8 *catData = 0;
@@ -634,7 +635,8 @@ int btreeRefreshSharedWorkingState(Btree *p){
   assert( p!=0 && p->pBt!=0 );
   if( p->isDetached ) return SQLITE_OK;
   pBt = p->pBt;
-  if( p->iLoadedWorkingStateVersion==pBt->iWorkingStateVersion ){
+  if( p->iLoadedWorkingStateVersion==pBt->iWorkingStateVersion
+   && !p->bCatalogDropped ){
     return SQLITE_OK;
   }
   memset(&loadedCatHash, 0, sizeof(loadedCatHash));
