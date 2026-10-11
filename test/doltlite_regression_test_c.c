@@ -1581,6 +1581,8 @@ static int gFailSyncOnce = 0;
 static int gFailWriteNth = 0;
 static int gFailSyncNth = 0;
 static int gFailReadNth = 0;
+static int gFailReadWidth = 0;
+static int gFailReadBurst = 0;
 static int gFailAccessOnce = 0;
 static int gFailHasMovedOnce = 0;
 static int gFailFileSizeOnce = 0;
@@ -1618,6 +1620,12 @@ static int failClose(sqlite3_file *pFile){
 static int failRead(sqlite3_file *pFile, void *zBuf, int iAmt, sqlite3_int64 iOfst){
   FailFile *p = (FailFile*)pFile;
   if( p->isMainDb && gFailReadNth>0 && --gFailReadNth==0 ){
+    gFailHits++;
+    if( gFailReadWidth>1 ) gFailReadBurst = gFailReadWidth-1;
+    return SQLITE_IOERR_READ;
+  }
+  if( p->isMainDb && gFailReadBurst>0 ){
+    gFailReadBurst--;
     gFailHits++;
     return SQLITE_IOERR_READ;
   }
@@ -9684,6 +9692,59 @@ static void run_vc_interrupt(void){
   removeDbFiles(dbpath);
 }
 
+static void run_failed_refs_restore_keeps_refs(void){
+  const char *zRefs =
+    "SELECT (SELECT group_concat(name) FROM dolt_branches)"
+    " || '|' || (SELECT group_concat(tag_name) FROM dolt_tags)";
+  char dbpath[512];
+  int width, nth;
+
+  check("failed_refs_restore_register", registerFailVfs()==SQLITE_OK);
+  make_dbpath(dbpath, sizeof(dbpath), "failed_refs_restore");
+  for(width=1; width<=3; width++){
+    for(nth=1; nth<200; nth++){
+      sqlite3 *db = 0, *fresh = 0;
+      char zLive[256];
+      int hits;
+      removeDbFiles(dbpath);
+      check("failed_refs_restore_open", open_db(dbpath, &db)==SQLITE_OK);
+      if( !db ) break;
+      execSql(db,
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);"
+        "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x<300)"
+        " INSERT INTO t SELECT x, hex(zeroblob(40)) FROM c;"
+        "SELECT dolt_commit('-Am','init'); SELECT dolt_tag('v1');"
+        "SELECT dolt_checkout('-b','feat');"
+        "INSERT INTO t VALUES(1001,'f'); SELECT dolt_commit('-am','feat1');"
+        "SELECT dolt_checkout('main');"
+        "UPDATE t SET v='m' WHERE id=5; SELECT dolt_commit('-am','main2');");
+      sqlite3_close(db);
+      db = 0;
+      check("failed_refs_restore_open", open_fail_db(dbpath, &db)==SQLITE_OK);
+      if( !db ) break;
+      gFailHits = 0;
+      gFailReadWidth = width;
+      gFailReadNth = nth;
+      execSqlSilent(db, "SELECT dolt_merge('feat')");
+      hits = gFailHits;
+      gFailReadNth = gFailReadWidth = gFailReadBurst = 0;
+      queryScalarText(db, "SELECT count(*) FROM dolt_branches");
+      sqlite3_snprintf(sizeof(zLive), zLive, "%s", queryScalarText(db, zRefs));
+      check("failed_refs_restore_live_refs",
+            strcmp(zLive, "main,feat|v1")==0);
+      sqlite3_close(db);
+      check("failed_refs_restore_reopen", open_db(dbpath, &fresh)==SQLITE_OK);
+      if( fresh ){
+        check("failed_refs_restore_durable_refs",
+              strcmp(queryScalarText(fresh, zRefs), "main,feat|v1")==0);
+        sqlite3_close(fresh);
+      }
+      if( hits==0 ) break;
+    }
+  }
+  removeDbFiles(dbpath);
+}
+
 static void run_vc_late_io_failure(void){
   const char *azOps[] = {
     "SELECT dolt_reset('--hard')",
@@ -16437,6 +16498,8 @@ static const RegressionCase aCases[] = {
   { "commit_publication", "Commit Publication Test", run_commit_publication },
   { "vc_interrupt", "VC Interrupt Test", run_vc_interrupt },
   { "vc_late_io_failure", "VC Late IO Failure Test", run_vc_late_io_failure },
+  { "failed_refs_restore_keeps_refs", "Failed Refs Restore Keeps Refs Test",
+    run_failed_refs_restore_keeps_refs },
   { "amend_all_read_failure_keeps_changes", "Amend -a Read Failure Keeps Working Changes Test", run_amend_all_read_failure_keeps_changes },
   { "clean_write_failure_is_atomic", "Clean Write Failure Is Atomic Test", run_clean_write_failure_is_atomic },
   { "amend_persist_failure_preserves_durable_state", "Amend Persist Failure Preserves Durable State Test", run_amend_persist_failure_preserves_durable_state },

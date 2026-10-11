@@ -1125,6 +1125,15 @@ static SQLITE_NOINLINE int commitPhaseTwoWrite(Btree *p, BtShared *pBt){
   memset(&reloadBtree, 0, sizeof(reloadBtree));
 
   PROLLY_ASSERT_GRAPH_LOCKED(pBt);
+  /* A failed refs restore discarded the in-memory refs; publishing them
+  ** would write an empty ref list. Reload under the lock or refuse. */
+  if( pBt->store.bRefsStale ){
+    rc = chunkStoreEnsureRefsFresh(&pBt->store);
+    if( rc!=SQLITE_OK ){
+      commitPhaseTwoAbort(pBt, 0, 0, 0);
+      return rc;
+    }
+  }
   rc = flushAllPending(p, pBt, 0);
   if( rc!=SQLITE_OK ){
     commitPhaseTwoAbort(pBt, 0, 0, 0);
