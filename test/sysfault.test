@@ -259,7 +259,16 @@ do_faultsim_test 3 -faults vfsfault-* -prep {
     COMMIT;
   }
 } -test {
-  faultsim_test_result {0 20000}
+  ifcapable doltlite {
+    faultsim_test_result {0 20000} {1 {disk I/O error}}
+    if {$testrc} { catch {db eval ROLLBACK} }
+    if {[db one {PRAGMA integrity_check}] ne "ok"
+        || [db one {SELECT count(*) FROM t1}] != ($testrc ? 0 : 1)} {
+      error "fault left an invalid database or row count"
+    }
+  } else {
+    faultsim_test_result {0 20000}
+  }
 }
 
 #-------------------------------------------------------------------------
