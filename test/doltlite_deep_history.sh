@@ -99,11 +99,15 @@ run_test "at_commit10_tracker_val" \
 echo "Test 6: dolt_diff_t audit log..."
 run_test "diff_table_total_entries" \
   "SELECT count(*) FROM dolt_diff_t;" \
-  "1002" "$DB"
+  "1003" "$DB"
 
 run_test_match "diff_table_has_added" \
   "SELECT count(*) FROM dolt_diff_t WHERE diff_type='added';" \
-  "^503$" "$DB"
+  "^504$" "$DB"
+
+run_test "diff_table_main_after_branch" \
+  "SELECT count(*) FROM dolt_diff_t WHERE to_commit=(SELECT commit_hash FROM dolt_log WHERE message='main_after_branch') AND to_id=1000 AND diff_type='added';" \
+  "1" "$DB"
 
 run_test_match "diff_table_has_modified" \
   "SELECT count(*) FROM dolt_diff_t WHERE diff_type='modified';" \

@@ -383,9 +383,21 @@ oracle "difft_join_log_from_commit" "$LINEAR" \
 "SELECT CONCAT('R|', l.message, '|', d.diff_type, '|', coalesce(d.to_id, 'NULL'))
  FROM dolt_diff_t d JOIN dolt_log l ON l.commit_hash = d.from_commit;"
 
-oracle "difft_both_endpoints_named" "$BRANCHY" \
+# Per-commit lookups avoid Dolt's lost shared-parent edge in full history.
+run_pair "difft_both_endpoints_named" "$BRANCHY" \
 "SELECT CONCAT('R|', lf.message, '|', lt.message, '|', d.diff_type, '|', coalesce(d.to_id, d.from_id))
  FROM dolt_diff_t d
+ JOIN dolt_log lf ON lf.commit_hash = d.from_commit
+ JOIN dolt_log lt ON lt.commit_hash = d.to_commit;" \
+"SELECT CONCAT('R|', lf.message, '|', lt.message, '|', d.diff_type, '|', coalesce(d.to_id, d.from_id))
+ FROM (
+   SELECT * FROM dolt_diff_t WHERE to_commit = HASHOF('HEAD')
+   UNION ALL SELECT * FROM dolt_diff_t WHERE to_commit = HASHOF('HEAD~1')
+   UNION ALL SELECT * FROM dolt_diff_t WHERE to_commit = HASHOF('HEAD~2')
+   UNION ALL SELECT * FROM dolt_diff_t WHERE to_commit = HASHOF('HEAD~3')
+   UNION ALL SELECT * FROM dolt_diff_t WHERE to_commit = HASHOF('HEAD^2')
+   UNION ALL SELECT * FROM dolt_diff_t WHERE to_commit = HASHOF('HEAD^2~1')
+ ) d
  JOIN dolt_log lf ON lf.commit_hash = d.from_commit
  JOIN dolt_log lt ON lt.commit_hash = d.to_commit;"
 
