@@ -5655,11 +5655,18 @@ static void run_cherry_pick_stale_branch(void){
 
   snprintf(sql, sizeof(sql), "SELECT dolt_cherry_pick('%s')", featHash);
   res = queryScalarText(db2, sql);
-  check("stale_cherry_pick_returns_error", strstr(res, "ERROR:")!=0);
+  check("stale_cherry_pick_adopts_peer_tip", strlen(res)==40);
+  check("stale_cherry_pick_keeps_peer_row",
+    strcmp(queryScalarText(db2, "SELECT v FROM t WHERE id=3"), "main")==0);
+  check("stale_cherry_pick_applies_feature_row",
+    strcmp(queryScalarText(db2, "SELECT v FROM t WHERE id=2"), "feat")==0);
+  check("stale_cherry_pick_keeps_peer_commit",
+    strcmp(queryScalarText(db2,
+      "SELECT count(*) FROM dolt_log WHERE message='main work'"), "1")==0);
 
   check("open_db3", open_db(dbpath, &db3)==SQLITE_OK);
-  check("stale_cherry_pick_does_not_persist_feature_row",
-    strcmp(queryScalarText(db3, "SELECT count(*) FROM t"), "2")==0);
+  check("stale_cherry_pick_persists_both_rows",
+    strcmp(queryScalarText(db3, "SELECT count(*) FROM t"), "3")==0);
 
   sqlite3_close(db3);
   sqlite3_close(db2);

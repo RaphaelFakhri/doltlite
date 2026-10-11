@@ -1181,6 +1181,7 @@ static void doltliteGcFunc(
     if( rc==SQLITE_BUSY ){
       sqlite3_result_error(context,
         zPhase ? zPhase : "database is locked by another connection", -1);
+      sqlite3_result_error_code(context, SQLITE_BUSY);
     }else{
       gcResultError(context, rc, zPhase);
     }

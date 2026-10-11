@@ -627,6 +627,16 @@ static void doltliteCherryPickFunc(
   }
   doltliteCmdArgsClear(&args);
 
+  /* An autocommit session opened before a peer commit still names the old
+  ** tip. Refresh it before treating that as a dirty working tree. Inside a
+  ** transaction the caller's snapshot stands. */
+  rc = doltliteSyncSessionToBranchTip(db);
+  if( rc!=SQLITE_OK ){
+    (void)doltliteVcSealSavepointError(db);
+    sqlite3_result_error_code(context, rc);
+    return;
+  }
+
   rc = doltliteHasUncommittedChanges(db, &dirty);
   if( rc!=SQLITE_OK ){
     doltliteCmdSourceResultErrorOrCode(context, cs, rc);
