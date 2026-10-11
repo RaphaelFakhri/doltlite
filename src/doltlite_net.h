@@ -94,6 +94,28 @@ static inline int doltliteSocketSetBlocking(int fd, int blocking) {
 #endif
 }
 
+/* >0 bytes, 0 on EOF, -1 on error, -2 if the nonblocking socket would wait. */
+static inline int doltliteSocketRecv(int fd, void *buf, int nBuf) {
+#ifdef _WIN32
+  int n;
+  if (nBuf <= 0) return -1;
+  n = recv(fd, (char *)buf, nBuf, 0);
+  if (n == 0) return 0;
+  if (n > 0) return n;
+  n = WSAGetLastError();
+  if (n == WSAEWOULDBLOCK || n == WSAEINTR) return -2;
+  return -1;
+#else
+  int n;
+  if (nBuf <= 0) return -1;
+  n = (int)recv(fd, buf, (size_t)nBuf, 0);
+  if (n == 0) return 0;
+  if (n > 0) return n;
+  if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return -2;
+  return -1;
+#endif
+}
+
 static inline int doltliteSocketConnectPending(void) {
 #ifdef _WIN32
   int err = WSAGetLastError();

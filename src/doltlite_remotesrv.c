@@ -24,14 +24,38 @@ int doltliteServerPort(DoltliteServer *s){ (void)s; return 0; }
 #include <pthread.h>
 #include <errno.h>
 
-/* Bound resource use; keep a slow client off the accept loop. */
+/* Workers run only after the request header has arrived. Idle connections
+** stay on the accept thread, so they cannot fill the pool. */
 #define SERVER_WORKERS 4
 #define SERVER_QUEUE_SIZE 16
+#define SERVER_PENDING_MAX 64
 #define SERVER_DEFAULT_TIMEOUT_MS 30000
+#define SERVER_HEADER_TIMEOUT_MS 2000
 #define SERVER_DB_CACHE_MAX 32
+#define MAX_HEADER_SIZE 4096
 
 typedef struct DoltliteWorkerArg DoltliteWorkerArg;
 typedef struct RemoteDbHandle RemoteDbHandle;
+typedef struct PendingConn PendingConn;
+
+struct ServerJob {
+  int fd;
+  DoltliteConn *conn;
+  char *zPrefix;
+  int nPrefix;
+  int nHeader;
+};
+
+/* Header bytes collected before a worker is taken. conn is set for TLS. */
+struct PendingConn {
+  int fd;
+  DoltliteConn *conn;
+  i64 startMs;
+  char aBuf[MAX_HEADER_SIZE];
+  int nBuf;
+  int bHandshake;
+  int bWantWrite;
+};
 
 struct DoltliteWorkerArg {
   DoltliteServer *pSrv;
@@ -66,11 +90,12 @@ struct DoltliteServer {
   pthread_cond_t workReady;
   int mutexInit;
   int condInit;
-  int queue[SERVER_QUEUE_SIZE];
+  struct ServerJob queue[SERVER_QUEUE_SIZE];
   int queueHead;
   int nQueue;
   int activeFd[SERVER_WORKERS];
   int timeoutMs;
+  PendingConn *aPending;
 
   DoltliteTlsServer *tls;
   char *authKeysDir;
@@ -298,16 +323,14 @@ static int remoteSrvCommitPending(ChunkStore *pStore){
   return rc;
 }
 
-#define MAX_HEADER_SIZE 4096
-
 /* Unauthenticated protocol caps. Response matches HTTP_RESP_MAX_BYTES so
 ** batch get-chunks cannot materialize an unbounded reply. */
 #define MAX_CHUNK_BYTES    ((i64)1024 * 1024 * 1024)
 #define MAX_REQUEST_BYTES  MAX_CHUNK_BYTES
 #define MAX_RESPONSE_BYTES MAX_REQUEST_BYTES
 
-/* Header must arrive in one timeout; body then sustains BODY_MIN_RATE
-** (slow-loris vs slow large upload). */
+/* After the header, the body must sustain BODY_MIN_RATE against timeoutMs
+** (slow-loris versus a slow large upload). */
 #define SERVER_BODY_MIN_RATE     (64 * 1024)
 
 static i64 monotonicMs(void){
@@ -384,41 +407,34 @@ static int parseContentLength(
   return 0;
 }
 
+/* zPrefix holds the header block plus any body bytes already read with it.
+** nHeader is the index just past the blank line. The rest of the body is
+** read here under timeoutMs. */
 static int parseRequest(
   DoltliteConn *fd,
+  char *zPrefix, int nPrefix, int nHeader,
+  int timeoutMs,
   char *zMethod, int nMethodMax,
   char *zPath, int nPathMax,
   char *zAuth, int nAuthMax,
-  u8 **ppBody, int *pnBody,
-  int timeoutMs
+  u8 **ppBody, int *pnBody
 ){
   char aBuf[MAX_HEADER_SIZE];
-  int nBuf = 0;
-  int headerEnd = 0;
   int contentLength = 0;
   int seenContentLength = 0;
   int seenAuthorization = 0;
-  i64 startMs = monotonicMs();
+  int nHave;
+  const u8 *pHave;
   char *p;
 
   *ppBody = 0;
   *pnBody = 0;
   if( zAuth && nAuthMax>0 ) zAuth[0] = '\0';
-
-  while( nBuf < MAX_HEADER_SIZE-1 ){
-    int n = doltliteConnRead(fd, &aBuf[nBuf], 1);
-    if( n <= 0 ) return -1;
-    if( monotonicMs() - startMs > timeoutMs ) return -1;
-    nBuf++;
-    if( nBuf>=4
-     && aBuf[nBuf-4]=='\r' && aBuf[nBuf-3]=='\n'
-     && aBuf[nBuf-2]=='\r' && aBuf[nBuf-1]=='\n' ){
-      headerEnd = 1;
-      break;
-    }
-  }
-  if( !headerEnd ) return -1;
-  aBuf[nBuf] = '\0';
+  if( nHeader<=0 || nHeader>nPrefix || nHeader>=MAX_HEADER_SIZE ) return -1;
+  memcpy(aBuf, zPrefix, (size_t)nHeader);
+  aBuf[nHeader] = '\0';
+  nHave = nPrefix - nHeader;
+  pHave = (const u8 *)(zPrefix + nHeader);
 
   p = aBuf;
   {
@@ -489,11 +505,20 @@ static int parseRequest(
   }
 
   if( contentLength > 0 ){
-    u8 *pBody = (u8*)sqlite3_malloc(contentLength);
+    u8 *pBody;
+    int nCopy;
+    pBody = (u8*)sqlite3_malloc(contentLength);
     if( !pBody ) return -1;
-    if( readExact(fd, pBody, contentLength, monotonicMs(), timeoutMs)!=0 ){
-      sqlite3_free(pBody);
-      return -1;
+    nCopy = nHave;
+    if( nCopy>contentLength ) nCopy = contentLength;
+    if( nCopy>0 ) memcpy(pBody, pHave, (size_t)nCopy);
+    if( nCopy<contentLength ){
+      doltliteConnSetTimeout(fd, timeoutMs);
+      if( readExact(fd, pBody + nCopy, contentLength - nCopy,
+                    monotonicMs(), timeoutMs)!=0 ){
+        sqlite3_free(pBody);
+        return -1;
+      }
     }
     *ppBody = pBody;
     *pnBody = contentLength;
@@ -1226,7 +1251,13 @@ static void remoteDbRelease(DoltliteServer *pSrv, RemoteDbHandle *h){
   pthread_mutex_unlock(&pSrv->mutex);
 }
 
-static void handleRequest(DoltliteServer *pSrv, DoltliteConn *fd){
+static void handleRequest(
+  DoltliteServer *pSrv,
+  DoltliteConn *fd,
+  char *zPrefix,
+  int nPrefix,
+  int nHeader
+){
   char zMethod[16];
   char zPath[512];
   char zDbName[256];
@@ -1245,10 +1276,10 @@ static void handleRequest(DoltliteServer *pSrv, DoltliteConn *fd){
   sqlite3_vfs *pVfs;
   RemoteSrvPending pending;
 
-  rc = parseRequest(fd, zMethod, sizeof(zMethod),
+  rc = parseRequest(fd, zPrefix, nPrefix, nHeader, pSrv->timeoutMs,
+                    zMethod, sizeof(zMethod),
                     zPath, sizeof(zPath),
-                    zAuth, sizeof(zAuth), &pBody, &nBody,
-                    pSrv->timeoutMs);
+                    zAuth, sizeof(zAuth), &pBody, &nBody);
   if( rc!=0 ){
     if( rc==-2 ){
       sendPayloadTooLarge(fd);
@@ -1369,7 +1400,7 @@ static void *serverWorkerEntry(void *pArg){
 
   for(;;){
     DoltliteConn *conn;
-    int clientFd;
+    struct ServerJob job;
 
     pthread_mutex_lock(&pSrv->mutex);
     while( pSrv->nQueue==0 && pSrv->running ){
@@ -1379,18 +1410,18 @@ static void *serverWorkerEntry(void *pArg){
       pthread_mutex_unlock(&pSrv->mutex);
       break;
     }
-    clientFd = pSrv->queue[pSrv->queueHead];
+    job = pSrv->queue[pSrv->queueHead];
     pSrv->queueHead = (pSrv->queueHead + 1) % SERVER_QUEUE_SIZE;
     pSrv->nQueue--;
-    pSrv->activeFd[pWorker->index] = clientFd;
+    pSrv->activeFd[pWorker->index] = job.fd;
     pthread_mutex_unlock(&pSrv->mutex);
 
-    conn = pSrv->tls ? doltliteConnServerAccept(pSrv->tls, clientFd)
-                     : doltliteConnFromFd(clientFd);
+    conn = job.conn ? job.conn : doltliteConnFromFd(job.fd);
     if( conn ){
-      handleRequest(pSrv, conn);
+      handleRequest(pSrv, conn, job.zPrefix, job.nPrefix, job.nHeader);
       doltliteConnClose(conn);
     }
+    sqlite3_free(job.zPrefix);
 
     pthread_mutex_lock(&pSrv->mutex);
     pSrv->activeFd[pWorker->index] = -1;
@@ -1425,11 +1456,14 @@ static void serverRequestStop(DoltliteServer *pSrv){
   pthread_mutex_lock(&pSrv->mutex);
   pSrv->running = 0;
   while( pSrv->nQueue>0 ){
-    int fd = pSrv->queue[pSrv->queueHead];
+    struct ServerJob job;
+    job = pSrv->queue[pSrv->queueHead];
     pSrv->queueHead = (pSrv->queueHead + 1) % SERVER_QUEUE_SIZE;
     pSrv->nQueue--;
-    doltliteShutdownSocket(fd);
-    doltliteCloseSocket(fd);
+    if( job.fd>=0 ) doltliteShutdownSocket(job.fd);
+    if( job.conn ) doltliteConnClose(job.conn);
+    else if( job.fd>=0 ) doltliteCloseSocket(job.fd);
+    sqlite3_free(job.zPrefix);
   }
   /* shutdown() wakes blocking I/O without descriptor reuse. */
   for(i=0; i<pSrv->nWorkers; i++){
@@ -1487,6 +1521,12 @@ static int serverInit(DoltliteServer *pSrv, const DoltliteServeOpts *o){
     return SQLITE_ERROR;
   }
   pSrv->condInit = 1;
+  pSrv->aPending = sqlite3_malloc(sizeof(PendingConn) * SERVER_PENDING_MAX);
+  if( !pSrv->aPending ){
+    serverCleanup(pSrv);
+    return SQLITE_NOMEM;
+  }
+  for(i=0; i<SERVER_PENDING_MAX; i++) pSrv->aPending[i].fd = -1;
 
   if( zBindAddr==0 || zBindAddr[0]=='\0' ){
     zBindAddr = "127.0.0.1";
@@ -1577,35 +1617,237 @@ static int serverInit(DoltliteServer *pSrv, const DoltliteServeOpts *o){
   return SQLITE_OK;
 }
 
+static int serverHeaderBudget(const DoltliteServer *pSrv){
+  if( pSrv->timeoutMs < SERVER_HEADER_TIMEOUT_MS ) return pSrv->timeoutMs;
+  return SERVER_HEADER_TIMEOUT_MS;
+}
+
+static int pendingBudget(const DoltliteServer *pSrv, const PendingConn *p){
+  if( p->bHandshake ) return pSrv->timeoutMs;
+  return serverHeaderBudget(pSrv);
+}
+
+static void pendingClose(PendingConn *p){
+  if( p->conn ){
+    doltliteConnClose(p->conn);
+    p->conn = 0;
+    p->fd = -1;
+  }else if( p->fd>=0 ){
+    doltliteCloseSocket(p->fd);
+    p->fd = -1;
+  }
+  p->nBuf = 0;
+  p->bHandshake = 0;
+  p->bWantWrite = 0;
+}
+
+static int pendingHeaderEnd(const char *aBuf, int nBuf){
+  int i;
+  for(i=0; i+3<nBuf; i++){
+    if( aBuf[i]=='\r' && aBuf[i+1]=='\n'
+     && aBuf[i+2]=='\r' && aBuf[i+3]=='\n' ){
+      return i + 4;
+    }
+  }
+  return 0;
+}
+
+static int enqueueJob(
+  DoltliteServer *pSrv,
+  int fd,
+  DoltliteConn *conn,
+  char *zPrefix,
+  int nPrefix,
+  int nHeader
+){
+  int idx;
+  struct ServerJob *job;
+
+  pthread_mutex_lock(&pSrv->mutex);
+  if( !pSrv->running || pSrv->nQueue==SERVER_QUEUE_SIZE ){
+    pthread_mutex_unlock(&pSrv->mutex);
+    sqlite3_free(zPrefix);
+    if( conn ) doltliteConnClose(conn);
+    else if( fd>=0 ) doltliteCloseSocket(fd);
+    return -1;
+  }
+  idx = (pSrv->queueHead + pSrv->nQueue) % SERVER_QUEUE_SIZE;
+  job = &pSrv->queue[idx];
+  job->fd = fd;
+  job->conn = conn;
+  job->zPrefix = zPrefix;
+  job->nPrefix = nPrefix;
+  job->nHeader = nHeader;
+  pSrv->nQueue++;
+  pthread_cond_signal(&pSrv->workReady);
+  pthread_mutex_unlock(&pSrv->mutex);
+  return 0;
+}
+
+/* Move a finished header onto the worker queue. 0 means this slot no longer
+** owns the connection. -1 leaves it in place for the caller to close. */
+static int pendingPromote(
+  DoltliteServer *pSrv,
+  PendingConn *p,
+  int nHeader
+){
+  char *zCopy;
+  int nPrefix;
+  int fd;
+  DoltliteConn *conn;
+
+  nPrefix = p->nBuf;
+  zCopy = sqlite3_malloc(nPrefix + 1);
+  if( !zCopy ) return -1;
+  memcpy(zCopy, p->aBuf, (size_t)nPrefix);
+  zCopy[nPrefix] = 0;
+  if( doltliteSocketSetBlocking(p->fd, 1)!=0
+   || doltliteSocketSetTimeout(p->fd, pSrv->timeoutMs)!=0 ){
+    sqlite3_free(zCopy);
+    return -1;
+  }
+  fd = p->fd;
+  conn = p->conn;
+  p->fd = -1;
+  p->conn = 0;
+  p->nBuf = 0;
+  p->bHandshake = 0;
+  p->bWantWrite = 0;
+  enqueueJob(pSrv, fd, conn, zCopy, nPrefix, nHeader);
+  return 0;
+}
+
+static int pendingIngest(DoltliteServer *pSrv, PendingConn *p){
+  int nHeader = 0;
+
+  if( p->fd<0 ) return 1;
+  if( p->bHandshake ){
+    int step = doltliteConnHandshakeStep(p->conn);
+    if( step<0 ){
+      pendingClose(p);
+      return 1;
+    }
+    if( step==2 ){
+      p->bWantWrite = 1;
+      return 0;
+    }
+    if( step==1 ){
+      p->bWantWrite = 0;
+      return 0;
+    }
+    p->bHandshake = 0;
+    p->bWantWrite = 0;
+    p->startMs = monotonicMs();
+  }
+  while( p->nBuf < MAX_HEADER_SIZE-1 ){
+    int n;
+    int space = MAX_HEADER_SIZE - 1 - p->nBuf;
+    if( p->conn ){
+      n = doltliteConnReadNonblock(p->conn, p->aBuf + p->nBuf, space);
+    }else{
+      n = doltliteSocketRecv(p->fd, p->aBuf + p->nBuf, space);
+    }
+    if( n==-2 ) return 0;
+    if( n<=0 ){
+      pendingClose(p);
+      return 1;
+    }
+    p->nBuf += n;
+    nHeader = pendingHeaderEnd(p->aBuf, p->nBuf);
+    if( nHeader ){
+      if( pendingPromote(pSrv, p, nHeader)!=0 ) pendingClose(p);
+      return 1;
+    }
+  }
+  pendingClose(p);
+  return 1;
+}
+
+static int pendingAdd(
+  DoltliteServer *pSrv,
+  PendingConn *aPending,
+  int *pnPending,
+  int clientFd
+){
+  PendingConn *p;
+
+  if( *pnPending>=SERVER_PENDING_MAX ){
+    doltliteCloseSocket(clientFd);
+    return -1;
+  }
+  if( doltliteSocketSetBlocking(clientFd, 0)!=0 ){
+    doltliteCloseSocket(clientFd);
+    return -1;
+  }
+  p = &aPending[*pnPending];
+  memset(p, 0, sizeof(*p));
+  p->fd = clientFd;
+  p->startMs = monotonicMs();
+  if( pSrv->tls ){
+    p->conn = doltliteConnServerAttach(pSrv->tls, clientFd);
+    if( !p->conn ){
+      p->fd = -1;
+      return -1;
+    }
+    p->bHandshake = 1;
+  }
+  (*pnPending)++;
+  return 0;
+}
+
 static void serverLoop(DoltliteServer *pSrv){
+  PendingConn *aPending = pSrv->aPending;
+  doltlite_pollfd aPoll[SERVER_PENDING_MAX + 1];
+  int nPending = 0;
+  int i;
+
+  if( !aPending ) return;
   while( serverIsRunning(pSrv) ){
-    doltlite_pollfd pfd;
+    int nReady;
+    int nPolled;
     int clientFd;
 
-    pfd.fd = pSrv->listenFd;
-    pfd.events = POLLIN;
-    pfd.revents = 0;
+    nPolled = nPending;
+    aPoll[0].fd = pSrv->listenFd;
+    aPoll[0].events = POLLIN;
+    aPoll[0].revents = 0;
+    for(i=0; i<nPending; i++){
+      aPoll[i+1].fd = aPending[i].fd;
+      aPoll[i+1].events = POLLIN;
+      if( aPending[i].bWantWrite ) aPoll[i+1].events |= POLLOUT;
+      aPoll[i+1].revents = 0;
+    }
+    nReady = doltlitePoll(aPoll, 1 + nPending, 100);
+    if( nReady<0 ) continue;
 
-    if( doltlitePoll(&pfd, 1, 100) <= 0 ) continue;
-
-    clientFd = (int)accept(pSrv->listenFd, NULL, NULL);
-    if( clientFd < 0 ) continue;
-    if( doltliteSocketSetTimeout(clientFd, pSrv->timeoutMs)!=0 ){
-      doltliteCloseSocket(clientFd);
-      continue;
+    if( (aPoll[0].revents & POLLIN)!=0 ){
+      clientFd = (int)accept(pSrv->listenFd, 0, 0);
+      if( clientFd>=0
+       && pendingAdd(pSrv, aPending, &nPending, clientFd)==0
+       && pendingIngest(pSrv, &aPending[nPending-1]) ){
+        nPending--;
+      }
     }
 
-    pthread_mutex_lock(&pSrv->mutex);
-    if( !pSrv->running || pSrv->nQueue==SERVER_QUEUE_SIZE ){
-      pthread_mutex_unlock(&pSrv->mutex);
-      doltliteCloseSocket(clientFd);
-      continue;
+    for(i=nPolled-1; i>=0; i--){
+      int remove = 0;
+      int ready = aPoll[i+1].revents;
+      PendingConn *p = &aPending[i];
+      if( (ready & (POLLIN|POLLERR|POLLHUP|POLLNVAL))!=0
+       || (p->bWantWrite && (ready & POLLOUT)!=0) ){
+        remove = pendingIngest(pSrv, p);
+      }
+      if( !remove && monotonicMs() - p->startMs > pendingBudget(pSrv, p) ){
+        pendingClose(p);
+        remove = 1;
+      }
+      if( remove ){
+        nPending--;
+        aPending[i] = aPending[nPending];
+      }
     }
-    pSrv->queue[(pSrv->queueHead + pSrv->nQueue) % SERVER_QUEUE_SIZE] = clientFd;
-    pSrv->nQueue++;
-    pthread_cond_signal(&pSrv->workReady);
-    pthread_mutex_unlock(&pSrv->mutex);
   }
+  for(i=0; i<nPending; i++) pendingClose(&aPending[i]);
 }
 
 static void serverCleanup(DoltliteServer *pSrv){
@@ -1624,6 +1866,8 @@ static void serverCleanup(DoltliteServer *pSrv){
   pSrv->authKeysDir = 0;
   sqlite3_free(pSrv->audience);
   pSrv->audience = 0;
+  sqlite3_free(pSrv->aPending);
+  pSrv->aPending = 0;
   if( pSrv->condInit ){
     pthread_cond_destroy(&pSrv->workReady);
     pSrv->condInit = 0;

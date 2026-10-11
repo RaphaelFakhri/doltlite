@@ -30,7 +30,11 @@ SELECT dolt_creds('export', '<credential-id>', '/path/to/authorized-keys');
 
 With no directory argument, `dolt_creds('export', '<credential-id>')` returns
 the public JWK. The server rejects private credential files in `--auth-keys`.
-Default HTTP timeout is 30s (`DOLTLITE_HTTP_TIMEOUT_MS`). Embeddable as
+Default HTTP timeout is 30s (`DOLTLITE_HTTP_TIMEOUT_MS`). The server's
+`--timeout-ms` (default 30 seconds) bounds the TLS handshake and the request
+body. Request headers must arrive within 2 seconds, or within `--timeout-ms`
+when that is shorter, and an idle connection does not take a worker.
+Embeddable as
 `doltliteServeAsync` in `doltlite_remotesrv.h`. Transfers are content-addressed.
 JWT, TLS, and credential-store details:
 [doc/doltlite/auth.md](auth.md).
