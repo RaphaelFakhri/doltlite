@@ -1,0 +1,124 @@
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+
+proc commit_write_state {} {
+  db eval {
+    SELECT hash FROM dolt_branches WHERE name='main';
+    SELECT dolt_hashof_db('STAGED');
+    SELECT count(*) FROM dolt_log;
+    SELECT id,v FROM t ORDER BY id;
+    SELECT id FROM u ORDER BY id;
+    SELECT table_name,staged,status FROM dolt_status ORDER BY table_name,staged;
+    PRAGMA integrity_check;
+  }
+}
+
+foreach txn {autocommit begin savepoint} {
+  foreach operation {insert update delete trigger returning} {
+    foreach mode {modified all staged amend} {
+      set prefix commit-active-write-$txn.$operation.$mode
+      reset_db
+      switch $mode {
+        modified {set args {'-am','mid'}}
+        all {set args {'-Am','mid'}}
+        staged {set args {'-m','mid'}}
+        amend {set args {'--amend','-am','mid'}}
+      }
+      set call "dolt_commit($args)"
+      db eval {
+        CREATE TABLE t(id INTEGER PRIMARY KEY,v INT UNIQUE);
+        INSERT INTO t VALUES(1,1),(2,2),(3,3);
+        CREATE TABLE src(id INTEGER PRIMARY KEY,v INT);
+        INSERT INTO src VALUES(10,10),(11,11),(12,12),(13,13),(14,3);
+        CREATE TABLE u(id INTEGER PRIMARY KEY);
+      }
+      if {$operation eq "trigger"} {
+        db eval "CREATE TRIGGER tc AFTER INSERT ON t WHEN NEW.id=12
+                 BEGIN SELECT $call; END"
+      }
+      db eval {
+        SELECT dolt_commit('-Am','base');
+        INSERT INTO u VALUES(99);
+        SELECT dolt_add('u');
+      }
+      if {$txn eq "begin"} {db eval {BEGIN}}
+      if {$txn eq "savepoint"} {db eval {SAVEPOINT s}}
+      if {$txn ne "autocommit"} {db eval {INSERT INTO u VALUES(100)}}
+      set before [commit_write_state]
+      set head [db one {SELECT hash FROM dolt_branches WHERE name='main'}]
+      switch $operation {
+        insert {
+          set sql "INSERT INTO t SELECT id,
+            CASE WHEN id=12 THEN length($call)*0+12 ELSE v END
+            FROM src ORDER BY id"
+        }
+        update {
+          set sql "UPDATE t SET v=CASE WHEN id=2
+            THEN length($call)*0+102 ELSE id+100 END"
+        }
+        delete {
+          set sql "DELETE FROM t WHERE CASE WHEN id=2
+            THEN length($call)>0 ELSE 1 END"
+        }
+        trigger {set sql {INSERT INTO t SELECT * FROM src ORDER BY id}}
+        returning {set sql "INSERT INTO t VALUES(10,10) RETURNING $call"}
+      }
+      set refusal {cannot commit while a write statement is active}
+      if {$operation eq "trigger"} {set refusal {unsafe use of dolt_commit()}}
+      do_test $prefix.refused {
+        catch {db eval $sql} message
+        set message
+      } $refusal
+      do_test $prefix.unchanged {commit_write_state} $before
+      do_test $prefix.history {
+        db eval "SELECT id,v FROM dolt_history_t
+                 WHERE commit_hash='$head' ORDER BY id"
+      } {1 1 2 2 3 3}
+      if {$txn ne "autocommit"} {
+        do_test $prefix.rollback {
+          db eval {ROLLBACK; SELECT id FROM u ORDER BY id}
+        } 99
+      }
+      do_test $prefix.standalone {
+        db eval {SELECT dolt_commit('--allow-empty','-Am','after');}
+        db one {SELECT message FROM dolt_log LIMIT 1}
+      } after
+      do_test $prefix.reopen {
+        db close
+        sqlite3 db test.db
+        db eval {
+          SELECT id,v FROM t ORDER BY id;
+          SELECT id FROM u ORDER BY id;
+          SELECT count(*) FROM dolt_status;
+          PRAGMA integrity_check;
+        }
+      } {1 1 2 2 3 3 99 0 ok}
+    }
+  }
+}
+
+reset_db
+db eval {
+  CREATE TABLE t(id INTEGER PRIMARY KEY);
+  INSERT INTO t VALUES(1);
+  SELECT dolt_commit('-Am','base');
+}
+set head [db one {SELECT hash FROM dolt_branches WHERE name='main'}]
+do_test commit-active-write-paused.refused {
+  db eval {INSERT INTO t VALUES(2) RETURNING id} {
+    set refused [catch {db eval {SELECT dolt_commit('-am','paused')}} message]
+  }
+  list $refused $message
+} {1 {cannot commit while a write statement is active}}
+do_test commit-active-write-paused.head {
+  db one {SELECT hash FROM dolt_branches WHERE name='main'}
+} $head
+do_test commit-active-write-paused.write-completed {
+  db eval {SELECT id FROM t ORDER BY id}
+} {1 2}
+do_test commit-active-write-paused.standalone {
+  db eval {SELECT dolt_commit('-am','after')}
+  db eval {SELECT id FROM dolt_at_t('HEAD') ORDER BY id}
+} {1 2}
+
+finish_test
