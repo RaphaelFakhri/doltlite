@@ -87,13 +87,16 @@ int doltliteFetchInto(ChunkStore *pLocal, DoltliteRemote *pRemote,
                       const char *zTrack);
 
 /* *pbMissingBranch is set when the refs that would be installed have no
-** checkout branch. Nothing is committed in that case. */
+** checkout branch. *pbOccupied is 1 when the target is no longer a single
+** root commit, and 2 when that root has a working set. Nothing is committed
+** in either case. */
 int doltliteClone(ChunkStore *pLocal, DoltliteRemote *pRemote,
                   const char *zUrl, const char *zKeepBranch,
-                  int *pbMissingBranch);
+                  int *pbMissingBranch, int *pbOccupied);
 
 int doltliteCloneLazy(ChunkStore *pLocal, DoltliteRemote *pRemote,
-                      const char *zUrl, const char *zKeepBranch);
+                      const char *zUrl, const char *zKeepBranch,
+                      int *pbOccupied);
 
 DoltliteRemote *doltliteFsRemoteOpen(sqlite3_vfs *pVfs, const char *zPath);
 void doltliteRemoteSetBusyHandler(DoltliteRemote *p, int (*xBusy)(void*),
