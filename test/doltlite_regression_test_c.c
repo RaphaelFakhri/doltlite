@@ -1581,6 +1581,7 @@ static int gFailSyncOnce = 0;
 static int gFailWriteNth = 0;
 static int gFailSyncNth = 0;
 static int gFailReadNth = 0;
+static int gFailNoFetch = 0;
 static int gFailAccessOnce = 0;
 static int gFailHasMovedOnce = 0;
 static int gFailFileSizeOnce = 0;
@@ -1720,6 +1721,12 @@ static int failShmUnmap(sqlite3_file *pFile, int deleteFlag){
 
 static int failFetch(sqlite3_file *pFile, sqlite3_int64 iOfst, int iAmt, void **pp){
   FailFile *p = (FailFile*)pFile;
+  /* A caller counting xRead faults needs the read to happen: mmap would
+  ** satisfy it inside xFetch and the counter would never move. */
+  if( gFailNoFetch ){
+    *pp = 0;
+    return SQLITE_OK;
+  }
   if( p->pReal->pMethods->iVersion<3 || p->pReal->pMethods->xFetch==0 ){
     *pp = 0;
     return SQLITE_OK;
@@ -9774,6 +9781,168 @@ static void run_vc_late_io_failure(void){
   removeDbFiles(dbpath);
 }
 
+/* A read fault after the destination file has been replaced must not fail
+** the backup. A read fault before that replace must still fail it. */
+static int backup_open_seeded_source(const char *zPath, sqlite3 **ppDb){
+  sqlite3 *db = 0;
+  int rc;
+  static const char *zSeed =
+    "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);"
+    "WITH RECURSIVE c(x) AS ("
+    "  SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x<300)"
+    "INSERT INTO t SELECT x, printf('v%05d-%s', x, hex(zeroblob(40))) FROM c;"
+    "CREATE TABLE u(k TEXT PRIMARY KEY, n INT);"
+    "INSERT INTO u VALUES('a',1),('b',2);"
+    "SELECT dolt_commit('-Am','init');"
+    "SELECT dolt_branch('feat');"
+    "SELECT dolt_checkout('feat');"
+    "INSERT INTO t VALUES(1001,'f1');"
+    "UPDATE u SET n=20 WHERE k='b';"
+    "SELECT dolt_commit('-am','feat1');"
+    "SELECT dolt_checkout('main');"
+    "UPDATE t SET v='m' WHERE id=5;"
+    "SELECT dolt_commit('-am','main2');";
+  *ppDb = 0;
+  removeDbFiles(zPath);
+  rc = open_fail_db(zPath, &db);
+  if( rc!=SQLITE_OK ) return rc;
+  rc = execSqlSilent(db, zSeed);
+  sqlite3_close(db);
+  if( rc!=SQLITE_OK ) return rc;
+  return open_fail_db(zPath, ppDb);
+}
+
+static void run_backup_installed_read_error_is_done(void){
+  sqlite3 *src = 0;
+  sqlite3 *dest = 0;
+  sqlite3 *fresh = 0;
+  char zSrcPath[512];
+  char zDestPath[512];
+  char zSrcFp[512];
+  char zFreshFp[512];
+  char zLiveFp[512];
+  char zCheck[96];
+  const char *zFpSql =
+    "SELECT (SELECT group_concat(name||'@'||substr(hash,1,8)) "
+    "FROM (SELECT name, hash FROM dolt_branches ORDER BY name))"
+    "||'|'||(SELECT count(*) FROM t)"
+    "||'|'||(SELECT group_concat(k||'='||n) "
+    "FROM (SELECT k, n FROM u ORDER BY k))";
+  int n;
+  int rc;
+  int same;
+  int sawInstalled = 0;
+  int sawEarly = 0;
+  int sweptOut = 0;
+
+  printf("=== Backup Installed Read Error Is Done Test ===\n\n");
+  make_dbpath(zSrcPath, sizeof(zSrcPath), "backup_installed_read_src");
+  make_dbpath(zDestPath, sizeof(zDestPath), "backup_installed_read_dest");
+  removeDbFiles(zSrcPath);
+  removeDbFiles(zDestPath);
+  gFailReadNth = 0;
+  gFailHits = 0;
+  gFailNoFetch = 1;
+  check("backup_installed_register_vfs", registerFailVfs()==SQLITE_OK);
+
+  check("backup_installed_clean_src",
+        backup_open_seeded_source(zSrcPath, &src)==SQLITE_OK);
+  check("backup_installed_clean_dest",
+        open_fail_db(zDestPath, &dest)==SQLITE_OK);
+  if( src==0 || dest==0 ) goto backup_installed_done;
+  sqlite3_snprintf(sizeof(zSrcFp), zSrcFp, "%s", queryScalarText(src, zFpSql));
+  rc = backup_db(src, dest);
+  check("backup_installed_clean_rc", rc==SQLITE_OK);
+  fresh = 0;
+  check("backup_installed_clean_reopen", open_db(zDestPath, &fresh)==SQLITE_OK);
+  if( fresh ){
+    check("backup_installed_clean_match",
+          strcmp(queryScalarText(fresh, zFpSql), zSrcFp)==0);
+    check("backup_installed_clean_integrity",
+          strcmp(queryScalarText(fresh, "PRAGMA integrity_check"), "ok")==0);
+    sqlite3_close(fresh);
+    fresh = 0;
+  }
+  sqlite3_close(src);
+  sqlite3_close(dest);
+  src = 0;
+  dest = 0;
+
+  for(n=1; n<=500; n++){
+    gFailReadNth = 0;
+    gFailHits = 0;
+    src = 0;
+    dest = 0;
+    fresh = 0;
+    if( backup_open_seeded_source(zSrcPath, &src)!=SQLITE_OK || src==0 ){
+      check("backup_installed_seed", 0);
+      goto backup_installed_done;
+    }
+    sqlite3_snprintf(sizeof(zSrcFp), zSrcFp, "%s",
+                     queryScalarText(src, zFpSql));
+    removeDbFiles(zDestPath);
+    if( open_fail_db(zDestPath, &dest)!=SQLITE_OK || dest==0 ){
+      check("backup_installed_open_dest", 0);
+      goto backup_installed_done;
+    }
+    gFailHits = 0;
+    gFailReadNth = n;
+    rc = backup_db(src, dest);
+    gFailReadNth = 0;
+    if( gFailHits==0 ){
+      sweptOut = 1;
+      sqlite3_close(src);
+      sqlite3_close(dest);
+      src = 0;
+      dest = 0;
+      break;
+    }
+    if( open_db(zDestPath, &fresh)!=SQLITE_OK || fresh==0 ){
+      check("backup_installed_reopen", 0);
+      goto backup_installed_done;
+    }
+    sqlite3_snprintf(sizeof(zFreshFp), zFreshFp, "%s",
+                     queryScalarText(fresh, zFpSql));
+    same = strcmp(zFreshFp, zSrcFp)==0;
+    sqlite3_snprintf(sizeof(zCheck), zCheck, "backup_installed_%d_rc", n);
+    if( same ){
+      sawInstalled = 1;
+      check(zCheck, rc==SQLITE_OK);
+      sqlite3_snprintf(sizeof(zLiveFp), zLiveFp, "%s",
+                       queryScalarText(dest, zFpSql));
+      sqlite3_snprintf(sizeof(zCheck), zCheck, "backup_installed_%d_live", n);
+      check(zCheck, strcmp(zLiveFp, zSrcFp)==0);
+      sqlite3_snprintf(sizeof(zCheck), zCheck,
+                       "backup_installed_%d_integrity", n);
+      check(zCheck,
+            strcmp(queryScalarText(fresh, "PRAGMA integrity_check"), "ok")==0);
+    }else{
+      sawEarly = 1;
+      check(zCheck, rc!=SQLITE_OK);
+    }
+    sqlite3_close(fresh);
+    sqlite3_close(src);
+    sqlite3_close(dest);
+    fresh = 0;
+    src = 0;
+    dest = 0;
+  }
+
+  check("backup_installed_sweep_finished", sweptOut);
+  check("backup_installed_saw_complete_copy", sawInstalled);
+  check("backup_installed_saw_early_read_error", sawEarly);
+
+backup_installed_done:
+  gFailReadNth = 0;
+  gFailNoFetch = 0;
+  gFailHits = 0;
+  if( fresh ) sqlite3_close(fresh);
+  if( src ) sqlite3_close(src);
+  if( dest ) sqlite3_close(dest);
+  removeDbFiles(zSrcPath);
+  removeDbFiles(zDestPath);
+}
+
 /* -a must not report success, or "nothing to commit", when a read fails
 ** while loading HEAD. --amend would otherwise publish the old tree. */
 static void run_amend_all_read_failure_keeps_changes(void){
@@ -16307,6 +16476,7 @@ static const RegressionCase aCases[] = {
   { "backup_dest_peer_write", "Backup Dest Peer Write Test", run_backup_dest_peer_write },
   { "backup_source_write_busy", "Backup Source Write Busy Test", run_backup_source_write_busy },
   { "backup_dest_missing_branch", "Backup Dest Missing Branch Test", run_backup_dest_missing_branch },
+  { "backup_installed_read_error_is_done", "Backup Installed Read Error Is Done Test", run_backup_installed_read_error_is_done },
   { "peer_commit_keeps_statements", "Peer Commit Keeps Statements Test", run_peer_commit_keeps_statements },
   { "integer_pk_autocommit_append_correctness", "Integer PK Autocommit Append Correctness Test", run_integer_pk_autocommit_append_correctness },
   { "custom_collation_unindexed", "Custom Collation Unindexed Test", run_custom_collation_unindexed },

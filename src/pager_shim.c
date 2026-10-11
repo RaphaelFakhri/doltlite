@@ -1444,12 +1444,21 @@ backup_step_done:
   }
 
   if( rc == SQLITE_OK && !memoryAdopted ){
+    int rcRefresh;
+    /* The copied file is already installed. This refresh only re-reads its
+    ** manifest into the destination connection. A failure leaves that
+    ** connection stale; the next use adopts the path. It is not a failed
+    ** backup. */
     destCs->adoptReplacement = 1;
-    rc = chunkStoreLockAndRefresh(destCs);
-    if( rc==SQLITE_OK ){
+    rcRefresh = chunkStoreLockAndRefresh(destCs);
+    if( rcRefresh==SQLITE_OK ){
       /* Dest now reflects the renamed file; reload catalog next txn. */
       doltliteInvalidateBtreeWorkingState(pDestBt);
       chunkStoreUnlock(destCs);
+    }else{
+      /* Cleared inside the refresh before the failed reload, and
+      ** LockAndRefresh released the lock. */
+      destCs->adoptReplacement = 1;
     }
   }
 
