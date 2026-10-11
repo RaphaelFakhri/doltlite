@@ -73,6 +73,7 @@ do_test backup2-2 {
 set restore_busy_result {1 {restore failed: source database busy}}
 set restore_source_prolly [expr {
   [llength [info commands doltlite_test_engine]] &&
+  [llength [info commands db2]] &&
   [doltlite_test_engine db2] ne "orig"
 }]
 if {$restore_source_prolly} {set restore_busy_result {0 {}}}
