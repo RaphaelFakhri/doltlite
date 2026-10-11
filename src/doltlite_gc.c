@@ -762,7 +762,11 @@ static int gcWriteCompactedTo(
     }
 
     rc = sqlite3OsOpenMalloc(chunkFileGetVfs(&cs->file), zPath, &pTmpFile, tmpFlags, 0);
+    if( rc==SQLITE_OK && bDeleteExisting ){
+      rc = sqlite3OsDoltliteModeOf(pTmpFile, chunkFileGetFilename(&cs->file), 0);
+    }
     if( rc != SQLITE_OK ){
+      if( pTmpFile ) sqlite3OsCloseFree(pTmpFile);
       sqlite3_free(aNewIndex);
       return rc;
     }

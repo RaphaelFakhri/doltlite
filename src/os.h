@@ -185,6 +185,15 @@ int sqlite3OsCheckReservedLock(sqlite3_file *id, int *pResOut);
 int sqlite3OsFileControl(sqlite3_file*,int,void*);
 void sqlite3OsFileControlHint(sqlite3_file*,int,void*);
 #define SQLITE_FCNTL_DB_UNCHANGED 0xca093fa0
+#ifdef DOLTLITE_PROLLY
+#define SQLITE_FCNTL_DOLTLITE_MODEOF 0x444c4d01
+typedef struct DoltliteFileMode DoltliteFileMode;
+struct DoltliteFileMode {
+  const char *zReference;
+  int bLock;
+};
+int sqlite3OsDoltliteModeOf(sqlite3_file *, const char *, int);
+#endif
 int sqlite3OsSectorSize(sqlite3_file *id);
 int sqlite3OsDeviceCharacteristics(sqlite3_file *id);
 #ifndef SQLITE_OMIT_WAL

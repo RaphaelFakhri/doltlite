@@ -48,10 +48,11 @@ int csFileLockPromote(sqlite3_file *pFile){
   return sqlite3OsLock(pFile, SQLITE_LOCK_RESERVED);
 }
 
-static int csFileRelock(sqlite3_file *pFile){
+static int csFileRelock(sqlite3_file *pFile, const char *zDatabase){
   int rc;
   if( !pFile ) return SQLITE_ERROR;
-  rc = sqlite3OsLock(pFile, SQLITE_LOCK_SHARED);
+  rc = sqlite3OsDoltliteModeOf(pFile, zDatabase, 1);
+  if( rc==SQLITE_OK ) rc = sqlite3OsLock(pFile, SQLITE_LOCK_SHARED);
   if( rc==SQLITE_OK ) rc = csFileLockPromote(pFile);
   if( rc!=SQLITE_OK ) sqlite3OsUnlock(pFile, SQLITE_LOCK_NONE);
   return rc;
@@ -141,7 +142,7 @@ int csFileLock(sqlite3_vfs *pVfs, const char *path,
     return rc;
   }
   /* unix VFS SQLITE_DEBUG lock ladder: NO_LOCK -> SHARED, then escalate. */
-  rc = csFileRelock(pFile);
+  rc = csFileRelock(pFile, path);
   if( rc!=SQLITE_OK ){
     sqlite3OsCloseFree(pFile);
     sqlite3_free(zLock);
@@ -234,7 +235,7 @@ static int csLockForReplacementProof(ChunkStore *cs, int *pAcquired){
     return SQLITE_BUSY;
   }
   if( csFileLockHeld(CS_GRAPH_LOCK(cs)) ){
-    rc = csFileRelock(CS_GRAPH_LOCK(cs));
+    rc = csFileRelock(CS_GRAPH_LOCK(cs), cs->file.zFilename);
   }else{
     rc = csFileLockNB(cs->file.pVfs, cs->file.zFilename,
                       &CS_GRAPH_LOCK(cs), &cs->pGraphLockName);
@@ -442,7 +443,7 @@ int chunkStoreLockAndRefreshChanged(ChunkStore *cs, int *pChanged){
     return SQLITE_ERROR;
   }
   if( csFileLockHeld(CS_GRAPH_LOCK(cs)) ){
-    rc = csFileRelock(CS_GRAPH_LOCK(cs));
+    rc = csFileRelock(CS_GRAPH_LOCK(cs), cs->file.zFilename);
   }else{
     rc = csFileLockNB(cs->file.pVfs, cs->file.zFilename,
                       &CS_GRAPH_LOCK(cs), &cs->pGraphLockName);

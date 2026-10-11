@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
+#include <errno.h>
 #include <pthread.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -157,6 +158,166 @@ static int backup_db(sqlite3 *src, sqlite3 *dest){
   rcFinish = sqlite3_backup_finish(pBackup);
   if( rc==SQLITE_DONE ) rc = rcFinish;
   return rc;
+}
+
+#if SQLITE_OS_UNIX
+static int fileMode(const char *zPath){
+  struct stat st;
+  return stat(zPath, &st)==0 ? (st.st_mode & 0777) : -1;
+}
+
+static int modeChmodFailures;
+
+static int modeFailFchmod(int fd, mode_t mode){
+  (void)fd;
+  (void)mode;
+  modeChmodFailures++;
+  errno = EIO;
+  return -1;
+}
+
+static void modeLockPath(const char *zPath, char *zLock, size_t nLock){
+  const char *zBase = strrchr(zPath, '/');
+  int nDir = zBase ? (int)(zBase-zPath)+1 : 0;
+  snprintf(zLock, nLock, "%.*s.%s-lock", nDir, zPath, zBase ? zBase+1 : zPath);
+}
+#endif
+
+static void run_file_modes(void){
+#if SQLITE_OS_UNIX
+  const char *azOps[] = {"SELECT dolt_gc()", "VACUUM"};
+  int aMode[] = {0600, 0660};
+  int aMask[] = {0022, 0077};
+  char zPath[512], zSource[512], zLock[512], zInto[512];
+  mode_t savedMask = umask(0022);
+  sqlite3 *db = 0, *src = 0;
+  int i, j, k;
+
+  make_dbpath(zPath,sizeof(zPath),"file_modes");
+  make_dbpath(zSource,sizeof(zSource),"file_modes_source");
+  make_dbpath(zInto,sizeof(zInto),"file_modes_into");
+  modeLockPath(zPath,zLock,sizeof(zLock));
+  for(i=0; i<2; i++){
+    for(j=0; j<2; j++){
+      for(k=0; k<2; k++){
+        umask(0022);
+        removeDbFiles(zPath);
+        check("mode_gc_open",open_db(zPath,&db)==SQLITE_OK);
+        check("mode_gc_seed",execSql(db,
+          "CREATE TABLE t(id INTEGER PRIMARY KEY); INSERT INTO t VALUES(1);"
+          "SELECT dolt_commit('-Am','seed'); INSERT INTO t VALUES(2)")==SQLITE_OK);
+        sqlite3_close(db);
+        db = 0;
+        check("mode_gc_chmod",chmod(zPath,aMode[j])==0);
+        remove(zLock);
+        umask(aMask[k]);
+        check("mode_gc_reopen",open_db(zPath,&db)==SQLITE_OK);
+        check("mode_gc_apply",execSql(db,azOps[i])==SQLITE_OK);
+        check("mode_gc_preserved",fileMode(zPath)==aMode[j]);
+        check("mode_gc_lock_preserved",fileMode(zLock)==aMode[j]);
+        check("mode_gc_rows",queryInt64(db,"SELECT count(*) FROM t")==2);
+        sqlite3_close(db);
+        db = 0;
+      }
+    }
+  }
+  umask(0022);
+  removeDbFiles(zPath);
+  check("mode_cached_open",open_db(zPath,&db)==SQLITE_OK);
+  check("mode_cached_seed",execSql(db,"CREATE TABLE t(id INTEGER PRIMARY KEY)")==SQLITE_OK);
+  check("mode_cached_chmod",chmod(zPath,0660)==0);
+  check("mode_cached_write",execSql(db,"INSERT INTO t VALUES(1)")==SQLITE_OK);
+  check("mode_cached_lock_updated",fileMode(zLock)==0660);
+  check("mode_cached_private_chmod",chmod(zPath,0600)==0);
+  check("mode_cached_private_write",execSql(db,"INSERT INTO t VALUES(2)")==SQLITE_OK);
+  check("mode_cached_lock_private",fileMode(zLock)==0600);
+  sqlite3_close(db);
+  db = 0;
+
+  for(i=0; i<2; i++){
+    removeDbFiles(zSource);
+    check("mode_backup_source",open_db(i ? ":memory:" : zSource,&src)==SQLITE_OK);
+    check("mode_backup_source_seed",execSql(src,
+      "CREATE TABLE t(id INTEGER PRIMARY KEY); INSERT INTO t VALUES(7)")==SQLITE_OK);
+    for(j=0; j<2; j++){
+      removeDbFiles(zPath);
+      check("mode_backup_open",open_db(zPath,&db)==SQLITE_OK);
+      check("mode_backup_seed",execSql(db,"CREATE TABLE old(id INTEGER PRIMARY KEY)")==SQLITE_OK);
+      check("mode_backup_chmod",chmod(zPath,aMode[j])==0);
+      check("mode_backup_copy",backup_db(src,db)==SQLITE_OK);
+      check("mode_backup_preserved",fileMode(zPath)==aMode[j]);
+      check("mode_backup_lock_preserved",fileMode(zLock)==aMode[j]);
+      check("mode_backup_rows",queryInt64(db,"SELECT id FROM t")==7);
+      sqlite3_close(db);
+      db = 0;
+    }
+    sqlite3_close(src);
+    src = 0;
+  }
+  removeDbFiles(zPath);
+  check("mode_into_open",open_db(zPath,&db)==SQLITE_OK);
+  check("mode_into_seed",execSql(db,"CREATE TABLE t(id INTEGER PRIMARY KEY)")==SQLITE_OK);
+  check("mode_into_private_source",chmod(zPath,0600)==0);
+  removeDbFiles(zInto);
+  {
+    char *zSql = sqlite3_mprintf("VACUUM INTO %Q",zInto);
+    check("mode_into_new",zSql && execSql(db,zSql)==SQLITE_OK);
+    sqlite3_free(zSql);
+    check("mode_into_new_default",fileMode(zInto)==0644);
+  }
+  removeDbFiles(zInto);
+  {
+    FILE *f = fopen(zInto,"wb");
+    check("mode_into_empty_file",f!=0);
+    if( f ) fclose(f);
+    check("mode_into_empty_chmod",chmod(zInto,0660)==0);
+    {
+      char *zSql = sqlite3_mprintf("VACUUM INTO %Q",zInto);
+      check("mode_into_existing",zSql && execSql(db,zSql)==SQLITE_OK);
+      sqlite3_free(zSql);
+    }
+    check("mode_into_existing_preserved",fileMode(zInto)==0660);
+  }
+  sqlite3_close(db);
+  db = 0;
+  removeDbFiles(zPath);
+  check("mode_fault_open",open_db(zPath,&db)==SQLITE_OK);
+  check("mode_fault_seed",execSql(db,
+    "CREATE TABLE t(id INTEGER PRIMARY KEY); INSERT INTO t VALUES(1)")==SQLITE_OK);
+  check("mode_fault_db_mode",chmod(zPath,0660)==0);
+  check("mode_fault_lock_mode",chmod(zLock,0660)==0);
+  {
+    sqlite3_vfs *vfs = sqlite3_vfs_find(0);
+    if( vfs->iVersion>=3 && vfs->xGetSystemCall(vfs,"fchmod") ){
+      modeChmodFailures = 0;
+      check("mode_fault_install",vfs->xSetSystemCall(vfs,"fchmod",
+            (sqlite3_syscall_ptr)modeFailFchmod)==SQLITE_OK);
+      check("mode_fault_gc_error",execSqlSilent(db,"SELECT dolt_gc()")==SQLITE_IOERR);
+      check("mode_fault_gc_called",modeChmodFailures>0);
+      check("mode_fault_gc_preserved",fileMode(zPath)==0660
+                                  && queryInt64(db,"SELECT id FROM t")==1);
+      check("mode_fault_backup_source",open_db(":memory:",&src)==SQLITE_OK);
+      check("mode_fault_backup_seed",execSql(src,
+        "CREATE TABLE replacement(id INTEGER PRIMARY KEY); INSERT INTO replacement VALUES(9)")==SQLITE_OK);
+      modeChmodFailures = 0;
+      check("mode_fault_backup_error",(backup_db(src,db)&0xff)==SQLITE_IOERR);
+      check("mode_fault_backup_called",modeChmodFailures>0);
+      check("mode_fault_backup_preserved",fileMode(zPath)==0660
+                                      && queryInt64(db,"SELECT id FROM t")==1);
+      check("mode_fault_restore",vfs->xSetSystemCall(vfs,"fchmod",0)==SQLITE_OK);
+      sqlite3_close(src);
+      src = 0;
+    }
+  }
+  sqlite3_close(db);
+  db = 0;
+  removeDbFiles(zPath);
+  removeDbFiles(zSource);
+  removeDbFiles(zInto);
+  umask(savedMask);
+#else
+  printf("SKIP: Unix file permission modes\n");
+#endif
 }
 
 static int custom_collation_cmp(
@@ -17251,6 +17412,7 @@ static const RegressionCase aCases[] = {
   { "alter_default_session_changeset", "ALTER Default Session Changeset Test", run_alter_default_session_changeset },
 #endif
   { "backup_safety", "Backup Safety Test", run_backup_safety },
+  { "file_modes", "File Mode Preservation Test", run_file_modes },
   { "backup_dest_peer_write", "Backup Dest Peer Write Test", run_backup_dest_peer_write },
   { "backup_source_write_busy", "Backup Source Write Busy Test", run_backup_source_write_busy },
   { "backup_dest_missing_branch", "Backup Dest Missing Branch Test", run_backup_dest_missing_branch },

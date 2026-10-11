@@ -4167,6 +4167,26 @@ static int unixFileControl(sqlite3_file *id, int op, void *pArg){
       pFile->h = -1;
       return SQLITE_OK;
     }
+#ifdef DOLTLITE_PROLLY
+    case SQLITE_FCNTL_DOLTLITE_MODEOF: {
+      DoltliteFileMode *pMode = (DoltliteFileMode*)pArg;
+      struct stat from, to;
+      mode_t mode;
+      if( osStat(pMode->zReference, &from)!=0 ){
+        return errno==ENOENT ? SQLITE_OK : SQLITE_IOERR_FSTAT;
+      }
+      if( osFstat(pFile->h, &to)!=0 ) return SQLITE_IOERR_FSTAT;
+      if( from.st_uid!=to.st_uid || from.st_gid!=to.st_gid ){
+        robustFchown(pFile->h, from.st_uid, from.st_gid);
+      }
+      mode = from.st_mode & 0777;
+      if( pMode->bLock ) mode |= S_IWUSR;
+      if( (to.st_mode & 0777)!=mode && osFchmod(pFile->h, mode)!=0 ){
+        return SQLITE_IOERR_ACCESS;
+      }
+      return SQLITE_OK;
+    }
+#endif
     case SQLITE_FCNTL_LOCKSTATE: {
       *(int*)pArg = pFile->eFileLock;
       return SQLITE_OK;
