@@ -237,6 +237,12 @@ int sqlite3OsDelete(sqlite3_vfs *pVfs, const char *zPath, int dirSync){
 }
 
 #ifdef DOLTLITE_PROLLY
+int sqlite3OsDoltliteModeOf(sqlite3_file *pFile, const char *zReference, int bLock){
+  DoltliteFileMode mode = {zReference, bLock};
+  int rc = sqlite3OsFileControl(pFile, SQLITE_FCNTL_DOLTLITE_MODEOF, &mode);
+  return rc==SQLITE_NOTFOUND ? SQLITE_OK : rc;
+}
+
 int sqlite3OsReplaceFile(
   sqlite3_vfs *pVfs,
   const char *zTmp,

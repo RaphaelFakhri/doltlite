@@ -3581,8 +3581,6 @@ sysfault sysfault-2.2-vfsfault-transient.111 @coverage class=intentional
 # section 3: fstat/fallocate EIO injection — stock expects every fault
 # point to still succeed ({0 20000}); doltlite hits fstat/fallocate in
 # paths where the fault becomes a "disk I/O error".
-sysfault sysfault-3-vfsfault-persistent.1 class=intentional  # section 3: fstat/fallocate EIO injection — stock expects every fault point to still succeed ({0 20000}); doltlite hits fstat/fallocate in paths where the fault becomes a "disk I/O error".
-sysfault sysfault-3-vfsfault-transient.1 class=intentional
 
 # MVCC: no reader-blocks-writer / exclusive-blocks-reader lock errors
 tclsqlite tcl-10.18 class=intentional  # MVCC: no reader-blocks-writer / exclusive-blocks-reader lock errors

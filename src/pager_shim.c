@@ -1340,6 +1340,13 @@ int sqlite3_backup_step(sqlite3_backup *pBackup, int nPage){
 
   openFlags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
             | SQLITE_OPEN_EXCLUSIVE | SQLITE_OPEN_MAIN_DB;
+  {
+    sqlite3_file *pModeFile = 0;
+    rc = sqlite3OsOpenMalloc(pDestVfs, zTmpFile, &pModeFile, openFlags, 0);
+    if( rc==SQLITE_OK ) rc = sqlite3OsDoltliteModeOf(pModeFile, zDestFile, 0);
+    if( pModeFile ) sqlite3OsCloseFree(pModeFile);
+    if( rc!=SQLITE_OK ) goto backup_step_done;
+  }
   rc = chunkStoreOpen(&tmpStore, pDestVfs, zTmpFile, openFlags);
   if( rc!=SQLITE_OK ) goto backup_step_done;
   tmpStoreOpen = 1;
