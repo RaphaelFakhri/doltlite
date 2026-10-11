@@ -56,25 +56,33 @@ oracle() {
   local dolt_setup
   dolt_setup=$(vc_oracle_translate_for_dolt "$setup")
 
-  local dt_table_q=""
-  for tn in "${tarr[@]}"; do
-    local part="SELECT concat('T', char(9), '${tn}', char(9), coalesce(dt.to_id,''), char(9), coalesce(log_to.message, dt.to_commit), char(9), dt.diff_type, char(9), coalesce(dt.from_id,''), char(9), coalesce(log_from.message, dt.from_commit)) FROM dolt_diff_${tn} dt LEFT JOIN dolt_log log_to ON log_to.commit_hash = dt.to_commit LEFT JOIN dolt_log log_from ON log_from.commit_hash = dt.from_commit"
-    if [ -z "$dt_table_q" ]; then
-      dt_table_q="$part"
-    else
-      dt_table_q="$dt_table_q UNION ALL $part"
-    fi
-  done
-
   local dt_table
   dt_table=$(
     cd "$dir/dt" || exit 1
     "$DOLT" init --name oracle --email oracle@test >/dev/null 2>&1
-    {
-      printf '%s\n' "$dolt_setup"
-      printf '%s;\n' "$dt_table_q"
-    } | "$DOLT" sql -c -r csv 2>"$dir/dt.err" | tr -d '"' | normalize_diff_table
-  )
+    printf '%s\nSELECT active_branch();\n' "$dolt_setup" | "$DOLT" sql -c -r csv > setup.out 2>"$dir/dt.err" || exit 1
+    local commits dt_table_q="" hash part branch
+    branch=$(tail -n 1 setup.out | tr -d '\r')
+    commits=$("$DOLT" sql -r csv -q "USE \`dt/$branch\`; SELECT commit_hash FROM dolt_log" 2>>"$dir/dt.err") || exit 1
+    # Per-commit lookups avoid Dolt's lost shared-parent edge in full history.
+    for hash in WORKING $(printf '%s\n' "$commits" | sed '1d' | tr -d '\r'); do
+      for tn in "${tarr[@]}"; do
+        part="SELECT concat('T', char(9), '${tn}', char(9), coalesce(dt.to_id,''), char(9), coalesce(log_to.message, dt.to_commit), char(9), dt.diff_type, char(9), coalesce(dt.from_id,''), char(9), coalesce(log_from.message, dt.from_commit)) FROM dolt_diff_${tn} dt LEFT JOIN dolt_log log_to ON log_to.commit_hash = dt.to_commit LEFT JOIN dolt_log log_from ON log_from.commit_hash = dt.from_commit WHERE dt.to_commit='${hash}'"
+        if [ -z "$dt_table_q" ]; then
+          dt_table_q="$part"
+        else
+          dt_table_q="$dt_table_q UNION ALL $part"
+        fi
+      done
+    done
+    "$DOLT" sql -r csv -q "USE \`dt/$branch\`; $dt_table_q" 2>>"$dir/dt.err" | tr -d '"' | normalize_diff_table
+  ) || {
+    echo "  FAIL: $name (Dolt history lookup failed)"
+    cat "$dir/dt.err"
+    fail=$((fail+1))
+    FAILED_NAMES="$FAILED_NAMES $name"
+    return
+  }
 
   vc_oracle_assert_match "$name" "$dl_table" "$dt_table"
 }
@@ -384,6 +392,21 @@ SELECT dolt_commit('-m', 'feat1');
 "
 
 echo "--- merges ---"
+
+oracle "diff_after_repeated_no_ff_merges" "
+$SEED
+SELECT dolt_branch('feature');
+SELECT dolt_branch('other');
+SELECT dolt_checkout('feature');
+INSERT INTO t VALUES (2,20);
+SELECT dolt_commit('-am','feature_insert');
+SELECT dolt_checkout('main');
+SELECT dolt_merge('feature','--no-ff','-m','first_merge');
+SELECT dolt_checkout('other');
+SELECT dolt_merge('main','--no-ff','-m','second_merge');
+SELECT dolt_checkout('main');
+SELECT dolt_merge('other','--no-ff','-m','third_merge');
+"
 
 oracle "diff_after_simple_merge" "
 $SEED

@@ -1,0 +1,117 @@
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+
+proc merge_history_rows {source {predicate 1}} {
+  execsql "SELECT from_commit,to_commit,from_k,from_v,to_k,to_v,diff_type
+    FROM $source WHERE $predicate
+    ORDER BY from_commit,to_commit,from_k,to_k,diff_type"
+}
+
+proc check_merge_history {name} {
+  execsql {
+    DROP TABLE IF EXISTS temp.edge_diff;
+    CREATE TEMP TABLE edge_diff AS SELECT * FROM dolt_diff_t WHERE 0;
+  }
+  foreach {child parent} [execsql {
+    SELECT commit_hash,parent_hash FROM dolt_commit_ancestors
+    WHERE parent_hash<>'' ORDER BY commit_hash,parent_index
+  }] {
+    execsql "INSERT INTO edge_diff SELECT * FROM dolt_diff_t('$parent','$child')"
+  }
+  execsql {INSERT INTO edge_diff SELECT * FROM dolt_diff_t('HEAD','WORKING')}
+  set expected [merge_history_rows edge_diff]
+  do_test $name-edges {merge_history_rows dolt_diff_t} $expected
+  do_execsql_test $name-unique {
+    SELECT count(*) FROM (
+      SELECT from_commit,to_commit,coalesce(from_k,to_k),count(*) AS n
+      FROM dolt_diff_t GROUP BY 1,2,3 HAVING n<>1
+    )
+  } {0}
+  do_test $name-limit {
+    expr {[llength [execsql {SELECT 1 FROM dolt_diff_t LIMIT 1}]]==1}
+  } {1}
+  set i 0
+  foreach hash [concat [execsql {SELECT commit_hash FROM dolt_log}] WORKING] {
+    foreach col {from_commit to_commit} {
+      set predicate "$col='$hash'"
+      set expected [merge_history_rows edge_diff $predicate]
+      do_test $name-filter-[incr i] \
+        [list merge_history_rows dolt_diff_t $predicate] $expected
+      do_test $name-scan-$i \
+        [list merge_history_rows dolt_diff_t "+$predicate"] $expected
+    }
+  }
+}
+
+foreach {layout key suffix} {
+  rowid {INTEGER PRIMARY KEY} {}
+  clustered {INT PRIMARY KEY} {}
+  text {TEXT PRIMARY KEY} {}
+  without_rowid {INT PRIMARY KEY} {WITHOUT ROWID}
+} {
+  foreach {mainLength sideLength} {1 1 1 4 4 1 4 4} {
+    reset_db
+    execsql "CREATE TABLE t(k $key,v INT) $suffix"
+    execsql {
+      INSERT INTO t VALUES(0,0),(90,90);
+      SELECT dolt_commit('-Am','base');
+      SELECT dolt_branch('side');
+    }
+    for {set i 1} {$i<=$mainLength} {incr i} {
+      execsql "INSERT INTO t VALUES($i,$i); SELECT dolt_commit('-am','main$i')"
+    }
+    execsql {
+      UPDATE t SET v=99 WHERE k=0;
+      SELECT dolt_commit('-am','main update');
+      SELECT dolt_checkout('side');
+    }
+    for {set i 1} {$i<=$sideLength} {incr i} {
+      execsql "INSERT INTO t VALUES([expr {10+$i}],$i);
+        SELECT dolt_commit('-am','side$i')"
+    }
+    execsql {
+      DELETE FROM t WHERE k=90;
+      SELECT dolt_commit('-am','side delete');
+      SELECT dolt_checkout('main');
+      SELECT dolt_merge('side','--no-ff','-m','merge side');
+    }
+    set name diff-merge-history-$layout-$mainLength-$sideLength
+    check_merge_history $name
+    do_execsql_test $name-first-main {
+      SELECT l.message,d.diff_type,d.to_k FROM dolt_diff_t d
+      JOIN dolt_log l ON l.commit_hash=d.to_commit
+      WHERE l.message='main1'
+    } {main1 added 1}
+    execsql {
+      SELECT dolt_checkout('side');
+      SELECT dolt_merge('main','--no-ff','-m','merge main back');
+      SELECT dolt_checkout('main');
+      SELECT dolt_merge('side','--no-ff','-m','merge side back');
+      INSERT INTO t VALUES(50,50);
+    }
+    check_merge_history $name-back
+    db close
+    sqlite3 db test.db
+    check_merge_history $name-reopen
+  }
+}
+
+reset_db
+execsql {
+  CREATE TABLE t(k INT PRIMARY KEY,v INT);
+  SELECT dolt_commit('-Am','base');
+  SELECT dolt_branch('side');
+  SELECT dolt_branch('other');
+  SELECT dolt_checkout('side');
+  INSERT INTO t VALUES(1,1);
+  SELECT dolt_commit('-am','side insert');
+  SELECT dolt_checkout('main');
+  SELECT dolt_merge('side','--no-ff','-m','first merge');
+  SELECT dolt_checkout('other');
+  SELECT dolt_merge('main','--no-ff','-m','second merge');
+  SELECT dolt_checkout('main');
+  SELECT dolt_merge('other','--no-ff','-m','third merge');
+}
+check_merge_history diff-merge-history-shared
+
+finish_test
