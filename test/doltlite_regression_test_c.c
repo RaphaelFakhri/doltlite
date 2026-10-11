@@ -10333,6 +10333,46 @@ static void run_vc_read_error_keeps_ioerr(void){
   removeDbFiles(dbpath);
 }
 
+static void run_serialize_while_peer_writes(void){
+  char dbpath[512];
+  sqlite3 *db = 0, *peer = 0, *img = 0;
+  unsigned char *pData;
+  sqlite3_int64 nData = 0;
+  int pass;
+
+  make_dbpath(dbpath, sizeof(dbpath), "serialize_peer_write");
+  removeDbFiles(dbpath);
+  check("serialize_peer_open", open_db(dbpath, &db)==SQLITE_OK);
+  check("serialize_peer_open2", open_db(dbpath, &peer)==SQLITE_OK);
+  if( !db || !peer ) goto done;
+  execSql(db, "CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3);"
+              "SELECT dolt_commit('-Am','c');");
+  check("serialize_peer_begin",
+        execSql(peer, "BEGIN IMMEDIATE; INSERT INTO t VALUES(4);")==SQLITE_OK);
+  for(pass=0; pass<2; pass++){
+    if( pass==1 ){
+      check("serialize_peer_commit", execSql(peer, "COMMIT")==SQLITE_OK);
+    }
+    pData = sqlite3_serialize(db, "main", &nData, 0);
+    check("serialize_peer_image", pData!=0 && nData>0);
+    if( !pData ) continue;
+    check("serialize_peer_img_open", sqlite3_open(":memory:", &img)==SQLITE_OK);
+    check("serialize_peer_deserialize",
+          sqlite3_deserialize(img, "main", pData, nData, nData,
+            SQLITE_DESERIALIZE_FREEONCLOSE|SQLITE_DESERIALIZE_RESIZEABLE)
+          ==SQLITE_OK);
+    check("serialize_peer_rows",
+          strcmp(queryScalarText(img, "SELECT count(*) FROM t"),
+                 pass ? "4" : "3")==0);
+    sqlite3_close(img);
+    img = 0;
+  }
+done:
+  if( peer ) sqlite3_close(peer);
+  if( db ) sqlite3_close(db);
+  removeDbFiles(dbpath);
+}
+
 static void run_vc_late_io_failure(void){
   const char *azOps[] = {
     "SELECT dolt_reset('--hard')",
@@ -17339,6 +17379,8 @@ static const RegressionCase aCases[] = {
   { "commit_publication", "Commit Publication Test", run_commit_publication },
   { "vc_interrupt", "VC Interrupt Test", run_vc_interrupt },
   { "vc_late_io_failure", "VC Late IO Failure Test", run_vc_late_io_failure },
+  { "serialize_while_peer_writes", "Serialize While Peer Writes Test",
+    run_serialize_while_peer_writes },
   { "vc_read_error_keeps_ioerr", "VC Read Error Keeps IOERR Test",
     run_vc_read_error_keeps_ioerr },
   { "open_reader_across_catalog_swap", "Open Reader Across Catalog Swap Test",

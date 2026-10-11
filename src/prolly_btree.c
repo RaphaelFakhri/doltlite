@@ -2743,9 +2743,16 @@ int doltliteBtreeSerialize(
     return rc;
   }
   dest.pOwnedVfs = pVfs;
-  rc = chunkStoreLockAndRefresh(pSrc);
+  if( pSrc->lockDepth>0 ){
+    rc = chunkStoreLockAndRefresh(pSrc);
+    if( rc==SQLITE_OK ) locked = 1;
+  }else{
+    /* Like any reader, copy the last published state; a peer's open write
+    ** transaction holds the graph lock but must not block a snapshot. */
+    int changed = 0;
+    rc = chunkStoreRefreshIfChanged(pSrc, &changed);
+  }
   if( rc==SQLITE_OK ){
-    locked = 1;
     rc = chunkStoreCopyIntoEmptyNoCommit(pSrc, &dest);
   }
   if( locked ) chunkStoreUnlock(pSrc);
