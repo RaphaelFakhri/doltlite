@@ -1462,7 +1462,11 @@ static int mergeRefLeaveUncommitted(
 static void mergeRefFinishAutocommitWrite(sqlite3 *db){
   if( db->autoCommit && db->nDb>0 && db->aDb[0].pBt
    && sqlite3BtreeTxnState(db->aDb[0].pBt)==SQLITE_TXN_WRITE ){
-    sqlite3BtreeCommit(db->aDb[0].pBt);
+    /* A commit that fails leaves the write transaction open; the next
+    ** statement would commit it without the graph lock. */
+    if( sqlite3BtreeCommit(db->aDb[0].pBt)!=SQLITE_OK ){
+      sqlite3BtreeRollback(db->aDb[0].pBt, SQLITE_OK, 0);
+    }
     sqlite3CloseSavepoints(db);
   }
 }
