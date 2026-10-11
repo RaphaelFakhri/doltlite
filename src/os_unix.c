@@ -1828,9 +1828,7 @@ static int unixGraphLock(unixFile *pFile, int bLock){
     lock.l_start = PENDING_BYTE - 1;
     lock.l_len = 1;
     lock.l_type = bLock ? F_WRLCK : F_UNLCK;
-    do {
-      rc = osFcntl(pFile->h, F_SETLK, &lock);
-    }while( rc!=0 && errno==EINTR );
+    rc = osFcntl(pFile->h, F_SETLK, &lock);
     if( rc!=0 ){
       rc = sqliteErrorFromPosixError(errno,
           bLock ? SQLITE_IOERR_LOCK : SQLITE_IOERR_UNLOCK);
