@@ -69,6 +69,10 @@ do_test tempdb-2.1 {
   db close
   sqlite3 db test.db
 } {}
+set tempdb_write_files [expr {1 + (0==$jrnl_in_memory)}]
+if {$sqlite_options(doltlite)} {
+  set tempdb_write_files [expr {$tcl_platform(platform) eq "unix" ? 3 : 2}]
+}
 do_test tempdb-2.2 {
   execsql {
     CREATE TABLE t1 (a PRIMARY KEY, b, c);
@@ -81,7 +85,7 @@ do_test tempdb-2.2 {
   }
   catchsql { INSERT INTO t1 SELECT * FROM t2 }
   set sqlite_open_file_count
-} [expr 1 + (0==$jrnl_in_memory)]
+} $tempdb_write_files
 do_test tempdb-2.3 {
   execsql {
     PRAGMA temp_store = 'memory';
@@ -93,6 +97,6 @@ do_test tempdb-2.3 {
   }
   catchsql { INSERT INTO t1 SELECT * FROM t2 }
   set sqlite_open_file_count
-} [expr 1 + (0==$jrnl_in_memory)]
+} $tempdb_write_files
 
 finish_test

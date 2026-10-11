@@ -1872,8 +1872,6 @@ exclusive exclusive-2.11 class=intentional  # locking_mode=exclusive not enforce
 exclusive exclusive-3.1 class=intentional  # locking_mode=exclusive not enforced; extra rows are the peer's successful concurrent writes
 exclusive exclusive-3.2 class=intentional  # locking_mode=exclusive not enforced; extra rows are the peer's successful concurrent writes
 exclusive exclusive-3.5 class=intentional  # locking_mode=exclusive not enforced; extra rows are the peer's successful concurrent writes
-exclusive exclusive-5.2 class=intentional  # retained graph-lock handle raises the instrumented open-file count
-exclusive exclusive-5.7 class=intentional  # retained graph-lock handle raises the instrumented open-file count
 exclusive exclusive-6.2 class=intentional  # locking_mode=exclusive not enforced; extra rows are the peer's successful concurrent writes
 exclusive exclusive-6.3 class=intentional  # locking_mode=exclusive not enforced; extra rows are the peer's successful concurrent writes
 exclusive exclusive-7.1 class=intentional  # locking_mode=exclusive not enforced; extra rows are the peer's successful concurrent writes
@@ -3012,7 +3010,6 @@ e_reindex e_reindex-2.6.8 class=intentional
 # filename and the parameter list differ.
 e_uri e_uri-3.2 class=intentional  # parse_uri records the LAST xOpen seen by a testvfs. doltlite's chunk store performs extra VFS opens after the initial URI open (traced with a log-all-xOpens repro): for relative paths it re-opens the resolved absolute path with no URI parameter block, so the recorded open has the right file but empty params (3.2/3.3); for absolute paths the recorded open is the eager ".{db}-lock" sidecar (4.2-4.4, 12.x, 13.x), so both the filename and the parameter list differ.
 e_uri e_uri-3.3 class=intentional
-e_uri e_uri-4.1 class=intentional
 e_uri e_uri-4.2 class=intentional
 e_uri e_uri-4.3 class=intentional
 e_uri e_uri-4.4 class=intentional
@@ -5380,9 +5377,6 @@ sysfault sysfault-2.2-vfsfault-transient.108 class=intentional
 sysfault sysfault-2.2-vfsfault-transient.109 class=intentional
 sysfault sysfault-2.2-vfsfault-transient.112 @coverage class=intentional
 
-stmt stmt-1.2 class=intentional  # retained graph-lock handle raises the instrumented open-file count
-stmt stmt-1.5 class=intentional  # retained graph-lock handle raises the instrumented open-file count
-stmt stmt-1.7 class=intentional  # retained graph-lock handle raises the instrumented open-file count
 
 # crash4: first-commit sector trash; reopen surfaces NOTADB (was crash)
 crash4 crash4-1.1.2 class=intentional  # creation-batch sector trash; reopen NOTADB, no journal recovery anchor

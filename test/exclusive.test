@@ -413,6 +413,13 @@ if {$using_proxy!=0} {
   set extrafds 2
 } 
 
+set exclusive_idle_files 1
+set exclusive_write_files 2
+if {$sqlite_options(doltlite)} {
+  set exclusive_idle_files [expr {$tcl_platform(platform) eq "unix" ? 3 : 2}]
+  set exclusive_write_files $exclusive_idle_files
+}
+
 do_test exclusive-5.0 {
   execsql {
     CREATE TABLE abc(a UNIQUE, b UNIQUE, c UNIQUE);
@@ -426,7 +433,7 @@ do_test exclusive-5.1 {
   # (2016-03-04) The statement-journal is now opened lazily
   set sqlite_open_file_count
   expr $sqlite_open_file_count-$extrafds
-} {2}
+} $exclusive_write_files
 do_test exclusive-5.2 {
   execsql {
     COMMIT;
@@ -434,7 +441,7 @@ do_test exclusive-5.2 {
   # One file open: the db.
   set sqlite_open_file_count
   expr $sqlite_open_file_count-$extrafds
-} {1}
+} $exclusive_idle_files
 do_test exclusive-5.3 {
   execsql {
     PRAGMA locking_mode = exclusive;
@@ -444,7 +451,7 @@ do_test exclusive-5.3 {
   # Two files open: the db and journal.
   set sqlite_open_file_count
   expr $sqlite_open_file_count-$extrafds
-} {2}
+} $exclusive_write_files
 do_test exclusive-5.4 {
   execsql {
     INSERT INTO abc SELECT a+10, b+10, c+10 FROM abc;
@@ -453,7 +460,7 @@ do_test exclusive-5.4 {
   # 2016-03-04: The statement-journal open is deferred
   set sqlite_open_file_count
   expr $sqlite_open_file_count-$extrafds
-} {2}
+} $exclusive_write_files
 do_test exclusive-5.5 {
   execsql {
     COMMIT;
@@ -462,7 +469,7 @@ do_test exclusive-5.5 {
   # 2016-03-04: The statement-journal open is deferred
   set sqlite_open_file_count
   expr $sqlite_open_file_count-$extrafds
-} {2}
+} $exclusive_write_files
 do_test exclusive-5.6 {
   execsql {
     PRAGMA locking_mode = normal;
@@ -473,7 +480,7 @@ do_test exclusive-5.7 {
   # Just the db open.
   set sqlite_open_file_count
   expr $sqlite_open_file_count-$extrafds
-} {1}
+} $exclusive_idle_files
 
 #-------------------------------------------------------------------------
 

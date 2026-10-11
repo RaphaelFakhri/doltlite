@@ -100,6 +100,15 @@ static int csGuardOpen(
 
 #endif
 
+int csFileLockOutput(sqlite3_file *pFile){
+#if SQLITE_OS_UNIX
+  return csGuardRelock(pFile);
+#else
+  (void)pFile;
+  return SQLITE_OK;
+#endif
+}
+
 static int csFileRelock(CsFileLock pLock, int bCreate){
   int rc;
   if( !pLock ) return SQLITE_ERROR;

@@ -37,6 +37,7 @@ int csFileLock(sqlite3_vfs *pVfs, const char *path, int openFlags,
 int csReadLock(ChunkStore *cs, CsReadLock *pLock);
 int csReadUnlock(ChunkStore *cs, CsReadLock *pLock);
 int csFileLockPromote(sqlite3_file *pFile);
+int csFileLockOutput(sqlite3_file *pFile);
 void csFileUnlock(CsFileLock pFile, char **pzName);
 int csReloadFromDiskPreservingLocalRefs(ChunkStore *cs);
 int csRestoreOrMergeLocalRefs(ChunkStore *cs, SavedRefsState *pSaved,
