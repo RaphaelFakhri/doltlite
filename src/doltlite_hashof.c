@@ -973,7 +973,8 @@ static void doltliteHashofDbFunc(sqlite3_context *ctx, int argc, sqlite3_value *
   if( argc==0 ){
     rc = doltliteFlushCatalogToHash(db, &catHash);
     if( rc!=SQLITE_OK ){
-      sqlite3_result_error(ctx, "dolt_hashof_db: catalog flush failed", -1);
+      doltliteVcResultErrorCode(ctx, sqlite3_context_db_handle(ctx),
+          "dolt_hashof_db: catalog flush failed", rc);
       return;
     }
   }else{
@@ -982,7 +983,8 @@ static void doltliteHashofDbFunc(sqlite3_context *ctx, int argc, sqlite3_value *
 
   rc = hashofDbInCatalog(db, &catHash, hex);
   if( rc!=SQLITE_OK ){
-    sqlite3_result_error(ctx, "dolt_hashof_db: catalog hash failed", -1);
+    doltliteVcResultErrorCode(ctx, sqlite3_context_db_handle(ctx),
+        "dolt_hashof_db: catalog hash failed", rc);
     return;
   }
   sqlite3_result_text(ctx, hex, PROLLY_HASH_SIZE*2, SQLITE_TRANSIENT);
@@ -1008,7 +1010,8 @@ static void doltliteHashofCatalogFunc(sqlite3_context *ctx, int argc, sqlite3_va
   if( argc==0 ){
     rc = doltliteResolveCatalogHashForRef(db, "WORKING", &catHash);
     if( rc!=SQLITE_OK ){
-      sqlite3_result_error(ctx, "dolt_hashof_catalog: working catalog read failed", -1);
+      doltliteVcResultErrorCode(ctx, sqlite3_context_db_handle(ctx),
+          "dolt_hashof_catalog: working catalog read failed", rc);
       return;
     }
   }else{

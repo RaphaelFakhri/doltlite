@@ -219,7 +219,8 @@ static int doltliteCommitStageModifiedOnly(
 
   rc = doltliteFlushCatalogToHash(db, &workingHash);
   if( rc!=SQLITE_OK ){
-    sqlite3_result_error(context, "failed to flush", -1);
+    doltliteVcResultErrorCode(context, sqlite3_context_db_handle(context),
+        "failed to flush", rc);
     return rc;
   }
   rc = doltliteLoadCatalog(db, &workingHash, &aWorking, &nWorking, 0);
@@ -1012,7 +1013,8 @@ static void doltliteCommitFuncImpl(
     }else{
       rc = doltliteFlushCatalogToHash(db, &catalogHash);
       if( rc!=SQLITE_OK ){
-        sqlite3_result_error(context, "failed to flush", -1);
+        doltliteVcResultErrorCode(context, sqlite3_context_db_handle(context),
+            "failed to flush", rc);
         return;
       }
       rc = doltliteSetSessionStaged(db, &catalogHash);

@@ -1174,7 +1174,8 @@ static int doltliteStageArgsAndPersist(
 
   rc = doltliteFlushCatalogToHash(db, &workingHash);
   if( rc!=SQLITE_OK ){
-    sqlite3_result_error(context, "failed to flush", -1);
+    doltliteVcResultErrorCode(context, sqlite3_context_db_handle(context),
+        "failed to flush", rc);
     return rc;
   }
 
@@ -1316,7 +1317,8 @@ int doltliteAddStageAll(sqlite3 *db, sqlite3_context *context, int bForce){
   }
   rc = doltliteFlushCatalogToHash(db, &workingHash);
   if( rc!=SQLITE_OK ){
-    sqlite3_result_error(context, "failed to flush", -1);
+    doltliteVcResultErrorCode(context, sqlite3_context_db_handle(context),
+        "failed to flush", rc);
     return rc;
   }
   return addStageAllTables(db, context, cs, &workingHash, bForce);
