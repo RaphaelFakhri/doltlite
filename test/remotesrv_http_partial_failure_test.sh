@@ -47,6 +47,17 @@ check_match() {
     fail=$((fail+1))
   fi
 }
+check_absent() {
+  local desc="$1" pattern="$2" actual="${3//$'\r'/}"
+  if echo "$actual" | grep -qE "$pattern"; then
+    echo "  FAIL: $desc"
+    echo "    absent pattern: |$pattern|"
+    echo "    actual:  |$(echo "$actual" | head -5)|"
+    fail=$((fail+1))
+  else
+    echo "  PASS: $desc"; pass=$((pass+1))
+  fi
+}
 
 mkdir -p "$TMP/srv"
 "$REMOTESRV" -p 0 --bind 127.0.0.1 "$TMP/srv" >"$TMP/srv.log" 2>&1 &
@@ -64,6 +75,7 @@ fi
 cat >"$TMP/proxy.py" <<'PY'
 import socket
 import socketserver
+import struct
 import sys
 import threading
 
@@ -131,6 +143,15 @@ class Handler(socketserver.BaseRequestHandler):
             if not chunk:
                 return
             body += chunk
+
+        control = current_fail_path()
+        if control.startswith("drop:") and path.endswith(control[5:]):
+            self.request.setsockopt(
+                socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            self.request.close()
+            return
+        if control.startswith("fin:") and path.endswith(control[4:]):
+            return
 
         if should_fail(path):
             self.request.sendall(
@@ -251,6 +272,25 @@ check_match "retry uses multiple bounded chunk batches" "^[4-9]$|^[1-9][0-9]+$" 
 result=$("$DB" "$TMP/clone_large.db" "SELECT dolt_clone('$URL'); SELECT count(*),sum(length(payload)) FROM large_payload;" 2>&1)
 check "clone reads the greater-than-128-MiB push" "0
 8704|142606336" "$result"
+
+echo "=== dropped connection names a network error ==="
+drop_n=0
+for spec in "fin:/refs" "drop:/has-chunks" "drop:/chunks" "fin:/commit"; do
+  drop_n=$((drop_n+1))
+  "$DB" "$A" "INSERT INTO t VALUES($((9100+drop_n)),'lost',null); SELECT dolt_commit('-A','-m','lost$drop_n');" >/dev/null
+  printf '%s\n' "$spec" >"$TMP/fail_path"
+  result=$("$DB" "$A" "SELECT dolt_push('origin','main');" 2>&1)
+  check_match "push dropped on $spec names the network" "connection to remote lost" "$result"
+  check_absent "push dropped on $spec is not a locking error" "locking protocol" "$result"
+  check_absent "push dropped on $spec is not a disk error" "disk I/O" "$result"
+done
+printf '\n' >"$TMP/fail_path"
+lost_head=$("$DB" "$A" "SELECT commit_hash FROM dolt_log LIMIT 1;")
+result=$("$DB" "$A" "SELECT dolt_push('origin','main');" 2>&1)
+check "retry after a dropped push succeeds" "0" "$result"
+result=$("$DB" "$TMP/clone_after_drop.db" "SELECT dolt_clone('$URL'); SELECT commit_hash FROM dolt_log LIMIT 1;" 2>&1)
+check "remote matches local after the dropped push is retried" "0
+$lost_head" "$result"
 
 echo ""
 echo "======================================="

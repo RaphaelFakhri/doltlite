@@ -858,6 +858,15 @@ static int httpRemainingTimeout(i64 deadlineMs){
   return (int)remaining;
 }
 
+/* The peer hung up, or a socket read or write failed. That is a network
+** failure: keep a message, and a result code, that name the network. */
+static int httpConnectionLost(HttpRemote *p, int *pTransportError){
+  *pTransportError = 1;
+  httpDisconnect(p);
+  httpSetLastError(p, "connection to remote lost");
+  return SQLITE_ERROR;
+}
+
 static int httpRequestMayRetry(const char *zMethod, const char *zPath){
   int nPath = (int)strlen(zPath);
   if( sqlite3_stricmp(zMethod, "GET")==0 ) return 1;
@@ -949,9 +958,7 @@ static int httpRequestOnce(
      ? SQLITE_IOERR : SQLITE_OK;
   sqlite3_free(zHdr);
   if( rc != SQLITE_OK ){
-    *pTransportError = 1;
-    httpDisconnect(p);
-    return rc;
+    return httpConnectionLost(p, pTransportError);
   }
   if( pBody && nBody > 0 ){
     i64 off = 0;
@@ -959,9 +966,7 @@ static int httpRequestOnce(
       i64 nRemain = nBody - off;
       int nWrite = nRemain>0x7fffffff ? 0x7fffffff : (int)nRemain;
       if( httpConnWriteAll(p->pConn, pBody+off, nWrite) ){
-        *pTransportError = 1;
-        httpDisconnect(p);
-        return SQLITE_IOERR;
+        return httpConnectionLost(p, pTransportError);
       }
       off += nWrite;
     }
@@ -970,6 +975,9 @@ static int httpRequestOnce(
   rc = readHttpResponse(p->pConn, &pRaw, &nRaw, &closeConnection,
                         pTransportError);
   if( rc != SQLITE_OK ){
+    if( *pTransportError && (rc==SQLITE_IOERR || rc==SQLITE_PROTOCOL) ){
+      return httpConnectionLost(p, pTransportError);
+    }
     httpDisconnect(p);
     return rc;
   }
