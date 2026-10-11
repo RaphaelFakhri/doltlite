@@ -38,6 +38,10 @@ int csReadLock(ChunkStore *cs, CsReadLock *pLock);
 int csReadUnlock(ChunkStore *cs, CsReadLock *pLock);
 int csFileLockPromote(sqlite3_file *pFile);
 int csFileLockOutput(sqlite3_file *pFile);
+int csScanForCommittedRoot(ChunkStore *cs, int *pEverCommitted,
+                           int *pCreationRoot);
+int csScanForCommittedRootEx(ChunkStore *cs, int *pEverCommitted,
+                             int *pCreationRoot, int *pLaterBatch);
 void csFileUnlock(CsFileLock pFile, char **pzName);
 int csReloadFromDiskPreservingLocalRefs(ChunkStore *cs);
 int csRestoreOrMergeLocalRefs(ChunkStore *cs, SavedRefsState *pSaved,
