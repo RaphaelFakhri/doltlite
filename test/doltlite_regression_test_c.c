@@ -1580,6 +1580,8 @@ static int gFailWriteOnce = 0;
 static int gFailSyncOnce = 0;
 static int gFailWriteNth = 0;
 static int gFailSyncNth = 0;
+/* After this many main-db writes, fail every later one. 0 is off. */
+static int gFailWriteSticky = 0;
 static int gFailReadNth = 0;
 static int gFailNoFetch = 0;
 static int gFailReadWidth = 0;
@@ -1635,6 +1637,15 @@ static int failRead(sqlite3_file *pFile, void *zBuf, int iAmt, sqlite3_int64 iOf
 
 static int failWrite(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3_int64 iOfst){
   FailFile *p = (FailFile*)pFile;
+  if( p->isMainDb && gFailWriteSticky<0 ){
+    gFailHits++;
+    return SQLITE_IOERR_WRITE;
+  }
+  if( p->isMainDb && gFailWriteSticky>0 && --gFailWriteSticky==0 ){
+    gFailWriteSticky = -1;
+    gFailHits++;
+    return SQLITE_IOERR_WRITE;
+  }
   if( gFailWriteOnce>0
    || (p->isMainDb && gFailWriteNth>0 && --gFailWriteNth==0) ){
     if( gFailWriteOnce>0 ) gFailWriteOnce--;
@@ -4563,6 +4574,193 @@ static void run_clone_persist_failure(void){
       "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='t'"), "0")==0);
 
   sqlite3_close(localDb);
+  removeDbFiles(localPath);
+  removeDbFiles(remotePath);
+}
+
+/* A write fault during clone must not leave this connection on an empty
+** session while disk has the clone. One fault undoes the install so a retry
+** works. A fault that also hits that undo leaves the clone, and a later
+** write stays. */
+static void run_clone_post_commit_io_failure(void){
+  const char *zView =
+    "SELECT printf('%d|%d|%s',"
+    " (SELECT count(*) FROM sqlite_master WHERE type='table' AND name='t'),"
+    " (SELECT count(*) FROM dolt_log),"
+    " IFNULL((SELECT message FROM dolt_log LIMIT 1), ''))";
+  char localPath[256];
+  char remotePath[256];
+  char sql[1024];
+  int nth;
+  int sawNth;
+
+  printf("=== Clone Post-Commit IO Failure Test ===\n\n");
+  check("clone_post_commit_register", registerFailVfs()==SQLITE_OK);
+  make_dbpath(localPath, sizeof(localPath), "test_clone_post_commit_local");
+  make_dbpath(remotePath, sizeof(remotePath), "test_clone_post_commit_remote");
+  removeDbFiles(localPath);
+  removeDbFiles(remotePath);
+  gFailWriteNth = 0;
+  gFailWriteSticky = 0;
+  gFailSyncNth = 0;
+  gFailSyncOnce = 0;
+  gFailWriteOnce = 0;
+
+  {
+    sqlite3 *remoteDb = 0;
+    check("clone_post_commit_remote", open_db(remotePath, &remoteDb)==SQLITE_OK);
+    if( remoteDb ){
+      check("clone_post_commit_seed", execSql(remoteDb,
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);"
+        "INSERT INTO t VALUES(1,'a');"
+        "SELECT dolt_commit('-A', '-m', 'init');")==SQLITE_OK);
+      sqlite3_close(remoteDb);
+    }
+  }
+
+  sawNth = 0;
+  sqlite3_snprintf(sizeof(sql), sql, "SELECT dolt_clone('file://%s')", remotePath);
+  for(nth=1; nth<=48; nth++){
+    sqlite3 *db = 0;
+    sqlite3 *fresh = 0;
+    char zMsg[256];
+    char zLive[256];
+    char zFresh[256];
+    char *err = 0;
+    int rc;
+    int hits;
+    int hasT;
+    int wantT;
+
+    removeDbFiles(localPath);
+    check("clone_post_commit_open", open_fail_db(localPath, &db)==SQLITE_OK);
+    if( !db ) break;
+    gFailHits = 0;
+    gFailWriteNth = nth;
+    gFailWriteSticky = 0;
+    rc = sqlite3_exec(db, sql, 0, 0, &err);
+    hits = gFailHits;
+    gFailWriteNth = 0;
+    zMsg[0] = 0;
+    if( err ) sqlite3_snprintf(sizeof(zMsg), zMsg, "%s", err);
+    sqlite3_free(err);
+    if( hits==0 ){
+      check("clone_io_unfaulted_ok", rc==SQLITE_OK);
+    }else{
+      check("clone_io_fault_reported", rc!=SQLITE_OK);
+    }
+    sqlite3_snprintf(sizeof(zLive), zLive, "%s", queryScalarText(db, zView));
+    check("clone_io_fresh_open", open_db(localPath, &fresh)==SQLITE_OK);
+    zFresh[0] = 0;
+    if( fresh ){
+      sqlite3_snprintf(sizeof(zFresh), zFresh, "%s",
+                       queryScalarText(fresh, zView));
+      sqlite3_close(fresh);
+      fresh = 0;
+    }
+    if( strcmp(zLive, zFresh)!=0 ){
+      printf("nth=%d rc=%d live=%s fresh=%s msg=%s\n",
+             nth, rc, zLive, zFresh, zMsg);
+    }
+    check("clone_io_session_matches_disk", strcmp(zLive, zFresh)==0);
+    hasT = strcmp(queryScalarText(db,
+      "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='t'"),
+      "1")==0;
+    if( strstr(zMsg, "failed to initialize working tree") ){
+      if( sawNth==0 ) sawNth = nth;
+      check("clone_io_working_tree_code", (rc & 0xff)==SQLITE_IOERR);
+      check("clone_io_working_tree_undone", hasT==0);
+    }
+    wantT = hasT;
+    if( !hasT ){
+      int retryRc = execSql(db, sql);
+      check("clone_io_retry", retryRc==SQLITE_OK);
+      if( retryRc==SQLITE_OK ) wantT = 1;
+      check("clone_io_retry_row",
+            strcmp(queryScalarText(db, "SELECT v FROM t"), "a")==0);
+    }
+    check("clone_io_follow_write", execSql(db,
+      "CREATE TABLE extra(x INTEGER PRIMARY KEY);"
+      "INSERT INTO extra VALUES(7);")==SQLITE_OK);
+    sqlite3_close(db);
+    db = 0;
+    check("clone_io_reopen", open_db(localPath, &fresh)==SQLITE_OK);
+    if( fresh ){
+      check("clone_io_extra_kept",
+            strcmp(queryScalarText(fresh, "SELECT x FROM extra"), "7")==0);
+      check("clone_io_t_kept",
+            strcmp(queryScalarText(fresh,
+              "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='t'"),
+              wantT ? "1" : "0")==0);
+      sqlite3_close(fresh);
+    }
+    if( hits==0 ) break;
+  }
+  check("clone_post_commit_hit_working_tree", sawNth>0);
+
+  if( sawNth>0 ){
+    sqlite3 *db = 0;
+    sqlite3 *fresh = 0;
+    char zMsg[256];
+    char zLive[256];
+    char zFresh[256];
+    char *err = 0;
+    int rc;
+    int hasT;
+
+    removeDbFiles(localPath);
+    check("clone_post_commit_adopt_open", open_fail_db(localPath, &db)==SQLITE_OK);
+    if( db ){
+      gFailHits = 0;
+      gFailWriteNth = 0;
+      gFailWriteSticky = sawNth;
+      rc = sqlite3_exec(db, sql, 0, 0, &err);
+      gFailWriteSticky = 0;
+      zMsg[0] = 0;
+      if( err ) sqlite3_snprintf(sizeof(zMsg), zMsg, "%s", err);
+      sqlite3_free(err);
+      check("clone_io_adopt_failed", rc!=SQLITE_OK);
+      check("clone_io_adopt_message",
+            strstr(zMsg, "failed to initialize working tree")!=0);
+      check("clone_io_adopt_code", (rc & 0xff)==SQLITE_IOERR);
+      sqlite3_snprintf(sizeof(zLive), zLive, "%s", queryScalarText(db, zView));
+      check("clone_io_adopt_fresh", open_db(localPath, &fresh)==SQLITE_OK);
+      zFresh[0] = 0;
+      if( fresh ){
+        sqlite3_snprintf(sizeof(zFresh), zFresh, "%s",
+                         queryScalarText(fresh, zView));
+        sqlite3_close(fresh);
+        fresh = 0;
+      }
+      if( strcmp(zLive, zFresh)!=0 ){
+        printf("adopt live=%s fresh=%s msg=%s\n", zLive, zFresh, zMsg);
+      }
+      check("clone_io_adopt_matches", strcmp(zLive, zFresh)==0);
+      hasT = strcmp(queryScalarText(db,
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='t'"),
+        "1")==0;
+      check("clone_io_adopt_has_clone", hasT);
+      check("clone_io_adopt_row",
+            strcmp(queryScalarText(db, "SELECT v FROM t"), "a")==0);
+      check("clone_io_adopt_write", execSql(db,
+        "CREATE TABLE extra(x INTEGER PRIMARY KEY);"
+        "INSERT INTO extra VALUES(7);")==SQLITE_OK);
+      sqlite3_close(db);
+      db = 0;
+      check("clone_io_adopt_reopen", open_db(localPath, &fresh)==SQLITE_OK);
+      if( fresh ){
+        check("clone_io_adopt_extra_kept",
+              strcmp(queryScalarText(fresh, "SELECT x FROM extra"), "7")==0);
+        check("clone_io_adopt_t_kept",
+              strcmp(queryScalarText(fresh, "SELECT v FROM t"), "a")==0);
+        sqlite3_close(fresh);
+      }
+    }
+  }
+
+  gFailWriteNth = 0;
+  gFailWriteSticky = 0;
+  gFailHits = 0;
   removeDbFiles(localPath);
   removeDbFiles(remotePath);
 }
@@ -16796,6 +16994,8 @@ static const RegressionCase aCases[] = {
   { "pull_staged_changes_fails", "Pull Staged Changes Fails Test", run_pull_staged_changes_fails },
   { "push_persist_failure", "Push Persist Failure Test", run_push_persist_failure },
   { "clone_persist_failure", "Clone Persist Failure Test", run_clone_persist_failure },
+  { "clone_post_commit_io_failure", "Clone Post-Commit IO Failure Test",
+    run_clone_post_commit_io_failure },
   { "resolve_ref_non_commit", "Resolve Ref Non-Commit Test", run_resolve_ref_non_commit },
   { "commit_parent_limit", "Commit Parent Limit Test", run_commit_parent_limit },
   { "commit_am_many_tables", "Commit -am Many Tables Test", run_commit_am_many_tables },
