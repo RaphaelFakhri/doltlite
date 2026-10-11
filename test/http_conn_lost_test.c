@@ -1,9 +1,13 @@
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <netinet/in.h>
 #include "sqlite3.h"
 #include "lib/test_tmpdir.h"
@@ -32,6 +36,9 @@ static int execSql(sqlite3 *db, const char *zSql){
 struct DropListener {
   int listenFd;
   int mode;
+  /* Set by the stopper. accept does not wake when another thread closes
+  ** the listening socket, so the server polls this instead of blocking. */
+  volatile int stop;
   pthread_t thread;
 };
 
@@ -79,9 +86,24 @@ static void drainAndClose(int fd, int mode){
 
 static void *serveDrops(void *pArg){
   struct DropListener *p = (struct DropListener *)pArg;
-  for(;;){
-    int fd = accept(p->listenFd, 0, 0);
-    if( fd<0 ) break;
+  while( !p->stop ){
+    fd_set rfds;
+    struct timeval tv;
+    int fd;
+    int rc;
+    FD_ZERO(&rfds);
+    FD_SET(p->listenFd, &rfds);
+    tv.tv_sec = 0;
+    tv.tv_usec = 200000;
+    rc = select(p->listenFd + 1, &rfds, 0, 0, &tv);
+    if( p->stop ) break;
+    if( rc<0 ){
+      if( errno==EINTR ) continue;
+      break;
+    }
+    if( rc==0 ) continue;
+    fd = accept(p->listenFd, 0, 0);
+    if( fd<0 ) continue;
     drainAndClose(fd, p->mode);
   }
   return 0;
@@ -91,11 +113,13 @@ static int startDrop(struct DropListener *p, int mode, int *pPort){
   struct sockaddr_in addr;
   socklen_t nAddr = sizeof(addr);
   int one = 1;
+  int flags;
   int fd;
 
   *pPort = 0;
   p->listenFd = -1;
   p->mode = mode;
+  p->stop = 0;
   fd = socket(AF_INET, SOCK_STREAM, 0);
   if( fd<0 ) return 0;
   setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
@@ -103,8 +127,11 @@ static int startDrop(struct DropListener *p, int mode, int *pPort){
   addr.sin_family = AF_INET;
   addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
   addr.sin_port = htons(0);
+  flags = fcntl(fd, F_GETFL, 0);
   if( bind(fd, (struct sockaddr *)&addr, sizeof(addr))!=0
    || listen(fd, 16)!=0
+   || flags<0
+   || fcntl(fd, F_SETFL, flags | O_NONBLOCK)!=0
    || getsockname(fd, (struct sockaddr *)&addr, &nAddr)!=0 ){
     close(fd);
     return 0;
@@ -121,9 +148,10 @@ static int startDrop(struct DropListener *p, int mode, int *pPort){
 
 static void stopDrop(struct DropListener *p){
   if( p->listenFd>=0 ){
+    p->stop = 1;
+    pthread_join(p->thread, 0);
     close(p->listenFd);
     p->listenFd = -1;
-    pthread_join(p->thread, 0);
   }
 }
 
