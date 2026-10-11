@@ -3412,6 +3412,7 @@ static void doltliteRebaseFunc(
   int keepTopLevelSavepoint = 0;
   int rc;
 
+  if( doltliteCmdRejectInWriteStatement(context, "rebase") ) return;
   memset(&args, 0, sizeof(args));
 
   if( doltliteCmdRejectDetached(context) ) return;

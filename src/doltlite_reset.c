@@ -587,6 +587,7 @@ static void doltliteResetFunc(
   int haveSaved = 0;
   DoltliteTxnState saved;
 
+  if( doltliteCmdRejectInWriteStatement(context, "reset") ) return;
   memset(&args, 0, sizeof(args));
   memset(&saved, 0, sizeof(saved));
 

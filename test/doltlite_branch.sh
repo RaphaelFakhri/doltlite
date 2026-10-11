@@ -290,5 +290,20 @@ SQL
 done
 done
 
-rm -f "$DB" "$DB2" "$DB2B" "$DB3" "$DB4" "$DB5" "$DB6" "$DB7" "$DB8" "$DB9" "$DB10" "$DB11" "$DB12" "$DB13" "$DB14" "$DB15" "$DB16" "$DB17" "$DB18" "$DB19" "$DB20"
+DB21=/tmp/test_branch21_$$.db
+for spec in "reset:dolt_reset('--hard')" "reset:dolt_reset('t')" "merge:dolt_merge('feat')" \
+            "revert:dolt_revert('HEAD')" "cherry-pick:dolt_cherry_pick('feat')" \
+            "rebase:dolt_rebase('feat')" "clean:dolt_clean()" "pull:dolt_pull()"; do
+  verb=${spec%%:*}; call=${spec#*:}
+  rm -f "$DB21"
+  echo "CREATE TABLE t(id INTEGER PRIMARY KEY, v INT); INSERT INTO t VALUES(1,1),(2,2),(3,3); CREATE TABLE src(id INTEGER PRIMARY KEY, v INT); WITH RECURSIVE x(n) AS (SELECT 10 UNION ALL SELECT n+1 FROM x WHERE n<509) INSERT INTO src SELECT n,n FROM x; SELECT dolt_commit('-Am','c1'); SELECT dolt_checkout('-b','feat'); CREATE TABLE ft(x); SELECT dolt_commit('-Am','f1'); SELECT dolt_checkout('main'); CREATE TABLE j(x); SELECT dolt_commit('-Am','c2');" | $DOLTLITE "$DB21" > /dev/null 2>&1
+  run_test_error_match "${call}_during_insert_errors" \
+    "INSERT INTO t SELECT id, CASE WHEN id=12 THEN length($call)*0+12 ELSE v END FROM src;" \
+    "cannot $verb while a write statement is active" "$DB21"
+  run_test "${call}_during_insert_rolls_back" \
+    "PRAGMA integrity_check; SELECT count(*) FROM t;" "ok
+3" "$DB21"
+done
+
+rm -f "$DB" "$DB2" "$DB2B" "$DB3" "$DB4" "$DB5" "$DB6" "$DB7" "$DB8" "$DB9" "$DB10" "$DB11" "$DB12" "$DB13" "$DB14" "$DB15" "$DB16" "$DB17" "$DB18" "$DB19" "$DB20" "$DB21"
 dltest_finish

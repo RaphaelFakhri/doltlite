@@ -575,6 +575,7 @@ static void doltliteCherryPickFunc(
   char *zApplyErr = 0;
   char hexBuf[PROLLY_HASH_SIZE*2+1];
 
+  if( doltliteCmdRejectInWriteStatement(context, "cherry-pick") ) return;
   memset(&pickCommit, 0, sizeof(pickCommit));
   memset(&parentCommit, 0, sizeof(parentCommit));
   memset(&ourCommit, 0, sizeof(ourCommit));

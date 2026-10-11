@@ -1328,6 +1328,7 @@ int doltliteCmdParseArgs(
 void doltliteCmdArgsClear(DoltliteCmdArgs *pArgs);
 int doltliteCmdRejectDetached(sqlite3_context *ctx);
 int doltliteCmdRejectReadOnly(sqlite3_context *ctx);
+int doltliteCmdRejectInWriteStatement(sqlite3_context *ctx, const char *zVerb);
 
 int doltliteCmdParseAuthor(
   sqlite3_context *ctx, const char *zAuthor,

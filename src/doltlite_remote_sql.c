@@ -1419,6 +1419,7 @@ static void doltPullFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
   const char *zBranch;
   int rc;
 
+  if( doltliteCmdRejectInWriteStatement(ctx, "pull") ) return;
   if( doltliteCmdRejectDetached(ctx) ) return;
   if( doltliteCmdRejectReadOnly(ctx) ) return;
   if( !doltliteGetChunkStore(db) ){

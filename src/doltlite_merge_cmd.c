@@ -1866,6 +1866,7 @@ static void doltliteMergeFunc(
   u8 isMerging = 0;
   int rc;
 
+  if( doltliteCmdRejectInWriteStatement(context, "merge") ) return;
   if( doltliteCmdRejectDetached(context) ) return;
   if( doltliteCmdRejectReadOnly(context) ) return;
   if( !doltliteGetChunkStore(db) ){
