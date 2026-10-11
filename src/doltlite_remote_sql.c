@@ -1381,6 +1381,7 @@ static void doltCloneFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
   DoltliteTxnState savedState;
   int bLazy = 0;
   int dirty = 0;
+  int branchMissing = 0;
   int rc;
 
   if( !cs ){ doltliteVcResultError(ctx, db, "no database"); return; }
@@ -1504,12 +1505,17 @@ static void doltCloneFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
       return;
     }
   }
+  branchMissing = 0;
   rc = bLazy ? doltliteCloneLazy(cs, pRemote, zUrl, zRevision)
-             : doltliteClone(cs, pRemote, zUrl, zBranchOpt);
+             : doltliteClone(cs, pRemote, zUrl, zBranchOpt, &branchMissing);
   if( rc!=SQLITE_OK ){
     const char *zMsg = remoteSqlRemoteMsg(pRemote, rc);
-    char *zOwned;
-    if( !zMsg && rc==SQLITE_BUSY_SNAPSHOT ){
+    char *zOwned = 0;
+    if( branchMissing ){
+      zMsg = zBranchOpt ? "branch not found on remote"
+                        : "default branch missing from cloned refs";
+      rc = SQLITE_ERROR;
+    }else if( !zMsg && rc==SQLITE_BUSY_SNAPSHOT ){
       zMsg = "clone failed (graph changed during install; retry)";
     }
     zOwned = zMsg ? sqlite3_mprintf("%s", zMsg) : 0;

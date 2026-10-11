@@ -3475,6 +3475,81 @@ static void run_clone_ref_install_survives_window_gc(void){
   removeDbFiles(clonePath);
 }
 
+/* Deletes feat after clone's existence check and before its refs read. */
+static const char *gDropCloneBranchPath = 0;
+
+static void dropFeatBeforeCloneRefs(void *pArg){
+  sqlite3 *db = 0;
+  (void)pArg;
+  if( !gDropCloneBranchPath ) return;
+  if( open_db(gDropCloneBranchPath, &db)==SQLITE_OK ){
+    (void)execSqlSilent(db, "SELECT dolt_branch('-D','feat');");
+  }
+  sqlite3_close(db);
+}
+
+static void run_clone_deleted_branch_installs_nothing(void){
+  sqlite3 *remoteDb = 0;
+  sqlite3 *cloneDb = 0;
+  sqlite3 *afterDb = 0;
+  char remotePath[256];
+  char clonePath[256];
+  char sql[512];
+  const char *res;
+
+  printf("=== Clone Deleted Branch Installs Nothing Test ===\n\n");
+  make_dbpath(remotePath, sizeof(remotePath), "test_clone_drop_branch_remote");
+  make_dbpath(clonePath, sizeof(clonePath), "test_clone_drop_branch_clone");
+  removeDbFiles(remotePath);
+  removeDbFiles(clonePath);
+
+  check("drop_branch_open_remote", open_db(remotePath, &remoteDb)==SQLITE_OK);
+  check("drop_branch_seed", execSql(remoteDb,
+    "CREATE TABLE t(id INTEGER PRIMARY KEY);"
+    "INSERT INTO t VALUES(1);"
+    "SELECT dolt_commit('-Am','base');"
+    "SELECT dolt_branch('feat');")==SQLITE_OK);
+
+  check("drop_branch_open_clone", open_db(clonePath, &cloneDb)==SQLITE_OK);
+  gDropCloneBranchPath = remotePath;
+  doltliteTestSetBeforeCloneRefsHook(dropFeatBeforeCloneRefs, 0);
+  snprintf(sql, sizeof(sql),
+           "SELECT dolt_clone('--branch','feat','file://%s')", remotePath);
+  res = queryScalarText(cloneDb, sql);
+  check("drop_branch_clone_reports_missing",
+        res && strstr(res, "branch not found on remote")!=0);
+  doltliteTestSetBeforeCloneRefsHook(0, 0);
+  gDropCloneBranchPath = 0;
+  check("drop_branch_close_clone", sqlite3_close(cloneDb)==SQLITE_OK);
+  cloneDb = 0;
+
+  check("drop_branch_reopen", open_db(clonePath, &afterDb)==SQLITE_OK);
+  check("drop_branch_no_remote",
+        strcmp(queryScalarText(afterDb,
+            "SELECT count(*) FROM dolt_remotes"), "0")==0);
+  check("drop_branch_no_tag",
+        strcmp(queryScalarText(afterDb,
+            "SELECT count(*) FROM dolt_tags"), "0")==0);
+  check("drop_branch_no_table",
+        strcmp(queryScalarText(afterDb,
+            "SELECT count(*) FROM sqlite_master WHERE name='t'"), "0")==0);
+
+  check("drop_branch_restore_feat",
+        execSql(remoteDb, "SELECT dolt_branch('feat');")==SQLITE_OK);
+  snprintf(sql, sizeof(sql),
+           "SELECT dolt_clone('--branch','feat','file://%s')", remotePath);
+  check("drop_branch_retry_succeeds", execSqlSilent(afterDb, sql)==SQLITE_OK);
+  check("drop_branch_retry_row",
+        strcmp(queryScalarText(afterDb, "SELECT id FROM t"), "1")==0);
+  check("drop_branch_retry_branch",
+        strcmp(queryScalarText(afterDb, "SELECT active_branch()"), "feat")==0);
+
+  sqlite3_close(afterDb);
+  sqlite3_close(remoteDb);
+  removeDbFiles(remotePath);
+  removeDbFiles(clonePath);
+}
+
 static void run_fetch_preserves_concurrent_local_refs(void){
   sqlite3 *remoteDb = 0;
   sqlite3 *localDb1 = 0;
@@ -16552,6 +16627,7 @@ static const RegressionCase aCases[] = {
   { "remote_refs_corruption", "Remote Refs Corruption Test", run_remote_refs_corruption },
   { "fetch_ref_install_survives_window_gc", "Fetch Ref Install Survives Window GC Test", run_fetch_ref_install_survives_window_gc },
   { "clone_ref_install_survives_window_gc", "Clone Ref Install Survives Window GC Test", run_clone_ref_install_survives_window_gc },
+  { "clone_deleted_branch_installs_nothing", "Clone Deleted Branch Installs Nothing Test", run_clone_deleted_branch_installs_nothing },
   { "fetch_preserves_concurrent_local_refs", "Fetch Preserves Concurrent Local Refs Test", run_fetch_preserves_concurrent_local_refs },
   { "chunk_walk_corruption", "Chunk Walk Corruption Test", run_chunk_walk_corruption },
   { "catalog_deserialize_corruption", "Catalog Deserialize Corruption Test", run_catalog_deserialize_corruption },

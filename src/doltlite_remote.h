@@ -86,8 +86,11 @@ int doltliteFetchInto(ChunkStore *pLocal, DoltliteRemote *pRemote,
                       const char *zRemoteName, const char *zBranch,
                       const char *zTrack);
 
+/* *pbMissingBranch is set when the refs that would be installed have no
+** checkout branch. Nothing is committed in that case. */
 int doltliteClone(ChunkStore *pLocal, DoltliteRemote *pRemote,
-                  const char *zUrl, const char *zKeepBranch);
+                  const char *zUrl, const char *zKeepBranch,
+                  int *pbMissingBranch);
 
 int doltliteCloneLazy(ChunkStore *pLocal, DoltliteRemote *pRemote,
                       const char *zUrl, const char *zKeepBranch);
