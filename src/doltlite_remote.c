@@ -519,15 +519,16 @@ static int fsPutChunk(DoltliteRemote *pRemote, const ProllyHash *pHash,
 
 static int fsGetRefs(DoltliteRemote *pRemote, u8 **ppData, int *pnData){
   FsRemote *p = (FsRemote*)pRemote;
+  int changed = 0;
   int rc;
   if( p->locked ){
     return remoteGetRefs(pRemote, ppData, pnData);
   }
-  rc = fsLockAndForceRefresh(pRemote, &p->store);
+  /* Committed refs are a read. The graph lock is exclusive, so taking it
+  ** fails a fetch while a writer holds a transaction. */
+  rc = chunkStoreRefreshIfChanged(&p->store, &changed);
   if( rc!=SQLITE_OK ) return rc;
-  rc = remoteGetRefs(pRemote, ppData, pnData);
-  chunkStoreUnlock(&p->store);
-  return rc;
+  return remoteGetRefs(pRemote, ppData, pnData);
 }
 
 static int fsSetRefs(DoltliteRemote *pRemote, const char *zBranch, int bForce,

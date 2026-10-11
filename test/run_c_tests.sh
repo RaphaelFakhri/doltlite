@@ -35,6 +35,7 @@ COVERAGE_TESTS=(
   remote_push_lock_busy_test
   fetch_tracking_order_test
   http_conn_lost_test
+  file_remote_read_lock_test
   record_info_stack_test
   prolly_cache_budget_test
   prolly_hashset_test
