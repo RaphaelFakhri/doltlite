@@ -660,6 +660,48 @@ static int doltlitePathIsDirectory(sqlite3_vfs *pVfs, const char *zPath,
 #endif
 }
 
+/* sqlite3_uri_parameter walks back to the four zero bytes in front of a
+** ParseUri name. zDatabase is the store path; zFrom is the open name,
+** which carries that prefix when SQLITE_OPEN_URI is set. The result is
+** the store path plus zFrom's query parameters. Free it with
+** sqlite3_free_filename. */
+static int doltliteUriStoreFilename(
+  const char *zDatabase,
+  const char *zFrom,
+  char **pzOut
+){
+  const char *zTail;
+  const char *zEnd;
+  int nDb, nTail, nByte;
+  char *p;
+
+  *pzOut = 0;
+  zTail = zFrom + strlen(zFrom) + 1;
+  zEnd = zTail;
+  while( zEnd[0] ){
+    zEnd += strlen(zEnd) + 1;
+    zEnd += strlen(zEnd) + 1;
+  }
+  nDb = (int)strlen(zDatabase);
+  nTail = (int)(zEnd - zTail) + 1;
+  nByte = 4 + nDb + 1 + nTail + 1;
+  if( nByte<0 ) return SQLITE_NOMEM;
+  p = sqlite3_malloc(nByte);
+  if( !p ) return SQLITE_NOMEM;
+  memset(p, 0, 4);
+  memcpy(p + 4, zDatabase, (size_t)nDb);
+  p[4 + nDb] = 0;
+  memcpy(p + 5 + nDb, zTail, (size_t)nTail);
+  p[4 + nDb + 1 + nTail] = 0;
+  *pzOut = p + 4;
+  return SQLITE_OK;
+}
+
+static void releaseOpenStoreFilename(char *z, int bUri){
+  if( bUri ) sqlite3_free_filename(z);
+  else sqlite3_free(z);
+}
+
 /* A path that exists names itself. Otherwise the longest existing prefix
 ** decides: a DoltLite store makes the rest a branch or revision, and any
 ** other file or directory means an ordinary open. */
@@ -791,6 +833,7 @@ static int prollyBtreeOpenImpl(
   char *zResolvedBranch = 0;
   const char *zBranchFromPath = 0;
   const char *zOpenFilename = zFilename;
+  int bStoreUri = 0;
 
   *ppBtree = 0;
   hasMainBtree = db && db->nDb>0 && db->aDb[0].pBt!=0;
@@ -858,20 +901,30 @@ static int prollyBtreeOpenImpl(
     rc = doltliteResolveOpenBranchPath(pVfs, zFilename, &zStoreFilename,
                                        &zBranchFromPath);
     if( rc!=SQLITE_OK ) return rc;
+    /* nolock is read from this name. A plain copy has no ParseUri prefix,
+    ** so the read walks off the front of the allocation. */
+    if( zStoreFilename && (vfsFlags & SQLITE_OPEN_URI)!=0 ){
+      char *zUri = 0;
+      rc = doltliteUriStoreFilename(zStoreFilename, zFilename, &zUri);
+      releaseOpenStoreFilename(zStoreFilename, bStoreUri);
+      zStoreFilename = zUri;
+      if( rc!=SQLITE_OK ) return rc;
+      bStoreUri = 1;
+    }
     if( zStoreFilename ) zOpenFilename = zStoreFilename;
     rc = origBtreeIsSqliteFile(pVfs, zOpenFilename, &useOrig);
     if( useOrig && zStoreFilename ){
       useOrig = 0;
     }
     if( rc!=SQLITE_OK ){
-      sqlite3_free(zStoreFilename);
+      releaseOpenStoreFilename(zStoreFilename, bStoreUri);
       return rc;
     }
   }
   if( useOrig ){
     p = sqlite3_malloc(sizeof(Btree));
     if( !p ){
-      sqlite3_free(zStoreFilename);
+      releaseOpenStoreFilename(zStoreFilename, bStoreUri);
       return SQLITE_NOMEM;
     }
     memset(p, 0, sizeof(*p));
@@ -879,7 +932,7 @@ static int prollyBtreeOpenImpl(
     p->pOps = &origBtreeVtOps;
     rc = origBtreeOpen(pVfs, zFilename, db, &p->pOrigBtree, flags, vfsFlags);
     if( rc!=SQLITE_OK ){
-      sqlite3_free(zStoreFilename);
+      releaseOpenStoreFilename(zStoreFilename, bStoreUri);
       sqlite3_free(p);
       return rc;
     }
@@ -888,23 +941,23 @@ static int prollyBtreeOpenImpl(
     if( rc==SQLITE_NOMEM || rc==SQLITE_IOERR_NOMEM ){
       *ppBtree = 0;
       sqlite3BtreeClose(p);
-      sqlite3_free(zStoreFilename);
+      releaseOpenStoreFilename(zStoreFilename, bStoreUri);
       return rc;
     }
-    sqlite3_free(zStoreFilename);
+    releaseOpenStoreFilename(zStoreFilename, bStoreUri);
     return SQLITE_OK;
   }
 
   p = sqlite3_malloc(sizeof(Btree));
   if( !p ){
-    sqlite3_free(zStoreFilename);
+    releaseOpenStoreFilename(zStoreFilename, bStoreUri);
     return SQLITE_NOMEM;
   }
   memset(p, 0, sizeof(*p));
 
   pBt = sqlite3_malloc(sizeof(BtShared));
   if( !pBt ){
-    sqlite3_free(zStoreFilename);
+    releaseOpenStoreFilename(zStoreFilename, bStoreUri);
     sqlite3_free(p);
     return SQLITE_NOMEM;
   }
@@ -921,7 +974,7 @@ static int prollyBtreeOpenImpl(
     rc = chunkStoreOpenDeferred(&pBt->store, pVfs, zOpenFilename, vfsFlags);
   }
   if( rc!=SQLITE_OK ){
-    sqlite3_free(zStoreFilename);
+    releaseOpenStoreFilename(zStoreFilename, bStoreUri);
     sqlite3_free(pBt);
     sqlite3_free(p);
     return rc;
@@ -930,7 +983,7 @@ static int prollyBtreeOpenImpl(
     rc = doltliteOriginSourceEnable(&pBt->store, db, 0);
     if( rc!=SQLITE_OK ){
       chunkStoreClose(&pBt->store);
-      sqlite3_free(zStoreFilename);
+      releaseOpenStoreFilename(zStoreFilename, bStoreUri);
       sqlite3_free(pBt);
       sqlite3_free(p);
       return rc;
@@ -945,7 +998,7 @@ static int prollyBtreeOpenImpl(
             csIndexCacheBudgetFor(&pBt->store, PROLLY_DEFAULT_CACHE_BYTES)));
   if( rc!=SQLITE_OK ){
     chunkStoreClose(&pBt->store);
-    sqlite3_free(zStoreFilename);
+    releaseOpenStoreFilename(zStoreFilename, bStoreUri);
     sqlite3_free(pBt);
     sqlite3_free(p);
     return rc;
@@ -955,7 +1008,7 @@ static int prollyBtreeOpenImpl(
   if( !pBt->pPagerShim ){
     prollyCacheFree(&pBt->cache);
     chunkStoreClose(&pBt->store);
-    sqlite3_free(zStoreFilename);
+    releaseOpenStoreFilename(zStoreFilename, bStoreUri);
     sqlite3_free(pBt);
     sqlite3_free(p);
     return SQLITE_NOMEM;
@@ -1033,7 +1086,7 @@ static int prollyBtreeOpenImpl(
       pagerShimDestroy(pBt->pPagerShim);
       prollyCacheFree(&pBt->cache);
       chunkStoreClose(&pBt->store);
-      sqlite3_free(zStoreFilename);
+      releaseOpenStoreFilename(zStoreFilename, bStoreUri);
       sqlite3_free(zResolvedBranch);
       sqlite3_free(pBt);
       sqlite3_free(p);
@@ -1066,7 +1119,7 @@ static int prollyBtreeOpenImpl(
       pagerShimDestroy(pBt->pPagerShim);
       prollyCacheFree(&pBt->cache);
       chunkStoreClose(&pBt->store);
-      sqlite3_free(zStoreFilename);
+      releaseOpenStoreFilename(zStoreFilename, bStoreUri);
       sqlite3_free(zResolvedBranch);
       sqlite3_free(pBt);
       sqlite3_free(p);
@@ -1084,7 +1137,7 @@ static int prollyBtreeOpenImpl(
           pagerShimDestroy(pBt->pPagerShim);
           prollyCacheFree(&pBt->cache);
           chunkStoreClose(&pBt->store);
-          sqlite3_free(zStoreFilename);
+          releaseOpenStoreFilename(zStoreFilename, bStoreUri);
           sqlite3_free(zResolvedBranch);
           sqlite3_free(pBt);
           sqlite3_free(p);
@@ -1105,7 +1158,7 @@ static int prollyBtreeOpenImpl(
           pagerShimDestroy(pBt->pPagerShim);
           prollyCacheFree(&pBt->cache);
           chunkStoreClose(&pBt->store);
-          sqlite3_free(zStoreFilename);
+          releaseOpenStoreFilename(zStoreFilename, bStoreUri);
           sqlite3_free(zResolvedBranch);
           sqlite3_free(pBt);
           sqlite3_free(p);
@@ -1139,7 +1192,7 @@ static int prollyBtreeOpenImpl(
     pagerShimDestroy(pBt->pPagerShim);
     prollyCacheFree(&pBt->cache);
     chunkStoreClose(&pBt->store);
-    sqlite3_free(zStoreFilename);
+    releaseOpenStoreFilename(zStoreFilename, bStoreUri);
     sqlite3_free(zResolvedBranch);
     sqlite3_free(pBt);
     sqlite3_free(p);
@@ -1163,7 +1216,7 @@ static int prollyBtreeOpenImpl(
       sqlite3_mprintf("%s", defBranch);
     zResolvedBranch = 0;
     if( p->zBranch==0 ){
-      sqlite3_free(zStoreFilename);
+      releaseOpenStoreFilename(zStoreFilename, bStoreUri);
       sqlite3BtreeClose(p);
       return SQLITE_NOMEM;
     }
@@ -1185,7 +1238,7 @@ static int prollyBtreeOpenImpl(
     rc = doltliteSeedStoreIfNeeded(db, &pBt->store, p->zBranch,
                                     &seedHash, &seeded);
     if( rc!=SQLITE_OK ){
-      sqlite3_free(zStoreFilename);
+      releaseOpenStoreFilename(zStoreFilename, bStoreUri);
       sqlite3BtreeClose(p);
       return rc;
     }
@@ -1197,7 +1250,7 @@ static int prollyBtreeOpenImpl(
   rc = registerDoltiteFunctions(db);
   if( rc==SQLITE_NOMEM || rc==SQLITE_IOERR_NOMEM ){
     *ppBtree = 0;
-    sqlite3_free(zStoreFilename);
+    releaseOpenStoreFilename(zStoreFilename, bStoreUri);
     sqlite3BtreeClose(p);
     return rc;
   }
@@ -1205,7 +1258,7 @@ static int prollyBtreeOpenImpl(
     p->bDeferredRegister = 1;
   }
 
-  sqlite3_free(zStoreFilename);
+  releaseOpenStoreFilename(zStoreFilename, bStoreUri);
   return SQLITE_OK;
 }
 

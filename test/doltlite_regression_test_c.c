@@ -17039,6 +17039,93 @@ static void run_defer_fk_after_own_ddl(void){
   removeDbFiles(dbpath);
 }
 
+/* file:db@branch with SQLITE_OPEN_URI must not read before the store-name
+** allocation, and nolock on that URI still reaches the store. */
+static void run_uri_branch_readonly_open(void){
+  char dbpath[512];
+  char zUri[640];
+  sqlite3 *db = 0;
+  ChunkStore *cs;
+  int rc;
+
+  printf("=== Read-only URI Branch Open Test ===\n\n");
+  make_dbpath(dbpath, sizeof(dbpath), "test_uri_branch_ro");
+  removeDbFiles(dbpath);
+
+  check("uri_branch_setup_open", open_db(dbpath, &db)==SQLITE_OK);
+  if( !db ) return;
+  check("uri_branch_setup", execSql(db,
+      "CREATE TABLE t(x INT PRIMARY KEY);"
+      "INSERT INTO t VALUES(1);"
+      "SELECT dolt_commit('-Am','c1');"
+      "SELECT dolt_branch('dev');"
+      "INSERT INTO t VALUES(2);"
+      "SELECT dolt_commit('-am','c2');")==SQLITE_OK);
+  sqlite3_close(db);
+  db = 0;
+
+  sqlite3_snprintf(sizeof(zUri), zUri, "file:%s@dev", dbpath);
+  rc = sqlite3_open_v2(zUri, &db, SQLITE_OPEN_READONLY|SQLITE_OPEN_URI, 0);
+  check("uri_branch_open", rc==SQLITE_OK);
+  if( rc==SQLITE_OK ){
+    cs = doltliteGetChunkStore(db);
+    check("uri_branch_keeps_read_lock", cs && cs->noReadLock==0);
+    check("uri_branch_is_dev",
+          strcmp(queryScalarText(db, "SELECT active_branch()"), "dev")==0);
+    check("uri_branch_sees_dev_rows",
+          strcmp(queryScalarText(db, "SELECT count(*) FROM t"), "1")==0);
+  }
+  sqlite3_close(db);
+  db = 0;
+
+  sqlite3_snprintf(sizeof(zUri), zUri, "file:%s@dev?nolock=1", dbpath);
+  rc = sqlite3_open_v2(zUri, &db, SQLITE_OPEN_READONLY|SQLITE_OPEN_URI, 0);
+  check("uri_branch_nolock_open", rc==SQLITE_OK);
+  if( rc==SQLITE_OK ){
+    cs = doltliteGetChunkStore(db);
+    check("uri_branch_nolock_skips_read_lock", cs && cs->noReadLock==1);
+    check("uri_branch_nolock_is_dev",
+          strcmp(queryScalarText(db, "SELECT active_branch()"), "dev")==0);
+    check("uri_branch_nolock_sees_dev_rows",
+          strcmp(queryScalarText(db, "SELECT count(*) FROM t"), "1")==0);
+  }
+  sqlite3_close(db);
+  db = 0;
+
+  sqlite3_snprintf(sizeof(zUri), zUri, "file:%s@dev?nolock=0", dbpath);
+  rc = sqlite3_open_v2(zUri, &db, SQLITE_OPEN_READONLY|SQLITE_OPEN_URI, 0);
+  check("uri_branch_nolock0_open", rc==SQLITE_OK);
+  if( rc==SQLITE_OK ){
+    cs = doltliteGetChunkStore(db);
+    check("uri_branch_nolock0_keeps_read_lock", cs && cs->noReadLock==0);
+  }
+  sqlite3_close(db);
+  db = 0;
+
+  sqlite3_snprintf(sizeof(zUri), zUri, "file:%s?nolock=1", dbpath);
+  rc = sqlite3_open_v2(zUri, &db, SQLITE_OPEN_READONLY|SQLITE_OPEN_URI, 0);
+  check("uri_main_nolock_open", rc==SQLITE_OK);
+  if( rc==SQLITE_OK ){
+    cs = doltliteGetChunkStore(db);
+    check("uri_main_nolock_skips_read_lock", cs && cs->noReadLock==1);
+    check("uri_main_nolock_is_main",
+          strcmp(queryScalarText(db, "SELECT active_branch()"), "main")==0);
+    check("uri_main_nolock_sees_main_rows",
+          strcmp(queryScalarText(db, "SELECT count(*) FROM t"), "2")==0);
+  }
+  sqlite3_close(db);
+  db = 0;
+
+  sqlite3_snprintf(sizeof(zUri), zUri, "file:%s@nope", dbpath);
+  rc = sqlite3_open_v2(zUri, &db, SQLITE_OPEN_READONLY|SQLITE_OPEN_URI, 0);
+  check("uri_branch_missing_open", rc==SQLITE_CANTOPEN);
+  check("uri_branch_missing_message",
+        db && strstr(sqlite3_errmsg(db),
+                     "branch or revision \"nope\" not found")!=0);
+  sqlite3_close(db);
+  removeDbFiles(dbpath);
+}
+
 static const RegressionCase aCases[] = {
   { "refs_vtab_snapshot_stability", "Refs Vtab Snapshot Stability Test", run_refs_vtab_snapshot_stability },
   { "storage_format_v12", "Storage Format Version 12 Test", run_storage_format_v12 },
@@ -17283,7 +17370,8 @@ static const RegressionCase aCases[] = {
   { "clustered_pk_update_hook", "Clustered PK Update Hook Test", run_clustered_pk_update_hook },
   { "clustered_pk_rowid_metadata", "Clustered PK Rowid Metadata Test", run_clustered_pk_rowid_metadata },
   { "nocase_nul_record_parse", "NOCASE NUL Record Parse Test", run_nocase_nul_record_parse },
-  { "defer_fk_after_own_ddl", "Defer Foreign Keys After Own DDL", run_defer_fk_after_own_ddl }
+  { "defer_fk_after_own_ddl", "Defer Foreign Keys After Own DDL", run_defer_fk_after_own_ddl },
+  { "uri_branch_readonly_open", "Read-only URI Branch Open Test", run_uri_branch_readonly_open }
 };
 
 static int run_case_by_name(const char *zName){
