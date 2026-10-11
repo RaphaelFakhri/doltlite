@@ -1382,6 +1382,7 @@ static void doltCloneFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
   int bLazy = 0;
   int dirty = 0;
   int branchMissing = 0;
+  int occupied = 0;
   int rc;
 
   if( !cs ){ doltliteVcResultError(ctx, db, "no database"); return; }
@@ -1506,12 +1507,20 @@ static void doltCloneFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
     }
   }
   branchMissing = 0;
-  rc = bLazy ? doltliteCloneLazy(cs, pRemote, zUrl, zRevision)
-             : doltliteClone(cs, pRemote, zUrl, zBranchOpt, &branchMissing);
+  occupied = 0;
+  rc = bLazy ? doltliteCloneLazy(cs, pRemote, zUrl, zRevision, &occupied)
+             : doltliteClone(cs, pRemote, zUrl, zBranchOpt,
+                             &branchMissing, &occupied);
   if( rc!=SQLITE_OK ){
     const char *zMsg = remoteSqlRemoteMsg(pRemote, rc);
     char *zOwned = 0;
-    if( branchMissing ){
+    if( occupied==1 ){
+      zMsg = "database is not empty — clone into a fresh database";
+      rc = SQLITE_ERROR;
+    }else if( occupied==2 ){
+      zMsg = "database has uncommitted changes — clone into a fresh database";
+      rc = SQLITE_ERROR;
+    }else if( branchMissing ){
       zMsg = zBranchOpt ? "branch not found on remote"
                         : "default branch missing from cloned refs";
       rc = SQLITE_ERROR;
@@ -1520,8 +1529,17 @@ static void doltCloneFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
     }
     zOwned = zMsg ? sqlite3_mprintf("%s", zMsg) : 0;
     pRemote->xClose(pRemote);
+    /* Keep the post-refresh refs. The saved hash is the pre-clone root, and
+    ** restoring it would publish that over a peer on the next commit. */
+    if( occupied ){
+      memcpy(&savedState.refsHash, refsTableGetHash(&cs->refs),
+             sizeof(ProllyHash));
+      memcpy(&savedState.committedRefsHash, &cs->refs.committedRefsHash,
+             sizeof(ProllyHash));
+    }
     remoteSqlRestoreAndReport(ctx, db, cs, &savedState, rc,
                               zOwned ? zOwned : "clone failed");
+    if( occupied ) doltliteInvalidateSessionWorkingState(db);
     sqlite3_free(zOwned);
     return;
   }

@@ -2087,6 +2087,90 @@ result=$("$DB" "$TG/c.db" "SELECT id FROM t; SELECT count(*) FROM dolt_tags;")
 check "retried clone has the row and the tag" "1
 1" "$result"
 
+echo "=== Clone refuses a peer that landed while it waited ==="
+PR="$TMPDIR/clone_peer"
+mkdir -p "$PR"
+
+# kind is clean, peer, or dirty. flags is empty or '--lazy'.
+clone_during_pause() {
+  local name="$1"
+  local kind="$2"
+  local flags="$3"
+  local dir pause out sql i ready cpid hash
+  dir="$PR/$name"
+  pause="$dir/pause"
+  out="$dir/clone.out"
+  i=0
+  ready=0
+  mkdir -p "$dir"
+  "$DB" "$dir/r.db" "CREATE TABLE r(x); INSERT INTO r VALUES(1); SELECT dolt_commit('-Am','remote');" >/dev/null
+  "$DB" "$dir/t.db" "SELECT 1;" >/dev/null
+  printf 'x' > "$pause"
+  if [ -n "$flags" ]; then
+    sql="PRAGMA busy_timeout=20000; SELECT dolt_clone($flags 'file://$dir/r.db');"
+  else
+    sql="PRAGMA busy_timeout=20000; SELECT dolt_clone('file://$dir/r.db');"
+  fi
+  DOLTLITE_PAUSE_BEFORE_CLONE_REFS="$pause" \
+    "$DB" "$dir/t.db" "$sql" >"$out" 2>&1 &
+  cpid=$!
+  while [ "$i" -lt 200 ]; do
+    if [ -f "$pause.ready" ]; then ready=1; break; fi
+    sleep 0.05
+    i=$((i+1))
+  done
+  check "$name reached the clone window" "1" "$ready"
+  if [ "$kind" = "peer" ]; then
+    hash=$("$DB" "$dir/t.db" "PRAGMA busy_timeout=5000; CREATE TABLE peer(x); INSERT INTO peer VALUES(42); SELECT dolt_commit('-Am','peer');" | tail -1)
+    printf '%s' "$hash" > "$dir/peer.hash"
+    "$DB" "$dir/t.db" "PRAGMA busy_timeout=5000; CREATE TABLE peer2(x); INSERT INTO peer2 VALUES(7);" >/dev/null
+  elif [ "$kind" = "dirty" ]; then
+    "$DB" "$dir/t.db" "PRAGMA busy_timeout=5000; CREATE TABLE peer2(x); INSERT INTO peer2 VALUES(7);" >/dev/null
+  fi
+  rm -f "$pause"
+  wait "$cpid" || true
+}
+
+clone_during_pause clean clean ""
+result=$(tail -1 "$PR/clean/clone.out")
+check "clone into an untouched database still returns 0" "0" "$result"
+result=$("$DB" "$PR/clean/t.db" "SELECT x FROM r;")
+check "untouched clone installs the remote row" "1" "$result"
+
+clone_during_pause plain peer ""
+result=$(cat "$PR/plain/clone.out")
+check_match "peer commit makes clone report not empty" "database is not empty" "$result"
+result=$("$DB" "$PR/plain/t.db" "SELECT commit_hash FROM dolt_log LIMIT 1;")
+check "peer commit stays at the tip" "$(cat "$PR/plain/peer.hash")" "$result"
+result=$("$DB" "$PR/plain/t.db" "SELECT group_concat(message,',') FROM dolt_log;")
+check "peer commit keeps both messages" "peer,Initialize data repository" "$result"
+result=$("$DB" "$PR/plain/t.db" "SELECT x FROM peer; SELECT x FROM peer2;")
+check "peer commit and the later write both remain" "42
+7" "$result"
+result=$("$DB" "$PR/plain/t.db" "SELECT count(*) FROM sqlite_master WHERE name='r';")
+check "refused clone does not install the remote table" "0" "$result"
+result=$("$DB" "$PR/plain/t.db" "INSERT INTO peer2 VALUES(8); SELECT count(*) FROM peer2;")
+check "a later write still sees the peer row" "2" "$result"
+
+clone_during_pause dirty dirty ""
+result=$(cat "$PR/dirty/clone.out")
+check_match "a working set alone reports uncommitted changes" "database has uncommitted changes" "$result"
+result=$("$DB" "$PR/dirty/t.db" "SELECT group_concat(message,',') FROM dolt_log; SELECT x FROM peer2;")
+check "dirty target keeps the root commit and the write" "Initialize data repository
+7" "$result"
+result=$("$DB" "$PR/dirty/t.db" "SELECT count(*) FROM sqlite_master WHERE name='r';")
+check "dirty refusal does not install the remote table" "0" "$result"
+
+clone_during_pause lazy peer "'--lazy',"
+result=$(cat "$PR/lazy/clone.out")
+check_match "lazy clone reports not empty after a peer commit" "database is not empty" "$result"
+result=$("$DB" "$PR/lazy/t.db" "SELECT commit_hash FROM dolt_log LIMIT 1; SELECT x FROM peer; SELECT x FROM peer2;")
+check "lazy refusal keeps the peer commit and both rows" "$(cat "$PR/lazy/peer.hash")
+42
+7" "$result"
+result=$("$DB" "$PR/lazy/t.db" "SELECT count(*) FROM sqlite_master WHERE name='r';")
+check "lazy refusal does not install the remote table" "0" "$result"
+
 echo ""
 echo "======================================="
 echo "Results: $pass passed, $fail failed"

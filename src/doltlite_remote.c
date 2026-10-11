@@ -11,6 +11,7 @@
 #include "prolly_hashset.h"
 #include "prolly_node.h"
 #include "prolly_chunk_walk.h"
+#include <stdlib.h>
 #include <string.h>
 #ifndef _WIN32
 #include <errno.h>
@@ -2146,11 +2147,80 @@ static int remotePrepareCloneRefs(
   return rc;
 }
 
+/* Wait until zPause disappears. path.ready is the signal that this clone
+** is inside the window before it locks the target. */
+static void clonePauseBeforeRefs(void){
+  const char *zPause;
+  sqlite3_vfs *pVfs;
+  sqlite3_file *pReady;
+  char zReady[512];
+  int exists;
+
+  zPause = getenv("DOLTLITE_PAUSE_BEFORE_CLONE_REFS");
+  if( !zPause || !zPause[0] ) return;
+  pVfs = sqlite3_vfs_find(0);
+  if( !pVfs ) return;
+  exists = 1;
+  pReady = 0;
+  sqlite3_snprintf(sizeof(zReady), zReady, "%s.ready", zPause);
+  if( sqlite3OsOpenMalloc(pVfs, zReady, &pReady,
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_MAIN_DB, 0)
+      ==SQLITE_OK ){
+    /* xAccess reports an empty file as missing. */
+    sqlite3OsWrite(pReady, "x", 1, 0);
+    sqlite3OsCloseFree(pReady);
+  }
+  while( sqlite3OsAccess(pVfs, zPause, SQLITE_ACCESS_EXISTS, &exists)==SQLITE_OK
+      && exists ){
+    sqlite3_sleep(20);
+  }
+}
+
+/* 0: still an empty store, or one root commit whose working set matches it.
+** 1: anything else, including a commit that can no longer be read.
+** 2: that root commit has uncommitted changes. A stored working set that
+** still matches the root is the clean session, not a peer write. */
+static int cloneTargetOccupied(ChunkStore *pLocal){
+  const BranchRef *aBr;
+  DoltliteCommit commit;
+  u8 *pData;
+  int nData;
+  int nBr;
+  int dirty;
+  int one;
+  int rc;
+
+  if( chunkStoreIsEmpty(pLocal) ) return 0;
+  nBr = 0;
+  aBr = 0;
+  refsTableGetBranches(&pLocal->refs, &nBr, &aBr);
+  if( nBr!=1 || !aBr ) return 1;
+  pData = 0;
+  nData = 0;
+  memset(&commit, 0, sizeof(commit));
+  rc = chunkStoreGet(pLocal, &aBr[0].commitHash, &pData, &nData);
+  if( rc==SQLITE_OK ){
+    rc = doltliteCommitDeserialize(pData, nData, &commit);
+  }
+  sqlite3_free(pData);
+  if( rc!=SQLITE_OK || doltliteCommitParentCount(&commit)!=0 ){
+    doltliteCommitClear(&commit);
+    return 1;
+  }
+  doltliteCommitClear(&commit);
+  one = 0;
+  rc = scopedWorkingSetIsDirty(pLocal, &aBr[0], &one);
+  if( rc!=SQLITE_OK ) return 1;
+  dirty = one;
+  return dirty ? 2 : 0;
+}
+
 int doltliteCloneLazy(
   ChunkStore *pLocal,
   DoltliteRemote *pRemote,
   const char *zUrl,
-  const char *zKeepBranch
+  const char *zKeepBranch,
+  int *pbOccupied
 ){
   ChunkStore refsView;
   ChunkStoreRefsSnapshot snapshot;
@@ -2171,8 +2241,11 @@ int doltliteCloneLazy(
   memset(&snapshot, 0, sizeof(snapshot));
   memset(&defaultCommit, 0, sizeof(defaultCommit));
   memset(&emptyWs, 0, sizeof(emptyWs));
+  if( pbOccupied ) *pbOccupied = 0;
   if( !zUrl ) return SQLITE_MISUSE;
 
+  doltliteTestRunBeforeCloneRefsHook();
+  clonePauseBeforeRefs();
   rc = pRemote->xGetRefs(pRemote, &pRemoteRefs, &nRemoteRefs);
   if( rc==SQLITE_OK ){
     rc = chunkStoreLoadRefsFromBlob(&refsView, pRemoteRefs, nRemoteRefs);
@@ -2207,6 +2280,19 @@ int doltliteCloneLazy(
   if( rc==SQLITE_OK ){
     locked = 1;
     rc = chunkStoreForceRefresh(pLocal);
+  }
+  /* The caller's empty check ran before the remote read. A peer can commit
+  ** or write in that gap. Refuse before the snapshot, so failure leaves the
+  ** refreshed refs in place. */
+  if( rc==SQLITE_OK ){
+    int occupied = cloneTargetOccupied(pLocal);
+    if( occupied ){
+      if( pbOccupied ) *pbOccupied = occupied;
+      rc = SQLITE_ERROR;
+      if( locked ) chunkStoreUnlock(pLocal);
+      locked = 0;
+      goto lazy_clone_done;
+    }
   }
   if( rc==SQLITE_OK ){
     rc = chunkStoreSnapshotRefs(pLocal, &snapshot);
@@ -2264,7 +2350,8 @@ int doltliteClone(
   DoltliteRemote *pRemote,
   const char *zUrl,
   const char *zKeepBranch,
-  int *pbMissingBranch
+  int *pbMissingBranch,
+  int *pbOccupied
 ){
   u8 *refsData = 0;
   int nRefsData = 0;
@@ -2285,9 +2372,11 @@ int doltliteClone(
   memset(&savedRefs, 0, sizeof(savedRefs));
   oldRefsStale = pLocal->bRefsStale;
   if( pbMissingBranch ) *pbMissingBranch = 0;
+  if( pbOccupied ) *pbOccupied = 0;
   if( !zUrl ) return SQLITE_MISUSE;
 
   doltliteTestRunBeforeCloneRefsHook();
+  clonePauseBeforeRefs();
   rc = pRemote->xGetRefs(pRemote, &refsData, &nRefsData);
   if( rc!=SQLITE_OK ) return rc;
 
@@ -2325,6 +2414,18 @@ int doltliteClone(
   if( rc==SQLITE_OK ){
     locked = 1;
     rc = chunkStoreForceRefresh(pLocal);
+  }
+  /* Restoring the pre-refresh hash would put the cleared refs back over a
+  ** peer commit. Leave the refreshed tables and skip the install. */
+  if( rc==SQLITE_OK ){
+    int occupied = cloneTargetOccupied(pLocal);
+    if( occupied ){
+      if( pbOccupied ) *pbOccupied = occupied;
+      sqlite3_free(aRoots);
+      sqlite3_free(refsData);
+      if( locked ) chunkStoreUnlock(pLocal);
+      return SQLITE_ERROR;
+    }
   }
   if( rc==SQLITE_OK && nRoots>0 ){
     rc = remoteValidateGraph(pLocal, aRoots, nRoots);
