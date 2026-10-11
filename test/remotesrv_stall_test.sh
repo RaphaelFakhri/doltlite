@@ -27,9 +27,10 @@ trap cleanup EXIT
 
 start_server() {
   local log="$1"
-  shift
+  local timeout_ms="$2"
+  shift 2
   mkdir -p "$TMP/srv"
-  "$REMOTESRV" --timeout-ms 2000 -p 0 --bind 127.0.0.1 "$@" \
+  "$REMOTESRV" --timeout-ms "$timeout_ms" -p 0 --bind 127.0.0.1 "$@" \
     "$TMP/srv" >"$log" 2>&1 &
   SRV_PID=$!
   PORT=""
@@ -153,7 +154,7 @@ wait "$BLACKHOLE_PID" 2>/dev/null || true
 BLACKHOLE_PID=""
 
 echo "=== plaintext stalled clients ==="
-start_server "$TMP/plain.log"
+start_server "$TMP/plain.log" 2000
 python3 - "$PORT" <<'PY'
 import socket
 import sys
@@ -452,6 +453,63 @@ kill "$SRV_PID" 2>/dev/null || true
 wait "$SRV_PID" 2>/dev/null || true
 SRV_PID=""
 
+echo "=== idle headers do not stall the pool ==="
+rm -rf "$TMP/srv"
+start_server "$TMP/starve.log" 30000
+"$DOLTLITE" "$TMP/srv/repo.db" <<SQL >/dev/null
+CREATE TABLE t(x INT PRIMARY KEY);
+INSERT INTO t VALUES (1);
+SELECT dolt_commit('-A','-m','b');
+SQL
+python3 - "$PORT" "$DOLTLITE" "$TMP/clone.db" <<'PY'
+import socket
+import subprocess
+import sys
+import time
+
+port = int(sys.argv[1])
+doltlite = sys.argv[2]
+clone_db = sys.argv[3]
+url = "http://127.0.0.1:%d/repo.db" % port
+
+idles = []
+for _ in range(8):
+    idle = socket.create_connection(("127.0.0.1", port), timeout=2)
+    idle.sendall(b"GET /repo.db/refs HTTP/1.1\r\n")
+    idles.append(idle)
+time.sleep(0.2)
+
+start = time.monotonic()
+healthy = socket.create_connection(("127.0.0.1", port), timeout=2)
+healthy.sendall(b"GET /missing.db/root HTTP/1.1\r\nHost: localhost\r\n\r\n")
+healthy.settimeout(2)
+response = b""
+while b"\r\n\r\n" not in response:
+    chunk = healthy.recv(4096)
+    if not chunk:
+        break
+    response += chunk
+healthy.close()
+elapsed = time.monotonic() - start
+assert response.startswith(b"HTTP/1.1 404 "), response
+assert elapsed < 1.5, elapsed
+
+start = time.monotonic()
+result = subprocess.run(
+    [doltlite, clone_db, "SELECT dolt_clone('%s');" % url],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+    timeout=5,
+)
+elapsed = time.monotonic() - start
+assert result.returncode == 0, result.stdout
+assert elapsed < 3.0, elapsed
+for idle in idles:
+    idle.close()
+print("  PASS: eight idle partial headers leave clone and GET immediate")
+PY
+stop_server_with_stalled_clients "$PORT"
+
 if ! command -v openssl >/dev/null 2>&1; then
   echo "SKIP: openssl not available; TLS stall checks skipped"
   exit 0
@@ -463,7 +521,7 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
 
 echo "=== TLS stalled client ==="
 rm -rf "$TMP/srv"
-start_server "$TMP/tls.log" --cert "$TMP/cert.pem" --key "$TMP/key.pem"
+start_server "$TMP/tls.log" 2000 --cert "$TMP/cert.pem" --key "$TMP/key.pem"
 python3 - "$PORT" <<'PY'
 import socket
 import ssl
