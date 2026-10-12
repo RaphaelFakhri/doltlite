@@ -1743,6 +1743,9 @@ struct FailFile {
   int isMainDb;
 };
 
+static void (*gReadHook)(void*);
+static void *gReadHookArg;
+static sqlite3_int64 gReadHookOffset;
 static sqlite3_vfs gFailVfs;
 static sqlite3_vfs *gBaseVfs = 0;
 static int gFailWriteOnce = 0;
@@ -1794,6 +1797,11 @@ static int failClose(sqlite3_file *pFile){
 
 static int failRead(sqlite3_file *pFile, void *zBuf, int iAmt, sqlite3_int64 iOfst){
   FailFile *p = (FailFile*)pFile;
+  if( p->isMainDb && gReadHook && iOfst>=gReadHookOffset ){
+    void (*xHook)(void*) = gReadHook;
+    gReadHook = 0;
+    xHook(gReadHookArg);
+  }
   if( p->isMainDb && gFailReadNth>0 && --gFailReadNth==0 ){
     gFailHits++;
     if( gFailReadWidth>1 ) gFailReadBurst = gFailReadWidth-1;
@@ -9873,6 +9881,88 @@ static void run_hard_reset_command_failure_preserves_durable_state(void){
   removeDbFiles(dbpath);
 }
 
+typedef struct RollbackReader RollbackReader;
+struct RollbackReader {
+  sqlite3 *writer;
+  int spill;
+  int calls;
+  int rollbackRc;
+  int writeRc;
+};
+
+static void rollbackReaderHook(void *pArg){
+  RollbackReader *p = (RollbackReader*)pArg;
+  p->calls++;
+  p->rollbackRc = execSqlSilent(p->writer,"ROLLBACK");
+  if( p->spill ){
+    p->writeRc = execSqlSilent(p->writer,
+        "BEGIN; INSERT INTO t VALUES(2,randomblob(70000000))");
+    execSqlSilent(p->writer,"ROLLBACK");
+  }
+}
+
+static void run_rollback_reader(void){
+  char dbpath[512];
+  int spill;
+  make_dbpath(dbpath,sizeof(dbpath),"rollback_reader");
+  for(spill=0; spill<2; spill++){
+    sqlite3 *writer = 0, *reader = 0, *fresh = 0;
+    sqlite3_stmt *stmt = 0;
+    ChunkStore *cs;
+    RollbackReader probe;
+    int rc;
+    removeDbFiles(dbpath);
+    check("rollback_reader_writer_open",open_db(dbpath,&writer)==SQLITE_OK);
+    check("rollback_reader_seed",execSql(writer,
+        "CREATE TABLE t(k INTEGER PRIMARY KEY,v); INSERT INTO t VALUES(1,'base');"
+        "SELECT dolt_commit('-Am','base')")==SQLITE_OK);
+    check("rollback_reader_open",sqlite3_open_v2(dbpath,&reader,
+        SQLITE_OPEN_READONLY,"doltlite-failvfs")==SQLITE_OK);
+    check("rollback_reader_initial_rows",queryInt64(reader,
+        "SELECT count(*) FROM t")==1);
+    cs = doltliteGetChunkStore(writer);
+    gReadHookOffset = cs->file.iFileSize;
+    check("rollback_reader_spill",execSql(writer,
+        "BEGIN; INSERT INTO t VALUES(2,randomblob(70000000))")==SQLITE_OK);
+    check("rollback_reader_spilled",cs->staging.nRecentUncommitted>0);
+    memset(&probe,0,sizeof(probe));
+    probe.writer = writer;
+    probe.spill = spill;
+    gReadHook = rollbackReaderHook;
+    gReadHookArg = &probe;
+    rc = sqlite3_prepare_v2(reader,"SELECT count(*) FROM t",-1,&stmt,0);
+    if( rc==SQLITE_OK ) rc = sqlite3_step(stmt);
+    gReadHook = 0;
+    check("rollback_reader_hook",probe.calls==1);
+    check("rollback_reader_rollback",probe.rollbackRc==SQLITE_OK);
+    check("rollback_reader_no_io_error",rc==SQLITE_ROW);
+    check("rollback_reader_committed_rows",rc==SQLITE_ROW
+          && sqlite3_column_int(stmt,0)==1);
+    sqlite3_finalize(stmt);
+    if( spill ) check("rollback_reader_tail_reuse_busy",probe.writeRc==SQLITE_BUSY);
+    check("rollback_reader_writer_rows",queryInt64(writer,
+        "SELECT count(*) FROM t")==1);
+    check("rollback_reader_next_write",execSql(writer,spill
+        ? "BEGIN; INSERT INTO t VALUES(2,randomblob(70000000)); COMMIT"
+        : "INSERT INTO t VALUES(2,'after')")==SQLITE_OK);
+    check("rollback_reader_next_commit",execSql(writer,
+        "SELECT dolt_commit('-am','after')")==SQLITE_OK);
+    check("rollback_reader_observes_commit",queryInt64(reader,
+        "SELECT count(*) FROM t")==2);
+    check("rollback_reader_fresh_open",open_db(dbpath,&fresh)==SQLITE_OK);
+    check("rollback_reader_durable_rows",queryInt64(fresh,
+        "SELECT count(*) FROM t")==2);
+    check("rollback_reader_durable_value",queryInt64(fresh,
+        "SELECT length(v) FROM t WHERE k=2")== (spill ? 70000000 : 5));
+    check("rollback_reader_integrity",strcmp(queryScalarText(fresh,
+        "PRAGMA integrity_check"),"ok")==0);
+    sqlite3_close(fresh);
+    sqlite3_close(reader);
+    sqlite3_close(writer);
+    removeDbFiles(dbpath);
+  }
+}
+
 typedef struct PublicationProbe PublicationProbe;
 struct PublicationProbe {
   sqlite3 *peer;
@@ -10127,6 +10217,7 @@ static void run_commit_publication(void){
   run_publication_process(1,0);
   run_publication_process(0,1);
 #endif
+  run_rollback_reader();
 }
 
 typedef struct VcInterrupt VcInterrupt;

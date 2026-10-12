@@ -1291,6 +1291,8 @@ static int csDrainPendingToWal(ChunkStore *cs){
   }
 
   if( cs->staging.nRecentUncommitted==0 ){
+    rc = csReclaimTail(cs);
+    if( rc!=SQLITE_OK ) return rc;
     cs->staging.iUncommittedStart = cs->file.iFileSize;
   }
 
