@@ -1017,6 +1017,7 @@ int normalizeSideToMergedLayout(
   int *aOursAnc;
   int *aTheirsAnc = 0;
   int bReuse;
+  int bSlotRenames;
   int rc, res, j;
 
   bAncestorGap = 0;
@@ -1037,6 +1038,12 @@ int normalizeSideToMergedLayout(
   rc = parseColumns(zTheirsSql, &aTheirs, &nTheirs);
   if( rc!=SQLITE_OK ){
     freeColumns(aAnc, nAnc); freeColumns(aOurs, nOurs); return rc;
+  }
+
+  bSlotRenames = nAnc==nOurs && nOurs==nTheirs;
+  for(j=0; bSlotRenames && j<nAnc; j++){
+    bSlotRenames = parsedColumnDefinitionsMatch(&aOurs[j], &aAnc[j])
+                && parsedColumnDefinitionsMatch(&aTheirs[j], &aAnc[j]);
   }
 
   nMerged = nOurs;
@@ -1123,7 +1130,7 @@ int normalizeSideToMergedLayout(
     /* A swap keeps each value in its slot. Matching by name would move
     ** the cell onto the column that inherited the old name. Same column
     ** count: a drop shifts later same-typed columns and is not a swap. */
-    if( nAnc==nOurs && nOurs==nTheirs
+    if( bSlotRenames
      && j<nAnc
      && sqlite3_stricmp(aTheirs[j].zName, aOurs[j].zName)!=0
      && parsedColumnDefinitionsMatch(&aTheirs[j], &aAnc[j])
@@ -1142,7 +1149,7 @@ int normalizeSideToMergedLayout(
     ** the merged slot kept that definition under a new name (a->b then
     ** b->c). The value did not follow the old name. A dropped column's
     ** neighbor fails the ancestor-name test and is not pulled along. */
-    if( nAnc==nOurs && nOurs==nTheirs
+    if( bSlotRenames
      && j<nAnc
      && sqlite3_stricmp(aTheirs[j].zName, aAnc[j].zName)==0
      && sqlite3_stricmp(aOurs[j].zName, aAnc[j].zName)!=0
