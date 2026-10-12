@@ -1,0 +1,48 @@
+{
+  "seed": 381348073121,
+  "generator_version": 2,
+  "profile": {
+    "rows": 15000,
+    "payload": 32,
+    "key": "text",
+    "groups": 16,
+    "skew": false,
+    "cache_kib": 16384,
+    "stride": 8,
+    "lookups": 10000,
+    "target": 3,
+    "start": 1252,
+    "width": 3750,
+    "memory": false
+  },
+  "case": {
+    "name": "generated_2",
+    "sql": "SELECT count(*),sum(x) FROM (SELECT t.seq AS x,t.seq AS seq,t.grp AS grp FROM t WHERE t.grp<4 AND t.seq IN (SELECT id FROM u WHERE grp=t.grp) ORDER BY t.seq ASC LIMIT 8);",
+    "verify": "",
+    "prepare": "",
+    "recipe": {
+      "source": "in",
+      "predicate": "group_range",
+      "expression": "seq",
+      "operator": "ordered_limit",
+      "indexes": "ordered",
+      "layout": "early",
+      "context": "plain",
+      "direction": "ASC"
+    },
+    "warmup": ""
+  },
+  "setup": "setup.sql",
+  "setup_sql": "CREATE TABLE t(id TEXT PRIMARY KEY, seq INTEGER NOT NULL, grp INTEGER NOT NULL, v INTEGER NOT NULL, tag TEXT NOT NULL, payload BLOB NOT NULL);\nBEGIN;\nWITH RECURSIVE c(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM c WHERE i<4096) INSERT INTO t SELECT printf('%016x', i),i,i%16,(i*7919)%1000000,printf('tag-%08x',i%10000),CAST(printf('%032d',i) AS BLOB) FROM c;\nWITH RECURSIVE c(i) AS (VALUES(4097) UNION ALL SELECT i+1 FROM c WHERE i<8192) INSERT INTO t SELECT printf('%016x', i),i,i%16,(i*7919)%1000000,printf('tag-%08x',i%10000),CAST(printf('%032d',i) AS BLOB) FROM c;\nWITH RECURSIVE c(i) AS (VALUES(8193) UNION ALL SELECT i+1 FROM c WHERE i<12288) INSERT INTO t SELECT printf('%016x', i),i,i%16,(i*7919)%1000000,printf('tag-%08x',i%10000),CAST(printf('%032d',i) AS BLOB) FROM c;\nWITH RECURSIVE c(i) AS (VALUES(12289) UNION ALL SELECT i+1 FROM c WHERE i<15000) INSERT INTO t SELECT printf('%016x', i),i,i%16,(i*7919)%1000000,printf('tag-%08x',i%10000),CAST(printf('%032d',i) AS BLOB) FROM c;\nCOMMIT;\nCREATE INDEX t_g ON t(grp);\nCREATE INDEX t_gv ON t(grp,v);\nANALYZE;\nCREATE TEMP TABLE hotspot_groups(seq INTEGER PRIMARY KEY,grp INTEGER);\nINSERT INTO hotspot_groups SELECT row_number() OVER (ORDER BY grp ASC,seq),grp FROM t;\nUPDATE t SET grp=(SELECT grp FROM hotspot_groups WHERE hotspot_groups.seq=t.seq);\nDROP TABLE hotspot_groups;\nCREATE INDEX t_s ON t(seq);\nCREATE TABLE u(id INTEGER PRIMARY KEY, grp INTEGER, v INTEGER);\nINSERT INTO u SELECT seq,grp,v FROM t WHERE seq%8=0;\nCREATE INDEX u_g ON u(grp);\nANALYZE;\n",
+  "expected": "8|288",
+  "repeats": 14,
+  "fingerprint": "dc55d5ad673e9cdb32a666ef",
+  "family": "7e7a8df7d9e55e459642cd96",
+  "statement": "35a66886ef144f6eb54fc408",
+  "issue": 3877,
+  "category": "planner_choices",
+  "discovery": {
+    "minimum_ratio": 99.33,
+    "median_ratio": 99.63
+  }
+}
