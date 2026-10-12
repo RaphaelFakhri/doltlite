@@ -467,15 +467,15 @@ static const char *remoteSqlStripPrefix(const char *z, const char *zPrefix){
   return strncmp(z, zPrefix, n)==0 ? z + n : z;
 }
 
-/* Returns SQLITE_OK on success; on failure the error is already the result.
-** zRef is a branch, tag, ":branch", or "src:dst" refspec. src may be any
+/* zRef is a branch, tag, ":branch", or "src:dst" refspec. src may be any
 ** revision, not only a branch name. */
 static int doltPushParsedFunc(
   sqlite3_context *ctx,
   const char *zRemoteName,
   const char *zRefSpec,
   int bForce,
-  int bTags
+  int bTags,
+  int *pbRejected
 ){
   sqlite3 *db = sqlite3_context_db_handle(ctx);
   ChunkStore *cs = doltliteGetChunkStore(db);
@@ -492,6 +492,7 @@ static int doltPushParsedFunc(
   int bPrecondition = 0;
   int rc;
 
+  if( pbRejected ) *pbRejected = 0;
   if( !cs ){ doltliteVcResultError(ctx, db, "no database"); return SQLITE_ERROR; }
   memset(&srcCommit, 0, sizeof(srcCommit));
 
@@ -611,6 +612,8 @@ static int doltPushParsedFunc(
   if( rc!=SQLITE_OK ){
     const char *zMsg = remoteSqlRemoteMsg(pRemote, rc);
     char *zOwned;
+    int bRejected = pbRejected && bBranch && !mutation.bDelete
+                  && rc==SQLITE_CONSTRAINT;
     if( bBranch && mutation.bDelete && rc==SQLITE_CONSTRAINT ){
       zMsg = "cannot delete the remote default branch";
     }else if( bBranch && mutation.bDelete && rc==SQLITE_MISUSE ){
@@ -621,10 +624,14 @@ static int doltPushParsedFunc(
     }else if( !zMsg && rc==SQLITE_NOTFOUND ){
       zMsg = "push failed: branch or tag not found";
     }
-    zOwned = zMsg ? sqlite3_mprintf("%s", zMsg) : 0;
+    zOwned = zMsg && !bRejected ? sqlite3_mprintf("%s", zMsg) : 0;
     if( bLocalLock ) chunkStoreUnlock(cs);
     pRemote->xClose(pRemote);
     sqlite3_free(zSrc);
+    if( bRejected ){
+      *pbRejected = 1;
+      return rc;
+    }
     (void)doltliteVcSealSavepointError(db);
     remoteSqlResultError(ctx, rc, zOwned);
     sqlite3_free(zOwned);
@@ -684,13 +691,42 @@ static void doltPushFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
     return;
   }
   if( bTags ){
-    rc = doltPushParsedFunc(ctx, args.azPositional[0], 0, bForce, bTags);
+    rc = doltPushParsedFunc(ctx, args.azPositional[0], 0, bForce, bTags, 0);
   }else{
+    char *zRejected = 0;
     int i;
-    for(i=1, rc=SQLITE_OK; i<args.nPositional && rc==SQLITE_OK; i++){
-      rc = doltPushParsedFunc(ctx, args.azPositional[0], args.azPositional[i],
-                              bForce, 0);
+    for(i=1, rc=SQLITE_OK; i<args.nPositional; i++){
+      int bRejected = 0;
+      int pushRc = doltPushParsedFunc(
+          ctx, args.azPositional[0], args.azPositional[i], bForce, 0,
+          args.nPositional>2 ? &bRejected : 0);
+      if( pushRc==SQLITE_OK ) continue;
+      if( !bRejected ){
+        rc = pushRc;
+        break;
+      }
+      zRejected = sqlite3_mprintf("%z%s%s", zRejected,
+          zRejected ? ", " : "", args.azPositional[i]);
+      if( !zRejected ){
+        rc = SQLITE_NOMEM;
+        sqlite3_result_error_nomem(ctx);
+        break;
+      }
     }
+    if( rc==SQLITE_OK && zRejected ){
+      const char *zUrl = 0;
+      char *zErr;
+      chunkStoreFindRemote(doltliteGetChunkStore(db),
+                          args.azPositional[0], &zUrl);
+      zErr = sqlite3_mprintf(
+          "error: failed to push some refs to '%s' (rejected: %s)",
+          zUrl ? zUrl : args.azPositional[0], zRejected);
+      (void)doltliteVcSealSavepointError(db);
+      rc = zErr ? SQLITE_CONSTRAINT : SQLITE_NOMEM;
+      remoteSqlResultError(ctx, rc, zErr);
+      sqlite3_free(zErr);
+    }
+    sqlite3_free(zRejected);
   }
   if( rc==SQLITE_OK ) sqlite3_result_int(ctx, 0);
   doltliteCmdArgsClear(&args);

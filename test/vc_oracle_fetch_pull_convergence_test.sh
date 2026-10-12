@@ -94,6 +94,42 @@ SELECT dolt_push('origin','main');
 "
 FF_PULL="SELECT dolt_pull('origin','main');"
 
+echo "--- multi-ref push continues after non-fast-forward rejections ---"
+PUSH_SEED="$FF_SEED
+SELECT dolt_branch('stale');
+SELECT dolt_push('origin','stale');
+"
+PUSH_ADVANCE="$FF_ADVANCE
+SELECT dolt_push('origin','main:stale');
+"
+PUSH_LOCAL="
+INSERT INTO t VALUES (100,'local');
+SELECT dolt_commit('-A','-m','local');
+SELECT dolt_branch('b2');
+SELECT dolt_branch('b3');
+SELECT dolt_branch('stale');
+"
+for mode in first last multiple mapped; do
+  pushed=b2
+  fetch_extra=""
+  case "$mode" in
+    first) refs="'main','b2'" ;;
+    last) refs="'b2','main'" ;;
+    multiple) refs="'main','b2','stale','b3'"; fetch_extra="SELECT dolt_fetch('origin','b3');" ;;
+    mapped) refs="'main:main','b2:renamed'"; pushed=renamed ;;
+  esac
+  VC_ORACLE_EXPECTATION=allow-error remote_flow "push_rejection_$mode" \
+    "$PUSH_SEED" "$PUSH_ADVANCE" \
+    "$PUSH_LOCAL
+     SELECT dolt_push('origin',$refs);
+     SELECT dolt_fetch('origin','$pushed');
+     $fetch_extra" \
+    "SELECT 'R|tracking|'||name||'|'||latest_commit_message FROM dolt_remote_branches;
+     SELECT 'R|row|'||id||'|'||v FROM dolt_at_t('origin/$pushed');" \
+    "SELECT CONCAT('R|tracking|',name,'|',latest_commit_message) FROM dolt_remote_branches;
+     SELECT CONCAT('R|row|',id,'|',v) FROM t AS OF 'origin/$pushed';"
+done
+
 echo "--- fast-forward pull ---"
 remote_flow "ff_contents" "$FF_SEED" "$FF_ADVANCE" "$FF_PULL" \
   "SELECT 'R|'||id||'|'||v FROM t;" \

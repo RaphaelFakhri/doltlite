@@ -1521,6 +1521,83 @@ result=$("$DB" "$DP/sq.db" "SELECT message FROM dolt_log LIMIT 1; SELECT id FROM
 check "dirty --squash pull creates no commit" "s7
 4" "$result"
 
+echo "=== Multi-ref push continues after non-fast-forward rejections ==="
+for push_mode in first last multiple mapped force tag delete; do
+  MP="$TMPDIR/multi_push_$push_mode"
+  mkdir -p "$MP"
+  "$DB" "$MP/a.db" "
+    CREATE TABLE t(id INT PRIMARY KEY);
+    INSERT INTO t VALUES(1);
+    SELECT dolt_commit('-Am','base');
+    SELECT dolt_branch('stale');
+    SELECT dolt_remote('add','origin','file://$MP/remote.db');
+    SELECT dolt_push('origin','main','stale');
+  " >/dev/null
+  "$DB" "$MP/b.db" "
+    SELECT dolt_clone('file://$MP/remote.db');
+    INSERT INTO t VALUES(2);
+    SELECT dolt_commit('-Am','local');
+    SELECT dolt_branch('b2');
+    SELECT dolt_branch('b3');
+    SELECT dolt_branch('stale');
+    SELECT dolt_tag('v1');
+  " >/dev/null
+  "$DB" "$MP/a.db" "
+    INSERT INTO t VALUES(9);
+    SELECT dolt_commit('-Am','remote');
+    SELECT dolt_push('origin','main','main:stale');
+  " >/dev/null
+  pushed=b2
+  case "$push_mode" in
+    first) refs="'main','b2'" ;;
+    last) refs="'b2','main'" ;;
+    multiple) refs="'main','b2','stale','b3'" ;;
+    mapped) refs="'main:main','b2:renamed'"; pushed=renamed ;;
+    force) refs="'--force','main','b2'" ;;
+    tag) refs="'main','v1','b2'" ;;
+    delete) refs="':main','b2'" ;;
+  esac
+  result=$("$DB" "$MP/b.db" "SELECT dolt_push('origin',$refs);" 2>&1)
+  case "$push_mode" in
+    force) check "multi-ref force push succeeds" "0" "$result" ;;
+    delete) check_match "default branch deletion stops a multi-ref push" "cannot delete the remote default branch" "$result" ;;
+    *)
+      check_match "$push_mode push reports partial failure" "failed to push some refs to 'file://$MP/remote.db'" "$result"
+      check_match "$push_mode push reports the rejected main ref" "rejected: main" "$result"
+      ;;
+  esac
+  if [ "$push_mode" = delete ]; then
+    result=$("$DB" "$MP/remote.db" "SELECT count(*) FROM dolt_branches WHERE name='b2';")
+    check "a fatal rejection leaves later branches unpushed" "0" "$result"
+    continue
+  fi
+  result=$("$DB" "$MP/remote.db" "SELECT message FROM dolt_log('$pushed') LIMIT 1; SELECT id FROM dolt_at_t('$pushed') ORDER BY id;")
+  check "$push_mode push installs the accepted branch and rows durably" "local
+1
+2" "$result"
+  result=$("$DB" "$MP/b.db" "SELECT latest_commit_message FROM dolt_remote_branches WHERE name='remotes/origin/$pushed';")
+  check "$push_mode push installs the accepted tracking ref durably" "local" "$result"
+  if [ "$push_mode" != force ]; then
+    result=$("$DB" "$MP/remote.db" "SELECT message FROM dolt_log('main') LIMIT 1; SELECT id FROM t ORDER BY id;")
+    check "$push_mode push preserves the rejected remote branch" "remote
+1
+9" "$result"
+    result=$("$DB" "$MP/b.db" "SELECT latest_commit_message FROM dolt_remote_branches WHERE name='remotes/origin/main';")
+    check "$push_mode push preserves the rejected tracking ref" "base" "$result"
+  fi
+  if [ "$push_mode" = multiple ]; then
+    result=$("$DB" "$MP/b.db" "SELECT dolt_push('origin','main','stale','b2');" 2>&1)
+    check_match "multiple push reports every rejected ref" "rejected: main, stale" "$result"
+    result=$("$DB" "$MP/remote.db" "SELECT message FROM dolt_log('stale') LIMIT 1; SELECT message FROM dolt_log('b3') LIMIT 1;")
+    check "multiple rejections preserve stale and still push the final branch" "remote
+local" "$result"
+  fi
+  if [ "$push_mode" = tag ]; then
+    result=$("$DB" "$MP/remote.db" "SELECT tag_name FROM dolt_tags;")
+    check "a branch rejection still allows the following tag push" "v1" "$result"
+  fi
+done
+
 echo "=== Push refspec destination must be a valid branch name ==="
 REF="$TMPDIR/refspec"
 mkdir -p "$REF"
