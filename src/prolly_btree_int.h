@@ -317,6 +317,7 @@ struct Btree {
   u8 bForceCatalogReload; /* Invalidated: live catalog may lag committedCatalogHash */
   u8 bDeferredOpen;
   u8 bDeferredDefaultBranch;
+  u8 bDeferredRevision;
   u8 bDeferredRegister;
   u8 bBeginTransBranchMissing;
   u8 bPreserveDeferFks;

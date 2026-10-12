@@ -1756,6 +1756,7 @@ static int gFailSyncNth = 0;
 static int gFailWriteSticky = 0;
 static int gFailReadNth = 0;
 static int gFailNoFetch = 0;
+static int gFailSharedBusy = 0;
 static int gFailReadWidth = 0;
 static int gFailReadBurst = 0;
 static int gFailAccessOnce = 0;
@@ -1864,6 +1865,9 @@ static int failFileSize(sqlite3_file *pFile, sqlite3_int64 *pSize){
 
 static int failLock(sqlite3_file *pFile, int eLock){
   FailFile *p = (FailFile*)pFile;
+  if( p->isMainDb && eLock==SQLITE_LOCK_SHARED && gFailSharedBusy ){
+    return SQLITE_BUSY;
+  }
   if( p->isMainDb && eLock==SQLITE_LOCK_EXCLUSIVE && gFailExclusiveBusy>0 ){
     gFailExclusiveBusy--;
     return SQLITE_BUSY;
@@ -17467,6 +17471,81 @@ static void run_defer_fk_after_own_ddl(void){
 
 /* file:db@branch with SQLITE_OPEN_URI must not read before the store-name
 ** allocation, and nolock on that URI still reaches the store. */
+static int branchOpenBusy(void *pArg, int n){
+  int *pCalls = (int*)pArg;
+  (*pCalls)++;
+  gFailSharedBusy = 0;
+  return n==0;
+}
+
+static void run_deferred_branch_open(void){
+  char dbpath[512], path[640], commit[64];
+  sqlite3 *db = 0;
+  const char *refs[] = {"dev", "HEAD", "v1", commit, "main~1", "missing"};
+  int form, i;
+  make_dbpath(dbpath,sizeof(dbpath),"deferred_branch_open");
+  removeDbFiles(dbpath);
+  check("deferred_branch_register",registerFailVfs()==SQLITE_OK);
+  check("deferred_branch_seed_open",open_db(dbpath,&db)==SQLITE_OK);
+  check("deferred_branch_seed",execSql(db,
+      "CREATE TABLE t(k INTEGER PRIMARY KEY); INSERT INTO t VALUES(1);"
+      "SELECT dolt_commit('-Am','c1'); SELECT dolt_branch('dev');"
+      "SELECT dolt_tag('v1')")==SQLITE_OK);
+  sqlite3_snprintf(sizeof(commit),commit,"%s",queryScalarText(db,
+      "SELECT commit_hash FROM dolt_log LIMIT 1"));
+  check("deferred_branch_main",execSql(db,
+      "INSERT INTO t VALUES(2); SELECT dolt_commit('-am','c2')")==SQLITE_OK);
+  sqlite3_close(db);
+  for(form=0; form<4; form++){
+    for(i=0; i<(int)(sizeof(refs)/sizeof(refs[0])); i++){
+      int calls = 0, rc;
+      int flags = form>=2 ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE;
+      sqlite3_stmt *stmt = 0;
+      db = 0;
+      if( form==3 ){
+        sqlite3_snprintf(sizeof(path),path,"file:%s@%s?mode=ro",dbpath,refs[i]);
+        flags |= SQLITE_OPEN_URI;
+      }else{
+        sqlite3_snprintf(sizeof(path),path,"%s%c%s",dbpath,
+                         form==0 ? '/' : '@',refs[i]);
+      }
+      gFailSharedBusy = 1;
+      rc = sqlite3_open_v2(path,&db,flags,"doltlite-failvfs");
+      check("deferred_branch_open_succeeds",rc==SQLITE_OK);
+      if( rc==SQLITE_OK ){
+        check("deferred_branch_pending",doltliteGetChunkStore(db)->openPending);
+        rc = sqlite3_prepare_v2(db,"SELECT count(*) FROM t",-1,&stmt,0);
+        check("deferred_branch_statement_busy",rc==SQLITE_BUSY);
+        sqlite3_finalize(stmt);
+        stmt = 0;
+        sqlite3_busy_handler(db,branchOpenBusy,&calls);
+        rc = sqlite3_prepare_v2(db,"SELECT count(*) FROM t",-1,&stmt,0);
+        if( rc==SQLITE_OK ) rc = sqlite3_step(stmt);
+        check("deferred_branch_handler",calls==1);
+        if( i==5 ){
+          check("deferred_branch_missing",rc==SQLITE_CANTOPEN);
+        }else{
+          check("deferred_branch_read",rc==SQLITE_ROW
+                && sqlite3_column_int(stmt,0)==(i==1 ? 2 : 1));
+          check("deferred_branch_selected",strcmp(queryScalarText(db,
+              "SELECT active_branch()"),i<2 ? (i==0 ? "dev" : "main") : "")==0);
+          if( i>=2 || form>=2 ){
+            check("deferred_branch_readonly",execSqlSilent(db,
+                "INSERT INTO t VALUES(3)")==SQLITE_READONLY);
+          }else{
+            check("deferred_branch_writable",execSql(db,
+                "BEGIN; INSERT INTO t VALUES(3); ROLLBACK")==SQLITE_OK);
+          }
+        }
+        sqlite3_finalize(stmt);
+      }
+      gFailSharedBusy = 0;
+      sqlite3_close(db);
+    }
+  }
+  removeDbFiles(dbpath);
+}
+
 static void run_uri_branch_readonly_open(void){
   char dbpath[512];
   char zUri[640];
@@ -17550,6 +17629,7 @@ static void run_uri_branch_readonly_open(void){
                      "branch or revision \"nope\" not found")!=0);
   sqlite3_close(db);
   removeDbFiles(dbpath);
+  run_deferred_branch_open();
 }
 
 static const RegressionCase aCases[] = {

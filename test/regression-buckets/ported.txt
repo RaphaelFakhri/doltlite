@@ -92,6 +92,7 @@ doltlite_readonly_status
 doltlite_detached_ephemeral
 doltlite_attached_vc
 doltlite_open_head
+doltlite_deferred_branch_open
 doltlite_commit_peer_refresh
 doltlite_checkout_peer_retry
 doltlite_checkout_ioerr

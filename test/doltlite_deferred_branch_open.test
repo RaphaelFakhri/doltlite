@@ -1,0 +1,71 @@
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+
+proc deferred_branch_sync {method file args} {
+  if {$::armed && [string match *test.db $file]} {
+    set ::armed 0
+    set ::openError [catch {
+      sqlite3 alias $::branchPath -readonly $::readonly
+    } ::openMessage]
+    if {!$::openError} {
+      set ::readError [catch {alias eval {SELECT count(*) FROM t}} ::readMessage]
+    }
+  }
+  return SQLITE_OK
+}
+
+testvfs tvfs
+tvfs filter xSync
+tvfs script deferred_branch_sync
+set ::armed 0
+foreach revision {dev HEAD v1 main~1} {
+  foreach separator {/ @} {
+    foreach ::readonly {0 1} {
+      catch {alias close}
+      db close
+      forcedelete test.db
+      sqlite3 db test.db -vfs tvfs
+      db eval {
+        CREATE TABLE t(k INTEGER PRIMARY KEY);
+        INSERT INTO t VALUES(1);
+        SELECT dolt_commit('-Am','c1');
+        SELECT dolt_branch('dev');
+        SELECT dolt_tag('v1');
+        INSERT INTO t VALUES(2);
+        SELECT dolt_commit('-am','c2');
+      }
+      set ::branchPath "[file normalize test.db]$separator$revision"
+      set ::openError 0
+      set ::readError 0
+      set ::armed 1
+      db eval {INSERT INTO t VALUES(3)}
+      set ::armed 0
+      set prefix deferred-branch-$revision-$separator-$::readonly
+      do_test $prefix.open {set ::openError} 0
+      if {!$::openError} {
+        do_test $prefix.during-publication {
+          list $::readError [string match *locked* $::readMessage]
+        } {1 1}
+        do_test $prefix.rows {alias one {SELECT count(*) FROM t}} \
+            [expr {$revision eq "HEAD" ? 3 : 1}]
+        do_test $prefix.branch {alias one {SELECT active_branch()}} \
+            [expr {$revision eq "HEAD" ? "main" : ($revision eq "dev" ? "dev" : "")}]
+        if {$::readonly || $revision ni {dev HEAD}} {
+          do_test $prefix.readonly {
+            list [catch {alias eval {INSERT INTO t VALUES(4)}} message] $message
+          } {1 {attempt to write a readonly database}}
+        } else {
+          do_test $prefix.write {
+            alias eval {BEGIN; INSERT INTO t VALUES(4); ROLLBACK}
+          } {}
+        }
+        do_test $prefix.integrity {alias one {PRAGMA integrity_check}} ok
+        alias close
+      }
+    }
+  }
+}
+db close
+tvfs delete
+sqlite3 db test.db
+finish_test

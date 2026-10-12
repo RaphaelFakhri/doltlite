@@ -968,11 +968,7 @@ static int prollyBtreeOpenImpl(
     zOpenFilename = zFilename;
   }
 
-  if( zBranchFromPath ){
-    rc = chunkStoreOpen(&pBt->store, pVfs, zOpenFilename, vfsFlags);
-  }else{
-    rc = chunkStoreOpenDeferred(&pBt->store, pVfs, zOpenFilename, vfsFlags);
-  }
+  rc = chunkStoreOpenDeferred(&pBt->store, pVfs, zOpenFilename, vfsFlags);
   if( rc!=SQLITE_OK ){
     releaseOpenStoreFilename(zStoreFilename, bStoreUri);
     sqlite3_free(pBt);
@@ -1057,7 +1053,7 @@ static int prollyBtreeOpenImpl(
     if( !zDef ) zDef = "main";
     memset(&branchCommit, 0, sizeof(branchCommit));
     memset(&revisionCatalog, 0, sizeof(revisionCatalog));
-    if( zBranchFromPath ){
+    if( zBranchFromPath && !pBt->store.openPending ){
       rc = doltliteResolveOpenRevision(&pBt->store, zDef, &branchCommit,
                                        &revisionCatalog, &zResolvedBranch);
 #if DOLTLITE_ENABLE_CHUNK_SOURCE
@@ -1184,7 +1180,8 @@ static int prollyBtreeOpenImpl(
       p->vc.constraintViolationsHash = state.constraintViolations;
     }
     p->bDeferredOpen = bDeferredOpen;
-    p->bDeferredDefaultBranch = pBt->store.openPending;
+    p->bDeferredDefaultBranch = pBt->store.openPending && !zBranchFromPath;
+    p->bDeferredRevision = pBt->store.openPending && zBranchFromPath;
   }
 
   p->cat.iNextTable = 2;

@@ -12,7 +12,7 @@ jobs:
   build-and-test:
     name: ${{ matrix.platform }}
     runs-on: ${{ matrix.runs-on }}
-    timeout-minutes: ${{ inputs.platform == 'windows' && 30 || 45 }}
+    timeout-minutes: 45
     env:
       CFLAGS: -O2 -g -Werror
       DOLTLITE_AMALG_HTTP_PROBE: ${{ github.workspace }}/build/amalgamation_http_probe${{ matrix.exe }}

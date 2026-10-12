@@ -668,7 +668,30 @@ int doltliteBtreeHydrateDeferred(Btree *p){
   }while( rc==SQLITE_BUSY && cs->openPending
        && prollyInvokeBusyHandler(p->pBt) );
   if( rc!=SQLITE_OK ) return rc;
-  if( p->bDeferredDefaultBranch ){
+  memset(&loadedCatHash, 0, sizeof(loadedCatHash));
+  if( p->bDeferredRevision ){
+    ProllyHash commit;
+    memset(&commit, 0, sizeof(commit));
+    rc = doltliteResolveOpenRevision(cs, p->zBranch, &commit,
+                                     &loadedCatHash, &zPrepared);
+    if( rc!=SQLITE_OK ){
+      sqlite3_free(zPrepared);
+      return rc==SQLITE_NOTFOUND ? SQLITE_CANTOPEN : rc;
+    }
+    if( !zPrepared ){
+      u8 *data = 0;
+      int nData = 0;
+      if( !prollyHashIsEmpty(&loadedCatHash) ){
+        rc = chunkStoreGet(cs, &loadedCatHash, &data, &nData);
+        if( rc==SQLITE_OK ) rc = deserializeCatalog(p, data, nData);
+        sqlite3_free(data);
+        if( rc!=SQLITE_OK ) return rc;
+      }
+      p->headCommit = commit;
+      p->vc.stagedCatalog = loadedCatHash;
+      p->isDetached = 1;
+    }
+  }else if( p->bDeferredDefaultBranch ){
     const char *zDef = chunkStoreGetDefaultBranch(cs);
     zPrepared = sqlite3_mprintf("%s", zDef ? zDef : "main");
     rc = zPrepared ? SQLITE_OK : SQLITE_NOMEM;
@@ -681,8 +704,9 @@ int doltliteBtreeHydrateDeferred(Btree *p){
     p->zBranch = zPrepared;
   }
 
-  memset(&loadedCatHash, 0, sizeof(loadedCatHash));
-  rc = btreeReloadBranchWorkingStateInto(p, 1, &loadedCatHash);
+  if( !p->bDeferredRevision || zPrepared ){
+    rc = btreeReloadBranchWorkingStateInto(p, 1, &loadedCatHash);
+  }
   if( rc!=SQLITE_OK ){
     if( zPrepared ){
       p->zBranch = zOldBranch;
@@ -695,6 +719,7 @@ int doltliteBtreeHydrateDeferred(Btree *p){
   p->bCatalogDropped = 0;
   p->bDeferredOpen = 0;
   p->bDeferredDefaultBranch = 0;
+  p->bDeferredRevision = 0;
   if( p->db && p->db->nDb>0 && p->db->aDb[0].pBt==p ){
     p->bDeferredRegister = 1;
   }
