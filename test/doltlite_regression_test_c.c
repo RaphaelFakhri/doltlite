@@ -1760,6 +1760,9 @@ static int gFailHasMovedOnce = 0;
 static int gFailFileSizeOnce = 0;
 static int gFailOpenMainOnce = 0;
 static int gFailHits = 0;
+static int gFailExclusiveBusy;
+static int gPublicationMilliSleeps;
+static int gPublicationSleepUsec;
 static void (*gSyncHook)(void*);
 static void *gSyncHookArg;
 static int gFailFullPathnameHits = 0;
@@ -1853,6 +1856,10 @@ static int failFileSize(sqlite3_file *pFile, sqlite3_int64 *pSize){
 
 static int failLock(sqlite3_file *pFile, int eLock){
   FailFile *p = (FailFile*)pFile;
+  if( p->isMainDb && eLock==SQLITE_LOCK_EXCLUSIVE && gFailExclusiveBusy>0 ){
+    gFailExclusiveBusy--;
+    return SQLITE_BUSY;
+  }
   return p->pReal->pMethods->xLock(p->pReal, eLock);
 }
 
@@ -10021,11 +10028,58 @@ static void run_publication_process(int fail, int wait){
 }
 #endif
 
+static int publicationProbeSleep(sqlite3_vfs *pVfs, int nMicro){
+  (void)pVfs;
+  if( nMicro>=1000 ) gPublicationMilliSleeps++;
+  gPublicationSleepUsec += nMicro;
+  return nMicro;
+}
+
+static void run_publication_handoff(const char *zPath){
+  int slow;
+  for(slow=0; slow<2; slow++){
+    sqlite3 *db = 0, *fresh = 0;
+    int (*xBaseSleep)(sqlite3_vfs*,int) = gBaseVfs->xSleep;
+    int (*xFailSleep)(sqlite3_vfs*,int) = gFailVfs.xSleep;
+    int rc;
+    removeDbFiles(zPath);
+    check("publication_handoff_open",open_fail_db(zPath,&db)==SQLITE_OK);
+    check("publication_handoff_seed",execSql(db,
+      "CREATE TABLE t(k INTEGER PRIMARY KEY); INSERT INTO t VALUES(1);"
+      "SELECT dolt_commit('-Am','base')")==SQLITE_OK);
+    gPublicationMilliSleeps = 0;
+    gPublicationSleepUsec = 0;
+    gFailExclusiveBusy = slow ? 200 : 12;
+    gBaseVfs->xSleep = publicationProbeSleep;
+    gFailVfs.xSleep = publicationProbeSleep;
+    rc = execSqlSilent(db,"INSERT INTO t VALUES(2)");
+    gBaseVfs->xSleep = xBaseSleep;
+    gFailVfs.xSleep = xFailSleep;
+    check("publication_handoff_contended",gFailExclusiveBusy<(slow ? 200 : 12));
+    gFailExclusiveBusy = 0;
+    check("publication_handoff_result",rc==(slow ? SQLITE_BUSY : SQLITE_OK));
+    if( slow ){
+      check("publication_handoff_long_wait_budget",gPublicationSleepUsec>=100000);
+      check("publication_handoff_long_wait_backoff",gPublicationMilliSleeps>0);
+    }else{
+      check("publication_handoff_no_millisecond_sleep",gPublicationMilliSleeps==0);
+    }
+    check("publication_handoff_fresh_open",open_db(zPath,&fresh)==SQLITE_OK);
+    check("publication_handoff_durable_rows",queryInt64(fresh,
+      "SELECT count(*) FROM t")== (slow ? 1 : 2));
+    check("publication_handoff_integrity",strcmp(queryScalarText(fresh,
+      "PRAGMA integrity_check"),"ok")==0);
+    sqlite3_close(fresh);
+    sqlite3_close(db);
+  }
+}
+
 static void run_commit_publication(void){
   char dbpath[512];
   int fail;
   check("publication_register", registerFailVfs()==SQLITE_OK);
   make_dbpath(dbpath,sizeof(dbpath),"commit_publication");
+  run_publication_handoff(dbpath);
   for(fail=0; fail<2; fail++){
     sqlite3 *db = 0, *peer = 0, *fresh = 0;
     PublicationProbe probe;

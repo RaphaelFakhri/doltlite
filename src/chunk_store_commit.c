@@ -445,7 +445,11 @@ static int csCommitToFile(ChunkStore *cs, int (*xBusy)(void*), void *pBusyArg){
       do {
         rc = sqlite3OsLock(cs->file.pFile, SQLITE_LOCK_EXCLUSIVE);
         if( rc!=SQLITE_BUSY ) break;
-        if( publicationRetries++<100 ){
+        publicationRetries++;
+        if( publicationRetries<=8 ) continue;
+        if( publicationRetries<=40 ){
+          sqlite3OsSleep(chunkFileGetVfs(&cs->file), 1);
+        }else if( publicationRetries<=140 ){
           sqlite3_sleep(1);
         }else if( !xBusy || !xBusy(pBusyArg) ){
           break;
