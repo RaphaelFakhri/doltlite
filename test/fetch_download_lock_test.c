@@ -125,7 +125,9 @@ static void *fetchThreadMain(void *pArg){
 /* bAbort: stop the download after the local insert and expect tracking to
 ** stay put. Otherwise the fetch finishes and the tracking ref moves. */
 static void test_fetch_download(int bAbort){
-  char zRemote[512], zLocal[512], zPause[512], zReady[512], zFail[512];
+  char zRemote[512], zLocal[512], zPause[512];
+  /* A full pause path plus ".ready" or ".fail" is 518 bytes. */
+  char zReady[520], zFail[520];
   char zSql[640], zMsg[128];
   sqlite3 *dbRemote = 0, *dbLocal = 0, *dbWrite = 0, *dbCheck = 0;
   FetchJob job;
