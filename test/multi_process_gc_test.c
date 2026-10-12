@@ -1253,6 +1253,35 @@ static void test_gc_before_add_persist(void){
   remove(ready);
 }
 
+/* gc's own refresh consumes the signal that makes the next statement reload
+** the session, so a peer's write must still be visible after this
+** connection's gc, not the catalog the sweep may have collected. */
+static void test_own_gc_sees_peer_write(void){
+  char path[256];
+  sqlite3 *db = 0;
+  sqlite3 *peer = 0;
+
+  printf("--- Test: reads after this connection's gc see a peer's write ---\n");
+  snprintf(path, sizeof(path), DOLTLITE_TEST_TMPDIR "/mp_gc_ownreload_%d.db", (int)getpid());
+  setup_db_with_rows(path, 1);
+  check("gc_ownreload_open", sqlite3_open(path, &db)==SQLITE_OK);
+  check("gc_ownreload_peer_open", sqlite3_open(path, &peer)==SQLITE_OK);
+  check("gc_ownreload_local",
+        execSql(db, "INSERT INTO t VALUES(2,'mine')")==SQLITE_OK);
+  check("gc_ownreload_loaded", countRowsDiag(db, "SELECT count(*) FROM t")==2);
+  check("gc_ownreload_peer_write",
+        execSql(peer, "INSERT INTO t VALUES(3,'peer'); DELETE FROM t WHERE id=2")
+          ==SQLITE_OK);
+  check("gc_ownreload_gc", execSql(db, "SELECT dolt_gc()")==SQLITE_OK);
+  check("gc_ownreload_sees_peer",
+        strcmp(queryScalarText(db,
+          "SELECT group_concat(id) FROM (SELECT id FROM t ORDER BY id)"),
+          "1,3")==0);
+  sqlite3_close(peer);
+  sqlite3_close(db);
+  remove(path);
+}
+
 int main(){
   printf("=== Multi-Process GC Concurrency Tests ===\n\n");
 
@@ -1273,6 +1302,7 @@ int main(){
   test_gc_vs_put_deduped_against_garbage();
   test_gc_sweeps_refused_commit_catalog();
   test_gc_before_add_persist();
+  test_own_gc_sees_peer_write();
 
   printf("\n=== Results: %d passed, %d failed out of %d tests ===\n",
     nPass, nFail, nPass+nFail);

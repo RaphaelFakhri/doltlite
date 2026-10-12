@@ -1084,11 +1084,16 @@ static void gcResultError(sqlite3_context *context, int rc, const char *zMsg){
 /* Graph lock for gc. bBusyRetry waits for explicit commands. Checkpoint
 ** compaction must not: testvfs xWrite can re-enter while this thread
 ** already holds the graph lock (self-deadlock). */
-static int gcLockAndRefresh(sqlite3 *db, ChunkStore *cs, int bBusyRetry){
+static int gcLockAndRefresh(
+  sqlite3 *db,
+  ChunkStore *cs,
+  int bBusyRetry,
+  int *pChanged
+){
   int rc;
   assert( sqlite3_mutex_held(db->mutex) );
   do {
-    rc = chunkStoreLockAndRefresh(cs);
+    rc = chunkStoreLockAndRefreshChanged(cs, pChanged);
   }while( rc==SQLITE_BUSY && bBusyRetry && sqlite3InvokeBusyHandler(&db->busyHandler) );
   return rc;
 }
@@ -1109,6 +1114,8 @@ static int gcRun(
 ){
   GcMarks marked;
   GcMarkTrace markTrace;
+  u32 reloadGen;
+  int bRefreshed = 0;
   int rc;
 
   *pnKept = 0;
@@ -1120,7 +1127,8 @@ static int gcRun(
   }
 
   chunkStoreSourceCloseWriter(cs);
-  rc = gcLockAndRefresh(db, cs, bBusyRetry);
+  reloadGen = cs->reloadGen;
+  rc = gcLockAndRefresh(db, cs, bBusyRetry, &bRefreshed);
   if( rc!=SQLITE_OK ){
     *pzPhase = "failed to acquire lock for gc";
     return rc;
@@ -1153,6 +1161,13 @@ static int gcRun(
       *pzPhase = "database changed during gc; retry";
       return rc;
     }
+  }
+
+  /* These refreshes consume the store-changed signal the next statement
+  ** would reload the session on; without it, it reads the catalog it had,
+  ** which may be a peer-superseded one this sweep collects. */
+  if( bRefreshed || cs->reloadGen!=reloadGen ){
+    doltliteInvalidateSessionWorkingState(db);
   }
 
   rc = gcMarksInit(&marked, cs);
@@ -1282,6 +1297,7 @@ int doltliteGcVacuumInto(
   CsFileLock pDestLock = 0;
   char *zDestLockName = 0;
   char *zPath = 0;
+  int bRefreshed = 0;
   int rc;
 
   *pzPhase = 0;
@@ -1314,12 +1330,13 @@ int doltliteGcVacuumInto(
     return rc==SQLITE_BUSY ? SQLITE_BUSY : rc;
   }
 
-  rc = gcLockAndRefresh(db, cs, 1);
+  rc = gcLockAndRefresh(db, cs, 1, &bRefreshed);
   if( rc!=SQLITE_OK ){
     csFileUnlock(pDestLock, &zDestLockName);
     *pzPhase = "failed to acquire lock for vacuum into";
     return rc;
   }
+  if( bRefreshed ) doltliteInvalidateSessionWorkingState(db);
   rc = gcMarksInit(&marked, cs);
   if( rc!=SQLITE_OK ){
     chunkStoreUnlock(cs);
