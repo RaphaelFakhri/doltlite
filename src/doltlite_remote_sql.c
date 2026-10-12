@@ -1318,6 +1318,11 @@ static void doltPullParsed(
       remoteSqlRestoreAndReport(ctx, db, cs, &savedState, rc, 0);
       return;
     }
+    if( prollyHashCompare(&ancestor, &trackingCommit)==0 ){
+      doltliteNoteSessionMissedDiskTip(db);
+      remoteSqlClearAndSucceed(ctx, &savedState);
+      return;
+    }
     if( prollyHashCompare(&ancestor, &localCommit)!=0 && bFfOnly ){
       remoteSqlRestoreAndReport(ctx, db, cs, &savedState, SQLITE_ERROR,
                                 "fatal: Not possible to fast-forward, aborting");

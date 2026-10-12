@@ -166,6 +166,35 @@ check "pull when up-to-date returns 0" "0" "$result"
 clone_size_after=$(file_size "$TMPDIR/noop_clone.db")
 check "pull when up-to-date does not grow local" "$clone_size_before" "$clone_size_after"
 
+for clone_mode in eager lazy; do
+  ahead_db="$TMPDIR/ahead_$clone_mode.db"
+  clone_args="'$R/remote.db'"
+  if [ "$clone_mode" = lazy ]; then
+    ahead_db="file:$ahead_db?lazy_origin=1"
+    clone_args="'--lazy',$clone_args"
+  fi
+  "$DB" "$ahead_db" "
+    SELECT dolt_clone($clone_args);
+    INSERT INTO users VALUES(100,'local',40);
+    SELECT dolt_commit('-Am','local ahead');
+  " > /dev/null
+  result=$("$DB" "$ahead_db" "SELECT dolt_pull('--ff-only','origin','main');" 2>&1)
+  check "$clone_mode ahead ff-only pull returns 0" "0" "$result"
+  "$DB" "$ahead_db" "
+    UPDATE users SET age=41 WHERE id=100;
+    SELECT dolt_add('users');
+    UPDATE users SET age=42 WHERE id=100;
+  " > /dev/null
+  ahead_state="SELECT dolt_hashof('HEAD'), dolt_hashof_db('STAGED'), dolt_hashof_db('WORKING');"
+  state_before=$("$DB" "$ahead_db" "$ahead_state")
+  for pull_flag in "" "'--ff-only'," "'--no-ff'," "'--squash',"; do
+    result=$("$DB" "$ahead_db" "SELECT dolt_pull(${pull_flag}'origin','main');" 2>&1)
+    check "$clone_mode dirty ahead pull $pull_flag returns 0" "0" "$result"
+    result=$("$DB" "$ahead_db" "$ahead_state")
+    check "$clone_mode ahead pull $pull_flag preserves HEAD, staged and working roots" "$state_before" "$result"
+  done
+done
+
 result=$("$DB" "$TMPDIR/clone_followup.db" "SELECT dolt_clone('$R/remote.db'); SELECT active_branch(); SELECT count(*) FROM users; SELECT count(*) FROM dolt_remotes;")
 check "clone same-session followup queries work" "0
 main
@@ -1495,6 +1524,7 @@ Merge branch 'origin/main' into main
 
 "$DB" "$DP/staged.db" "SELECT dolt_clone('file://$DP/remote.db');" >/dev/null
 "$DB" "$DP/staged.db" "INSERT INTO t VALUES(4); SELECT dolt_commit('-am','st4'); INSERT INTO u VALUES(3); SELECT dolt_add('-A');" >/dev/null
+"$DB" "$DP/a.db" "INSERT INTO t VALUES(10); SELECT dolt_commit('-am','a10'); SELECT dolt_push('origin','main');" >/dev/null
 result=$("$DB" "$DP/staged.db" "SELECT dolt_pull('origin','main');" 2>&1)
 check_match "divergent pull with staged changes is refused" \
   "cannot pull with uncommitted changes" "$result"
@@ -1505,6 +1535,7 @@ check "refused staged pull keeps the staged row" "st4
 
 "$DB" "$DP/noff.db" "SELECT dolt_clone('file://$DP/remote.db');" >/dev/null
 "$DB" "$DP/noff.db" "INSERT INTO t VALUES(6); SELECT dolt_commit('-am','n6'); INSERT INTO u VALUES(8);" >/dev/null
+"$DB" "$DP/a.db" "INSERT INTO t VALUES(11); SELECT dolt_commit('-am','a11'); SELECT dolt_push('origin','main');" >/dev/null
 result=$("$DB" "$DP/noff.db" "SELECT dolt_pull('--no-ff','origin','main');" 2>&1)
 check_match "dirty --no-ff pull is refused" \
   "cannot pull with uncommitted changes" "$result"
@@ -1514,6 +1545,7 @@ check "dirty --no-ff pull leaves the local commit" "n6
 
 "$DB" "$DP/sq.db" "SELECT dolt_clone('file://$DP/remote.db');" >/dev/null
 "$DB" "$DP/sq.db" "INSERT INTO t VALUES(7); SELECT dolt_commit('-am','s7'); INSERT INTO u VALUES(4);" >/dev/null
+"$DB" "$DP/a.db" "INSERT INTO t VALUES(12); SELECT dolt_commit('-am','a12'); SELECT dolt_push('origin','main');" >/dev/null
 result=$("$DB" "$DP/sq.db" "SELECT dolt_pull('--squash','origin','main');" 2>&1)
 check_match "dirty --squash pull is refused" \
   "cannot pull with uncommitted changes" "$result"
