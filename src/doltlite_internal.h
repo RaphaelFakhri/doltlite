@@ -1517,6 +1517,7 @@ int doltliteDetectConstraintViolationsFiltered(
   char **pzErr
 );
 int doltliteVerifyConstraintsRegister(sqlite3 *db);
+void doltliteTestPause(const char *zEnv);
 int doltliteRefreshAndConfirmHead(
   sqlite3 *db, ChunkStore *cs, const ProllyHash *pExpectedHead
 );

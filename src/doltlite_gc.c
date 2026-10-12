@@ -354,6 +354,84 @@ static void gcVerifySessionResolvable(sqlite3 *db, ChunkStore *cs){
 }
 #endif
 
+/* Drain the queue, marking everything reachable. A tolerant drain walks
+** this connection's own roots, which may name garbage a peer's gc already
+** swept (absent, not damaged); only chunks reachable from the refs must all
+** be present. */
+static int gcMarkDrain(
+  sqlite3 *db,
+  ChunkStore *cs,
+  GcQueue *q,
+  GcMarkTrace *pTrace,
+  int localOnly,
+  int *pPartial,
+  int bTolerant
+){
+  GcQueueItem current;
+  int rc;
+  while( (rc = gcQueuePop(q, &current))==SQLITE_OK ){
+    u8 *data = 0;
+    int nData = 0;
+    GcChildCtx childCtx;
+
+    if( sqlite3_is_interrupted(db) ){
+      rc = SQLITE_INTERRUPT;
+      break;
+    }
+
+    if( localOnly ){
+      int has = 0;
+      rc = chunkStoreHas(cs, &current.hash, &has);
+      if( rc!=SQLITE_OK ) break;
+      if( !has ){
+        *pPartial = 1;
+        continue;
+      }
+    }
+    rc = chunkStoreGet(cs, &current.hash, &data, &nData);
+    if( bTolerant && rc==SQLITE_NOTFOUND ){
+      rc = SQLITE_OK;
+      continue;
+    }
+    if( rc!=SQLITE_OK ){
+      if( rc==SQLITE_NOTFOUND || rc==SQLITE_CORRUPT ){
+        pTrace->hasMissing = 1;
+        pTrace->rc = rc;
+        memcpy(&pTrace->missing, &current.hash, sizeof(ProllyHash));
+        memcpy(&pTrace->parent, &current.parent, sizeof(ProllyHash));
+        pTrace->eSource = current.eSource;
+        pTrace->eParentType = current.eParentType;
+        pTrace->iParentLevel = current.iParentLevel;
+        pTrace->nParentItems = current.nParentItems;
+        pTrace->iChild = current.iChild;
+      }
+      break;
+    }
+
+    childCtx.q = q;
+    childCtx.cs = cs;
+    childCtx.parent = current.hash;
+    childCtx.eSource = GC_CHILD;
+    childCtx.eParentType = doltliteClassifyChunk(data, nData);
+    childCtx.iParentLevel = -1;
+    childCtx.nParentItems = -1;
+    childCtx.iNextChild = 0;
+    if( childCtx.eParentType==CHUNK_PROLLY_NODE ){
+      ProllyNode node;
+      if( prollyNodeParse(&node, data, nData)==SQLITE_OK ){
+        childCtx.iParentLevel = node.level;
+        childCtx.nParentItems = (int)node.nItems;
+      }
+    }
+    rc = doltliteEnumerateChunkChildren(data, nData, gcChildCb, &childCtx);
+
+    sqlite3_free(data);
+    if( rc!=SQLITE_OK ) break;
+  }
+
+  return rc;
+}
+
 static int gcMarkReachable(
   sqlite3 *db,
   ChunkStore *cs,
@@ -361,7 +439,6 @@ static int gcMarkReachable(
   GcMarkTrace *pTrace
 ){
   GcQueue queue;
-  GcQueueItem current;
   GcChildCtx seedCtx;
   int localOnly = chunkStoreSourceEnabled(cs);
   int partial = 0;
@@ -405,6 +482,11 @@ static int gcMarkReachable(
     }
   }
 
+  if( rc==SQLITE_OK ){
+    rc = gcMarkDrain(db, cs, &queue, pTrace, localOnly, &partial, 0);
+    if( rc==SQLITE_DONE ) rc = SQLITE_OK;
+  }
+
   {
     int nPend; const ChunkIndexEntry *aPend;
     chunkStagingGetPending(&cs->staging, &nPend, &aPend);
@@ -426,65 +508,8 @@ static int gcMarkReachable(
     rc = doltliteSeedSessionHashes(db, cs, gcSessionChildCb, &seedCtx);
   }
 
-  if( rc!=SQLITE_OK ){
-    gcQueueFree(&queue);
-    return rc;
-  }
-
-  while( (rc = gcQueuePop(&queue, &current))==SQLITE_OK ){
-    u8 *data = 0;
-    int nData = 0;
-    GcChildCtx childCtx;
-
-    if( sqlite3_is_interrupted(db) ){
-      rc = SQLITE_INTERRUPT;
-      break;
-    }
-
-    if( localOnly ){
-      int has = 0;
-      rc = chunkStoreHas(cs, &current.hash, &has);
-      if( rc!=SQLITE_OK ) break;
-      if( !has ){
-        partial = 1;
-        continue;
-      }
-    }
-    rc = chunkStoreGet(cs, &current.hash, &data, &nData);
-    if( rc!=SQLITE_OK ){
-      if( rc==SQLITE_NOTFOUND || rc==SQLITE_CORRUPT ){
-        pTrace->hasMissing = 1;
-        pTrace->rc = rc;
-        memcpy(&pTrace->missing, &current.hash, sizeof(ProllyHash));
-        memcpy(&pTrace->parent, &current.parent, sizeof(ProllyHash));
-        pTrace->eSource = current.eSource;
-        pTrace->eParentType = current.eParentType;
-        pTrace->iParentLevel = current.iParentLevel;
-        pTrace->nParentItems = current.nParentItems;
-        pTrace->iChild = current.iChild;
-      }
-      break;
-    }
-
-    childCtx.q = &queue;
-    childCtx.cs = cs;
-    childCtx.parent = current.hash;
-    childCtx.eSource = GC_CHILD;
-    childCtx.eParentType = doltliteClassifyChunk(data, nData);
-    childCtx.iParentLevel = -1;
-    childCtx.nParentItems = -1;
-    childCtx.iNextChild = 0;
-    if( childCtx.eParentType==CHUNK_PROLLY_NODE ){
-      ProllyNode node;
-      if( prollyNodeParse(&node, data, nData)==SQLITE_OK ){
-        childCtx.iParentLevel = node.level;
-        childCtx.nParentItems = (int)node.nItems;
-      }
-    }
-    rc = doltliteEnumerateChunkChildren(data, nData, gcChildCb, &childCtx);
-
-    sqlite3_free(data);
-    if( rc!=SQLITE_OK ) break;
+  if( rc==SQLITE_OK ){
+    rc = gcMarkDrain(db, cs, &queue, pTrace, localOnly, &partial, 1);
   }
 
   if( rc==SQLITE_DONE && partial ){

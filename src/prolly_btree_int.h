@@ -802,6 +802,7 @@ int unpackedRecordCanUseIntSortKey(BtCursor*, UnpackedRecord*, int);
 int sortKeyFromUnpackedIntRecordBuffer(UnpackedRecord*, int, const KeyInfo*, u8**, int*, int*);
 int prollyInvokeBusyHandler(void*);
 void doltliteVcCommandInstalled(sqlite3*);
+void doltliteTestPause(const char *zEnv);
 ChunkStore *doltliteGetChunkStore(sqlite3*);
 ChunkStore *doltliteBtreeChunkStore(Btree*);
 void doltliteBtreeBackupStart(Btree*);

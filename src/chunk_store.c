@@ -1431,6 +1431,29 @@ int csVerifyStoredHits(ChunkStore *cs){
   return SQLITE_OK;
 }
 
+/* For a command about to read back what it built: any swept hit may be
+** part of it. */
+int chunkStoreStoredHitSwept(ChunkStore *cs, int *pSwept){
+  int i;
+  *pSwept = 0;
+  if( cs->nStoredHit==0 && !cs->storedHitLost ) return SQLITE_OK;
+  if( cs->reloadGen==cs->storedHitReloadGen ) return SQLITE_OK;
+  if( cs->storedHitLost ){
+    *pSwept = 1;
+    return SQLITE_OK;
+  }
+  for(i=0; i<cs->nStoredHit; i++){
+    int has = 0;
+    int rc = chunkStoreHas(cs, &cs->aStoredHit[i], &has);
+    if( rc!=SQLITE_OK ) return rc;
+    if( !has ){
+      *pSwept = 1;
+      return SQLITE_OK;
+    }
+  }
+  return SQLITE_OK;
+}
+
 void chunkStoreClearStoredHits(ChunkStore *cs){
   cs->nStoredHit = 0;
   cs->storedHitLost = 0;

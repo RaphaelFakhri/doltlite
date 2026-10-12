@@ -157,6 +157,7 @@ int doltliteRestoreTxnState(sqlite3 *db, DoltliteTxnState *p){
   ChunkStore *cs;
   int rc;
   int rcFirst;
+  int bSwept = 0;
   assert( db!=0 && p!=0 );
   assert( p->zSessionBranch!=0 );
   if( failNextRestore ){
@@ -186,7 +187,18 @@ int doltliteRestoreTxnState(sqlite3 *db, DoltliteTxnState *p){
   }
   chunkStoreReadoptWorkingSetBasis(cs);
 
-  rc = doltliteSwitchCatalog(db, &p->sessionCatalogHash);
+  /* Unpublished work stays pending, so a saved catalog that is gone was
+  ** stale garbage a peer's gc swept: reload the session from disk instead. */
+  {
+    int bHas = 1;
+    rc = prollyHashIsEmpty(&p->sessionCatalogHash) ? SQLITE_OK
+       : chunkStoreHas(cs, &p->sessionCatalogHash, &bHas);
+    if( rc==SQLITE_OK && !bHas ){
+      bSwept = 1;
+    }else{
+      rc = doltliteSwitchCatalog(db, &p->sessionCatalogHash);
+    }
+  }
   if( rcFirst==SQLITE_OK ) rcFirst = rc;
 
   rc = doltliteSetSessionBranch(db, p->zSessionBranch);
@@ -204,7 +216,7 @@ int doltliteRestoreTxnState(sqlite3 *db, DoltliteTxnState *p){
         db, &p->sessionConstraintViolationsCatalog);
   }
   if( rcFirst==SQLITE_OK ) rcFirst = rc;
-  if( rcFirst!=SQLITE_OK ) doltliteInvalidateSessionWorkingState(db);
+  if( rcFirst!=SQLITE_OK || bSwept ) doltliteInvalidateSessionWorkingState(db);
   return rcFirst;
 }
 
@@ -219,6 +231,33 @@ int doltliteRestoreTxnStateOnFailure(
   db->nVcInterruptMask--;
   doltliteTxnStateClear(pSaved);
   return rc==SQLITE_OK ? opRc : rc;
+}
+
+/* Test hook: while the file named by zEnv exists, signal "<file>.ready" and
+** wait, so a peer can act at this point of an operation. */
+void doltliteTestPause(const char *zEnv){
+  const char *zPause = getenv(zEnv);
+  sqlite3_vfs *pVfs;
+  char zReady[512];
+  int exists = 1;
+  if( !zPause || !zPause[0] ) return;
+  pVfs = sqlite3_vfs_find(0);
+  if( !pVfs ) return;
+  sqlite3_snprintf(sizeof(zReady), zReady, "%s.ready", zPause);
+  {
+    sqlite3_file *pReady = 0;
+    int openRc = sqlite3OsOpenMalloc(pVfs, zReady, &pReady,
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_MAIN_DB, 0);
+    if( openRc==SQLITE_OK ){
+      /* xAccess reports an empty file as missing. */
+      sqlite3OsWrite(pReady, "x", 1, 0);
+      sqlite3OsCloseFree(pReady);
+    }
+  }
+  while( sqlite3OsAccess(pVfs, zPause, SQLITE_ACCESS_EXISTS, &exists)==SQLITE_OK
+      && exists ){
+    sqlite3_sleep(20);
+  }
 }
 
 int doltliteRefreshAndConfirmHead(
@@ -260,6 +299,11 @@ int doltliteRefreshAndConfirmHead(
     /* A non-empty expected tip requires the branch to exist on disk; treating
     ** missing as confirmed would skip a peer that already created it. */
     rc = SQLITE_BUSY;
+  }
+  if( rc==SQLITE_OK ){
+    int bSwept = 0;
+    rc = chunkStoreStoredHitSwept(cs, &bSwept);
+    if( rc==SQLITE_OK && bSwept ) rc = SQLITE_BUSY;
   }
   if( rc!=SQLITE_OK ){
     /* The refresh above consumed the store-changed signal, so the next write

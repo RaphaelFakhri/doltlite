@@ -695,10 +695,12 @@ static int csCommitWithBusyHandler(
       savedRefsHash = cs->refs.refsHash;
       baseRefsHash = cs->refs.committedRefsHash;
       csDetachSavedRefsState(cs, &savedRefs);
+      cs->pDetachedRefs = &savedRefs;
     }
     do {
       rc = chunkStoreLockAndRefresh(cs);
     }while( rc==SQLITE_BUSY && xBusy && xBusy(pBusyArg) );
+    cs->pDetachedRefs = 0;
     if( rc!=SQLITE_OK ){
       if( preserveRefs ){
         csRestoreSavedRefsState(cs, &savedRefs);

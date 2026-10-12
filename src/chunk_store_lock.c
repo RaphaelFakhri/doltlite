@@ -653,12 +653,12 @@ void chunkStoreUnlock(ChunkStore *cs){
   if( cs->pLockMutex ) sqlite3_mutex_leave(cs->pLockMutex);
 }
 
-static int csStoreHasAnyBranchTip(ChunkStore *pCand, const RefsTable *rt,
-                                  int *pHas){
+static int csStoreHasAnyBranchTip(ChunkStore *pCand, const BranchRef *aBr,
+                                  int nBr, int *pHas){
   int i;
   *pHas = 0;
-  for(i=0; i<rt->nBranches; i++){
-    const ProllyHash *pTip = &rt->aBranches[i].commitHash;
+  for(i=0; i<nBr; i++){
+    const ProllyHash *pTip = &aBr[i].commitHash;
     int rc, has = 0;
     if( prollyHashIsEmpty(pTip) ) continue;
     rc = chunkStoreHas(pCand, pTip, &has);
@@ -704,7 +704,14 @@ static int csMovedFileIsOurs(ChunkStore *cs, int *pIsOurs){
                         SQLITE_OPEN_READONLY | SQLITE_OPEN_MAIN_DB);
   }
   if( rc==SQLITE_OK ){
-    rc = csStoreHasAnyBranchTip(&cand, &cs->refs, pIsOurs);
+    /* A commit detaches its local refs across the lock; they are still ours. */
+    if( cs->pDetachedRefs ){
+      rc = csStoreHasAnyBranchTip(&cand, cs->pDetachedRefs->aBranches,
+                                  cs->pDetachedRefs->nBranches, pIsOurs);
+    }else{
+      rc = csStoreHasAnyBranchTip(&cand, cs->refs.aBranches,
+                                  cs->refs.nBranches, pIsOurs);
+    }
     if( rc==SQLITE_OK && !*pIsOurs && lockBusy ){
       rc = SQLITE_BUSY;
     }else if( rc==SQLITE_OK && !*pIsOurs ){

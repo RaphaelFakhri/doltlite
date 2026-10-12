@@ -302,6 +302,7 @@ struct ChunkStore {
   int nStoredHitAlloc;
   u32 storedHitReloadGen;
   u8 storedHitLost;
+  const SavedRefsState *pDetachedRefs;
   u8 corruptMidStream;    /* Mid-stream WAL damage: reads/commits CORRUPT;
                           ** open still succeeds (stock surfaces on first use) */
   i64 iFailedRootOff;     /* Root of a failed commit the rollback could not
@@ -481,6 +482,7 @@ int chunkStoreCommitWithBusyHandler(ChunkStore *cs, int (*xBusy)(void*),
                                     void *pBusyArg);
 int chunkStoreWriteRefused(ChunkStore *cs);
 void chunkStoreClearStoredHits(ChunkStore *cs);
+int chunkStoreStoredHitSwept(ChunkStore *cs, int *pSwept);
 
 int chunkStoreCopyIntoEmpty(ChunkStore *pSrc, ChunkStore *pDest);
 int chunkStoreCopyIntoEmptyNoCommit(ChunkStore *pSrc, ChunkStore *pDest);
