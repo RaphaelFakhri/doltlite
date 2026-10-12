@@ -138,11 +138,16 @@ do_ioerr_test shared_ioerr-2 -tclprep {
         SELECT max(a), min(a), count(*) FROM (SELECT a FROM t1 order by a);
       } db]
       set boundaries [lrange $possible_results $::residx \
-          [expr {min($::residx+1,2)}]]
+          [expr {$::residx+1}]]
+      set writer_integrity [catchsql {PRAGMA integrity_check} db]
+      set peer_integrity [catchsql {PRAGMA integrity_check} db2]
       set success [expr {$res eq {0 {1024 1 1024}}
           && [lsearch -exact $boundaries $writer]>=0
-          && [catchsql {PRAGMA integrity_check} db] eq {0 ok}
-          && [catchsql {PRAGMA integrity_check} db2] eq {0 ok}}]
+          && $writer_integrity eq {0 ok}
+          && $peer_integrity eq {0 ok}}]
+      if {!$success} {
+        puts "Writer: $writer; integrity: $writer_integrity; peer: $peer_integrity"
+      }
     }
     if {!$success} {
       puts ""
