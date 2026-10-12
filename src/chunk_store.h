@@ -295,6 +295,13 @@ struct ChunkStore {
   /* Bumped on every full reload-from-disk. Session-level state caches
   ** (catalog, working roots) are only valid while this is unchanged. */
   u32 reloadGen;
+  /* Puts satisfied by an already-stored chunk since the last publish. They
+  ** wrote nothing, so a peer's gc may have swept them if unreferenced. */
+  ProllyHash *aStoredHit;
+  int nStoredHit;
+  int nStoredHitAlloc;
+  u32 storedHitReloadGen;
+  u8 storedHitLost;
   u8 corruptMidStream;    /* Mid-stream WAL damage: reads/commits CORRUPT;
                           ** open still succeeds (stock surfaces on first use) */
   i64 iFailedRootOff;     /* Root of a failed commit the rollback could not
@@ -473,6 +480,7 @@ int chunkStoreCommit(ChunkStore *cs);
 int chunkStoreCommitWithBusyHandler(ChunkStore *cs, int (*xBusy)(void*),
                                     void *pBusyArg);
 int chunkStoreWriteRefused(ChunkStore *cs);
+void chunkStoreClearStoredHits(ChunkStore *cs);
 
 int chunkStoreCopyIntoEmpty(ChunkStore *pSrc, ChunkStore *pDest);
 int chunkStoreCopyIntoEmptyNoCommit(ChunkStore *pSrc, ChunkStore *pDest);

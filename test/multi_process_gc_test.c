@@ -1056,6 +1056,78 @@ static void test_peer_rewrite_then_gc(void){
   remove(path);
 }
 
+/* A put that finds its chunk already stored writes nothing. If that chunk is
+** an unreferenced leftover, a peer's gc may delete it before the writer
+** publishes, and the published ref would dangle. */
+static void test_gc_vs_put_deduped_against_garbage(void){
+  char path[256];
+  char pause[256];
+  char ready[300];
+  char orphan[64];
+  sqlite3 *db = 0;
+  int status = 0;
+  int i;
+  pid_t pid;
+  const char *zCommit =
+      "SELECT dolt_commit('--allow-empty','-m','e','--date','2026-01-01T00:00:00Z')";
+
+  printf("--- Test: gc vs a put deduplicated against garbage ---\n");
+  snprintf(path, sizeof(path), DOLTLITE_TEST_TMPDIR "/mp_gc_dedup_%d.db", (int)getpid());
+  snprintf(pause, sizeof(pause), DOLTLITE_TEST_TMPDIR "/mp_gc_dedup_%d.pause", (int)getpid());
+  snprintf(ready, sizeof(ready), "%s.ready", pause);
+  remove(pause);
+  remove(ready);
+  setup_db_with_rows(path, 5);
+
+  check("gc_dedup_open", sqlite3_open(path, &db)==SQLITE_OK);
+  snprintf(orphan, sizeof(orphan), "%s", queryScalarText(db, zCommit));
+  check("gc_dedup_orphan_commit", strlen(orphan)==40);
+  check("gc_dedup_orphan_unreferenced",
+        execSql(db, "SELECT dolt_reset('--hard','HEAD~1')")==SQLITE_OK);
+  sqlite3_close(db);
+  db = 0;
+
+  {
+    FILE *hold = fopen(pause, "w");
+    if( !hold ){ perror("pause"); _exit(1); }
+    if( fputc('x', hold)==EOF ){ perror("pause"); _exit(1); }
+    fclose(hold);
+  }
+  pid = fork();
+  if( pid==0 ){
+    int rc;
+    setenv("DOLTLITE_PAUSE_BEFORE_BRANCH_ADVANCE", pause, 1);
+    if( sqlite3_open(path, &db)!=SQLITE_OK ) _exit(1);
+    sqlite3_busy_timeout(db, 10000);
+    rc = execSql(db, zCommit);
+    sqlite3_close(db);
+    if( rc==SQLITE_BUSY ) _exit(10);
+    if( rc==SQLITE_OK ) _exit(0);
+    _exit(3);
+  }
+  if( pid<0 ){ perror("fork"); _exit(1); }
+  for( i=0; i<500 && access(ready, F_OK)!=0; i++ ) sqlite3_sleep(20);
+  check("gc_dedup_reached_pause", access(ready, F_OK)==0);
+  check("gc_dedup_gc_open", sqlite3_open(path, &db)==SQLITE_OK);
+  sqlite3_busy_timeout(db, 10000);
+  check("gc_dedup_gc", execSql(db, "SELECT dolt_gc()")==SQLITE_OK);
+  remove(pause);
+  waitpid(pid, &status, 0);
+  check("gc_dedup_commit_busy", WIFEXITED(status) && WEXITSTATUS(status)==10);
+  check("gc_dedup_log_readable",
+        countRowsDiag(db, "SELECT count(*) FROM dolt_log")>0);
+  check("gc_dedup_integrity",
+        strcmp(queryScalarText(db, "PRAGMA integrity_check"), "ok")==0);
+  check("gc_dedup_retry", strcmp(queryScalarText(db, zCommit), orphan)==0);
+  check("gc_dedup_retry_log",
+        countRowsDiag(db, "SELECT count(*) FROM dolt_log")>0);
+  check("gc_dedup_gc_after", execSql(db, "SELECT dolt_gc()")==SQLITE_OK);
+  sqlite3_close(db);
+  remove(path);
+  remove(pause);
+  remove(ready);
+}
+
 int main(){
   printf("=== Multi-Process GC Concurrency Tests ===\n\n");
 
@@ -1073,6 +1145,7 @@ int main(){
   test_concurrent_staging_then_gc();
   test_stale_session_roots_after_gc();
   test_peer_rewrite_then_gc();
+  test_gc_vs_put_deduped_against_garbage();
 
   printf("\n=== Results: %d passed, %d failed out of %d tests ===\n",
     nPass, nFail, nPass+nFail);

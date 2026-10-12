@@ -82,6 +82,11 @@ static void doltliteCommandFunc(
   }else if( !ctx->pVdbe->vcInstalled && AtomicLoad(&db->u1.isInterrupted) ){
     sqlite3_result_error_code(ctx, SQLITE_INTERRUPT);
   }
+  /* A failed command abandons what it built; its stored hits must not
+  ** refuse the next publish. */
+  if( ctx->isError && !pOuter && doltliteGetChunkStore(db) ){
+    chunkStoreClearStoredHits(doltliteGetChunkStore(db));
+  }
   db->pVcCommand = pOuter;
 }
 

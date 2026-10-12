@@ -422,6 +422,9 @@ static int csCommitToFile(ChunkStore *cs, int (*xBusy)(void*), void *pBusyArg){
     return rc;
   }
 
+  rc = csVerifyStoredHits(cs);
+  if( rc!=SQLITE_OK ) goto commit_done;
+
   rc = csCommitPlanPendingIndex(
       cs, batchStart, crashWriteActive,
       aSmallCommittedPending,
@@ -663,7 +666,7 @@ int chunkStoreWriteRefused(ChunkStore *cs){
       || (cs->xWriteGate && cs->xWriteGate(cs->pWriteGateArg));
 }
 
-int chunkStoreCommitWithBusyHandler(
+static int csCommitWithBusyHandler(
   ChunkStore *cs,
   int (*xBusy)(void*),
   void *pBusyArg
@@ -728,6 +731,17 @@ int chunkStoreCommitWithBusyHandler(
     rc = csCommitToFile(cs, xBusy, pBusyArg);
   }
   if( acquiredLock ) chunkStoreUnlock(cs);
+  return rc;
+}
+
+/* Every attempt, refused or not, ends the batch its stored hits belong to. */
+int chunkStoreCommitWithBusyHandler(
+  ChunkStore *cs,
+  int (*xBusy)(void*),
+  void *pBusyArg
+){
+  int rc = csCommitWithBusyHandler(cs, xBusy, pBusyArg);
+  chunkStoreClearStoredHits(cs);
   return rc;
 }
 
