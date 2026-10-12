@@ -34,6 +34,11 @@ static i64 csPendingDrainLimit(void){
   return (i64)CS_PENDING_DRAIN_LIMIT;
 }
 
+int chunkStoreStagingExceedsDrain(ChunkStore *cs){
+  if( !cs ) return 0;
+  return cs->staging.nWriteBuf >= csPendingDrainLimit();
+}
+
 #if CHUNK_STORE_LE_PACKING
 typedef char chunk_index_entry_size_check[
   (sizeof(ChunkIndexEntry) == CHUNK_INDEX_ENTRY_SIZE) ? 1 : -1

@@ -87,6 +87,12 @@ when it cannot fast-forward, conflicts included.
   `refs/heads/<name>:refs/remotes/<remote>/<name>` mapping, is
   `fetch failed: invalid ref spec: '<name>'` and leaves every tracking ref
   where it was.
+- `dolt_fetch` and `dolt_pull` do not hold the local database write lock
+  while chunks download. A concurrent write waits only while a fetched batch
+  is committed and while the tracking refs are installed. That commit reloads
+  refs a peer wrote after this connection's snapshot before it publishes.
+  A download that fails before that install leaves the tracking refs where
+  they were.
 - `dolt_clone` checks out the remote's default branch. That is `main` when
   the remote has it, otherwise `master`, otherwise the branch name that sorts
   first. The first push into an empty remote records its branch. A later push

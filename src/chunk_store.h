@@ -464,6 +464,8 @@ int chunkStoreSourceEnabled(ChunkStore *cs);
 
 int chunkStorePut(ChunkStore *cs, const u8 *pData, int nData,
                   ProllyHash *pHash);
+/* True when the staged write buffer has reached the drain threshold. */
+int chunkStoreStagingExceedsDrain(ChunkStore *cs);
 int chunkStorePutSparse(ChunkStore *cs, const u8 *pPrefix, int nPrefix,
                         i64 nZeroTail, ProllyHash *pHash);
 
@@ -489,6 +491,11 @@ int chunkStoreRefreshIfChanged(ChunkStore *cs, int *pChanged);
 /* Reload refs for a VC write, bypassing the size/HAS_MOVED heuristic
 ** (WAL reuse can hide a peer commit). Outermost lock only. */
 int chunkStoreForceRefresh(ChunkStore *cs);
+
+/* Reload the on-disk store over this handle, including under a pinned
+** snapshot, and keep staged chunks. Uncommitted ref edits are dropped.
+** Outermost lock only. */
+int chunkStoreAdoptDiskState(ChunkStore *cs);
 
 /* Duplicate z with two trailing nuls (SQLITE_OPEN_MAIN_DB xOpen URI term). */
 int chunkStoreDupFilenameDoubleNul(const char *z, char **pzOut);
