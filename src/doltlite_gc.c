@@ -979,16 +979,16 @@ static int gcRewriteFile(
       if( *pReplaced && cs->pPresenceFile ){
         /* The old inode is gone; hold presence on the file now at the path. */
         sqlite3_file *pPresence = 0;
-        char *zPresence = 0;
-        int prc = chunkStoreDupFilenameDoubleNul(
-            chunkFileGetFilename(&cs->file), &zPresence);
+        char *zPresence = chunkStorePresenceName(
+            chunkFileGetFilename(&cs->file));
+        int prc = zPresence ? SQLITE_OK : SQLITE_NOMEM;
         if( prc==SQLITE_OK ){
           prc = chunkStorePresenceOpen(cs, zPresence, &pPresence);
         }
         if( prc==SQLITE_OK ){
           chunkStorePresenceInstall(cs, pPresence, zPresence);
         }else{
-          sqlite3_free(zPresence);
+          sqlite3_free_filename(zPresence);
           chunkStorePresenceRelease(cs);
           cs->presencePending = 1;
         }

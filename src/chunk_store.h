@@ -378,6 +378,7 @@ int chunkStorePresenceAcquire(ChunkStore *cs);
 int chunkStorePresenceExclusive(ChunkStore *cs);
 void chunkStorePresenceDowngrade(ChunkStore *cs);
 void chunkStorePresenceRelease(ChunkStore *cs);
+char *chunkStorePresenceName(const char *zPath);
 int chunkStorePresenceOpen(ChunkStore *cs, const char *zMainDbName,
                            sqlite3_file **ppFile);
 void chunkStorePresenceInstall(ChunkStore *cs, sqlite3_file *pFile,

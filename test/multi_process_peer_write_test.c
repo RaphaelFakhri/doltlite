@@ -283,10 +283,10 @@ static void opSql(const Op *p, char *zOut, int nOut){
 /* Returns whether the operation ran (see opRan). */
 static int runOpSql(const Op *p, sqlite3 *db, const char *zSql, int *pBusy){
   char *zErr = 0;
-  int rc;
+  int rc, ran;
   if( p->bStopTheWorld ) sqlite3_busy_timeout(db, 0);
   rc = sqlite3_exec(db, zSql, 0, 0, &zErr);
-  int ran = opRan(p, rc, zErr);
+  ran = opRan(p, rc, zErr);
   if( pBusy ){
     *pBusy = rc!=SQLITE_OK && !p->bStopTheWorld
           && ((rc&0xff)==SQLITE_BUSY || (zErr && isBusy(zErr)));

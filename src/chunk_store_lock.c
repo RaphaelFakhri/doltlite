@@ -1135,9 +1135,15 @@ void chunkStorePresenceRelease(ChunkStore *cs){
     sqlite3OsCloseFree(cs->pPresenceFile);
     cs->pPresenceFile = 0;
   }
-  sqlite3_free(cs->zPresenceName);
+  sqlite3_free_filename(cs->zPresenceName);
   cs->zPresenceName = 0;
   cs->presenceExcl = 0;
+}
+
+/* SQLITE_OPEN_MAIN_DB names are scanned by sqlite3_uri_parameter, which
+** walks back to four zero bytes; give the name the layout it expects. */
+char *chunkStorePresenceName(const char *zPath){
+  return (char*)sqlite3_create_filename(zPath, "", "", 0, 0);
 }
 
 int chunkStorePresenceAcquire(ChunkStore *cs){
@@ -1145,6 +1151,9 @@ int chunkStorePresenceAcquire(ChunkStore *cs){
   sqlite3_file *pFile = 0;
   char *zName = 0;
   int rc;
+#if SQLITE_OS_WIN
+  cs->presenceUnsupported = 1;
+#endif
   if( cs->isMemory || cs->isBuffer || cs->presenceUnsupported || !zPath
    || strcmp(zPath, ":memory:")==0 || cs->file.pVfs==0 ){
     return SQLITE_OK;
@@ -1153,17 +1162,17 @@ int chunkStorePresenceAcquire(ChunkStore *cs){
     if( !csPresenceStale(cs->pPresenceFile) ) return SQLITE_OK;
     chunkStorePresenceRelease(cs);
   }
-  rc = chunkStoreDupFilenameDoubleNul(zPath, &zName);
-  if( rc!=SQLITE_OK ) return rc;
+  zName = chunkStorePresenceName(zPath);
+  if( !zName ) return SQLITE_NOMEM;
   rc = chunkStorePresenceOpen(cs, zName, &pFile);
   if( rc==SQLITE_NOTFOUND ){
-    sqlite3_free(zName);
+    sqlite3_free_filename(zName);
     cs->presenceUnsupported = 1;
     cs->presencePending = 0;
     return SQLITE_OK;
   }
   if( rc!=SQLITE_OK ){
-    sqlite3_free(zName);
+    sqlite3_free_filename(zName);
     cs->presencePending = 1;
     return rc==SQLITE_BUSY || rc==SQLITE_NOMEM || rc==SQLITE_IOERR_NOMEM
          ? rc : SQLITE_OK;
