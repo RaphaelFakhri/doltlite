@@ -1398,8 +1398,25 @@ static void csNoteStoredHit(ChunkStore *cs, const ProllyHash *h){
   cs->aStoredHit[cs->nStoredHit++] = *h;
 }
 
+/* Every chunk format stores child hashes raw, so a pending chunk that
+** references h carries its bytes. */
+static int csPendingMentions(ChunkStore *cs, const ProllyHash *h){
+  const u8 *p = cs->staging.pWriteBuf;
+  i64 n = cs->staging.nWriteBuf;
+  i64 i;
+  for(i=0; i+PROLLY_HASH_SIZE<=n; i++){
+    const u8 *q = memchr(p+i, h->data[0], (size_t)(n-PROLLY_HASH_SIZE+1-i));
+    if( !q ) return 0;
+    i = q - p;
+    if( memcmp(q, h->data, PROLLY_HASH_SIZE)==0 ) return 1;
+  }
+  return 0;
+}
+
 /* Chunks leave the store only when a gc replaces the file, which forces a
-** full reload; without one since the first hit, every hit still holds. */
+** full reload; without one since the first hit, every hit still holds. A
+** swept hit matters only if this batch references it; one left by abandoned
+** work does not. */
 int csVerifyStoredHits(ChunkStore *cs){
   int i;
   if( cs->nStoredHit==0 && !cs->storedHitLost ) return SQLITE_OK;
@@ -1409,7 +1426,7 @@ int csVerifyStoredHits(ChunkStore *cs){
     int has = 0;
     int rc = chunkStoreHas(cs, &cs->aStoredHit[i], &has);
     if( rc!=SQLITE_OK ) return rc;
-    if( !has ) return SQLITE_BUSY;
+    if( !has && csPendingMentions(cs, &cs->aStoredHit[i]) ) return SQLITE_BUSY;
   }
   return SQLITE_OK;
 }

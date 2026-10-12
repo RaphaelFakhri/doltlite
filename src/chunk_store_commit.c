@@ -627,7 +627,6 @@ static int csCommitToFile(ChunkStore *cs, int (*xBusy)(void*), void *pBusyArg){
   }
   if( publicationLocked ) sqlite3OsUnlock(pPublicationFile, SQLITE_LOCK_NONE);
   csFileUnlock(lockFd, &lockName);
-  chunkStoreClearStoredHits(cs);
   return SQLITE_OK;
 
 commit_done:
@@ -659,7 +658,6 @@ commit_done:
   }
   sqlite3_free(aMergePending);
   sqlite3_free(aMerged);
-  chunkStoreClearStoredHits(cs);
   return rc;
 }
 
@@ -668,7 +666,7 @@ int chunkStoreWriteRefused(ChunkStore *cs){
       || (cs->xWriteGate && cs->xWriteGate(cs->pWriteGateArg));
 }
 
-int chunkStoreCommitWithBusyHandler(
+static int csCommitWithBusyHandler(
   ChunkStore *cs,
   int (*xBusy)(void*),
   void *pBusyArg
@@ -733,6 +731,17 @@ int chunkStoreCommitWithBusyHandler(
     rc = csCommitToFile(cs, xBusy, pBusyArg);
   }
   if( acquiredLock ) chunkStoreUnlock(cs);
+  return rc;
+}
+
+/* Every attempt, refused or not, ends the batch its stored hits belong to. */
+int chunkStoreCommitWithBusyHandler(
+  ChunkStore *cs,
+  int (*xBusy)(void*),
+  void *pBusyArg
+){
+  int rc = csCommitWithBusyHandler(cs, xBusy, pBusyArg);
+  chunkStoreClearStoredHits(cs);
   return rc;
 }
 
