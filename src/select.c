@@ -7644,6 +7644,72 @@ static int fromClauseTermCanBeCoroutine(
   return 1;
 }
 
+#ifdef DOLTLITE_PROLLY
+static void doltliteCorrelatedInToExists(Parse *pParse, Select *p, Expr *pExpr){
+  Select *pSub;
+  SrcItem *pSrc;
+  Expr *pLeft;
+  Expr *pRight;
+  Expr *pWhere;
+  Expr *pEq;
+  sqlite3 *db = pParse->db;
+  int i;
+  int iDb;
+
+  if( pExpr==0 || pParse->nErr || db->mallocFailed ) return;
+  if( ExprHasProperty(pExpr, EP_OuterON|EP_InnerON) ) return;
+  if( pExpr->op==TK_AND ){
+    doltliteCorrelatedInToExists(pParse, p, pExpr->pLeft);
+    doltliteCorrelatedInToExists(pParse, p, pExpr->pRight);
+    return;
+  }
+  if( pExpr->op!=TK_IN || !ExprUseXSelect(pExpr)
+   || !ExprHasProperty(pExpr, EP_VarSelect) ) return;
+  pLeft = pExpr->pLeft;
+  pSub = pExpr->x.pSelect;
+  if( pLeft==0 || pLeft->op!=TK_COLUMN
+   || sqlite3ExprAffinity(pLeft)!=SQLITE_AFF_INTEGER
+   || pSub->pSrc->nSrc!=1 || pSub->pEList->nExpr!=1
+   || pSub->pPrior || pSub->pLimit || pSub->pOrderBy
+   || (pSub->selFlags & (SF_Aggregate|SF_Distinct|SF_Recursive))!=0
+  ) return;
+#ifndef SQLITE_OMIT_WINDOWFUNC
+  if( pSub->pWin ) return;
+#endif
+  pSrc = &pSub->pSrc->a[0];
+  pRight = pSub->pEList->a[0].pExpr;
+  pWhere = pSub->pWhere;
+  if( pSrc->fg.isSubquery || pSrc->fg.isCte
+   || !IsOrdinaryTable(pSrc->pSTab) || !HasRowid(pSrc->pSTab)
+   || pRight->op!=TK_COLUMN || pRight->iColumn!=-1
+   || pRight->iTable!=pSrc->iCursor
+   || pWhere==0 || pWhere->op!=TK_EQ
+   || pWhere->pLeft->op!=TK_COLUMN || pWhere->pRight->op!=TK_COLUMN
+  ) return;
+  iDb = sqlite3SchemaToIndex(db, pSrc->pSTab->pSchema);
+  if( iDb<0 || !db->aDb[iDb].pBt
+   || sqlite3BtreeUsesOrig(db->aDb[iDb].pBt) ) return;
+  for(i=0; i<p->pSrc->nSrc; i++){
+    pSrc = &p->pSrc->a[i];
+    if( pSrc->iCursor==pLeft->iTable ) break;
+  }
+  if( i==p->pSrc->nSrc || !IsOrdinaryTable(pSrc->pSTab) ) return;
+  iDb = sqlite3SchemaToIndex(db, pSrc->pSTab->pSchema);
+  if( iDb<0 || !db->aDb[iDb].pBt
+   || sqlite3BtreeUsesOrig(db->aDb[iDb].pBt) ) return;
+  pEq = sqlite3PExpr(pParse, TK_EQ, sqlite3ExprDup(db, pLeft, 0),
+                    sqlite3ExprDup(db, pRight, 0));
+  if( pEq==0 || db->mallocFailed ){
+    sqlite3ExprDelete(db, pEq);
+    return;
+  }
+  pSub->pWhere = sqlite3ExprAnd(pParse, pSub->pWhere, pEq);
+  sqlite3ExprDelete(db, pExpr->pLeft);
+  pExpr->pLeft = 0;
+  pExpr->op = TK_EXISTS;
+  pParse->bHasExists = 1;
+}
+#endif
 /*
 ** Argument pWhere is the WHERE clause belonging to SELECT statement p. This
 ** function attempts to transform expressions of the form:
@@ -8284,6 +8350,11 @@ int sqlite3Select(
 
   /* If there may be an "EXISTS (SELECT ...)" in the WHERE clause, attempt
   ** to change it into a join.  */
+#ifdef DOLTLITE_PROLLY
+  if( OptimizationEnabled(db,SQLITE_ExistsToJoin) ){
+    doltliteCorrelatedInToExists(pParse, p, p->pWhere);
+  }
+#endif
   if( pParse->bHasExists && OptimizationEnabled(db,SQLITE_ExistsToJoin) ){
     existsToJoin(pParse, p, p->pWhere);
     pTabList = p->pSrc;

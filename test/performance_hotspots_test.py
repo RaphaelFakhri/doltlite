@@ -441,6 +441,9 @@ class HotspotTests(unittest.TestCase):
             if category == 'integer_keys':
                 self.assertIn(bundle['issue'], (3249, 3250))
                 self.assertTrue(bundle['profile']['memory'])
+            elif bundle.get('control'):
+                self.assertEqual(bundle['issue'], 3877)
+                self.assertEqual(bundle['case']['recipe']['layout'], 'late')
             elif bundle['issue'] not in (3352, 3427):
                 self.assertGreaterEqual(bundle['discovery']['minimum_ratio'], 3)
             self.assertNotIn('COMMIT', bundle['case']['sql'])
@@ -451,13 +454,13 @@ class HotspotTests(unittest.TestCase):
         self.assertEqual(counts, {'narrow_rows': 5, 'zero_row_updates': 2,
                                  'in_transaction_mutations': 6, 'integer_keys': 2,
                                  'bulk_writes': 10, 'small_cache': 7, 'after_deletes': 4,
-                                 'index_row_fetches': 2, 'planner_choices': 1, 'pending_edits': 1})
-        self.assertEqual(sql.call_count, 69)
+                                 'index_row_fetches': 2, 'planner_choices': 3, 'pending_edits': 1})
+        self.assertEqual(sql.call_count, 75)
         grouped = {}
         for name, bundle, databases in fixtures:
             previous = grouped.setdefault(bundle['setup_sql'], databases)
             self.assertEqual(databases, previous)
-        self.assertEqual(len(grouped), 31)
+        self.assertEqual(len(grouped), 33)
 
     def test_retained_gate_measures_fixed_batches(self):
         bundle = json.loads((hotspots.TEST_DIR/'performance-hotspot-seeds/narrow_rows_point_pk.json').read_text())
