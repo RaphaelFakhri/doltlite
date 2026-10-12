@@ -41,9 +41,6 @@ int csFileLockOutput(sqlite3_file *pFile);
 int csScanForCommittedRootEx(ChunkStore *cs, int *pEverCommitted,
                              int *pCreationRoot, int *pLaterBatch);
 void csFileUnlock(CsFileLock pFile, char **pzName);
-int csScanForCommittedRootEx(ChunkStore *cs, int *pEverCommitted,
-                             int *pCreationRoot, int *pLaterBatch);
-void csFileUnlock(CsFileLock pFile, char **pzName);
 int csReloadFromDiskPreservingLocalRefs(ChunkStore *cs);
 int csRestoreOrMergeLocalRefs(ChunkStore *cs, SavedRefsState *pSaved,
                               const ProllyHash *pSavedRefsHash,

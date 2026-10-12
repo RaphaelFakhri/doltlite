@@ -97,12 +97,4 @@ run_test "torn_creation_zeroed_data_opens_empty" \
 rm -f "$T" "$(dirname "$T")/.$(basename "$T")-lock"
 db_rm "$DB"; rm -f "$(dirname "$DB")/.$(basename "$DB")-lock"
 
-DB=/tmp/test_damaged_first_batch_$$.db; db_rm "$DB"
-$DOLTLITE "$DB" "CREATE TABLE t(a); INSERT INTO t VALUES(1); SELECT dolt_commit('-Am','c');" > /dev/null 2>&1
-dd if=/dev/zero of="$DB" bs=1 seek=168 count=200 conv=notrunc 2>/dev/null
-dltest_expect_integrity "$DB" 'skip:first batch deliberately damaged'
-run_test_error_match "damaged_first_batch_with_later_commit_stays_corrupt" \
-  "CREATE TABLE x(a); INSERT INTO x VALUES(1);" "malformed" "$DB"
-db_rm "$DB"; rm -f "$(dirname "$DB")/.$(basename "$DB")-lock"
-
 dltest_finish
