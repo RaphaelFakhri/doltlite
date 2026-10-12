@@ -244,13 +244,15 @@ struct CommitBusyCtx {
   sqlite3 *peer;
   int calls;
   int releaseRc;
+  const char *zFinish;
 };
 
 static int releaseCommitPeer(void *arg, int attempt){
   CommitBusyCtx *p = (CommitBusyCtx*)arg;
   (void)attempt;
   p->calls++;
-  p->releaseRc = exec(p->peer, "ROLLBACK");
+  if( p->calls>3 ) return 0;
+  p->releaseRc = exec(p->peer, p->zFinish ? p->zFinish : "ROLLBACK");
   return p->releaseRc==SQLITE_OK;
 }
 
@@ -335,6 +337,68 @@ static int scalarInt(sqlite3 *db, const char *zSql){
   }
   sqlite3_finalize(pStmt);
   return result;
+}
+
+static void test_waited_peer_commit(const char *zPath){
+  static const struct {
+    const char *setup;
+    const char *sql;
+    const char *verify;
+    int nRows;
+    int peerInHead;
+  } cases[] = {
+    {"", "SELECT dolt_checkout('-b','new')",
+     "SELECT active_branch()='new'", 2, 0},
+    {"", "SELECT dolt_checkout('-b','new','HEAD')",
+     "SELECT active_branch()='new'", 2, 0},
+    {"", "SELECT dolt_checkout('feature')",
+     "SELECT active_branch()='feature'", 2, 0},
+    {"", "SELECT dolt_commit('--allow-empty','-m','waited')",
+     "SELECT count(*) FROM dolt_log WHERE message='waited'", 2, 0},
+    {"", "SELECT dolt_commit('-Am','waited')",
+     "SELECT count(*) FROM dolt_log WHERE message='waited'", 2, 1},
+    {"", "SELECT dolt_commit('-am','waited')",
+     "SELECT count(*) FROM dolt_log WHERE message='waited'", 2, 1},
+    {"INSERT INTO t VALUES(2,'staged'); SELECT dolt_add('t')",
+     "SELECT dolt_commit('-m','waited')",
+     "SELECT count(*)=2 FROM dolt_at_t('HEAD')", 3, 0}
+  };
+  int i;
+  for(i=0; i<(int)(sizeof(cases)/sizeof(cases[0])); i++){
+    sqlite3 *db = 0, *peer = 0, *observer = 0;
+    CommitBusyCtx ctx;
+    int rc;
+    remove(zPath);
+    checkRc("waited_peer: open", sqlite3_open(zPath,&db), SQLITE_OK);
+    checkRc("waited_peer: seed", exec(db,seedSql), SQLITE_OK);
+    checkRc("waited_peer: setup", exec(db,cases[i].setup), SQLITE_OK);
+    checkRc("waited_peer: peer open", sqlite3_open(zPath,&peer), SQLITE_OK);
+    checkRc("waited_peer: peer write", exec(peer,
+      "BEGIN IMMEDIATE; INSERT INTO t VALUES(50,'peer')"), SQLITE_OK);
+    memset(&ctx,0,sizeof(ctx));
+    ctx.peer = peer;
+    ctx.zFinish = "COMMIT";
+    sqlite3_busy_handler(db,releaseCommitPeer,&ctx);
+    rc = exec(db,cases[i].sql);
+    checkRc(cases[i].sql,rc,SQLITE_OK);
+    check("waited_peer: callback called",ctx.calls>0);
+    checkRc("waited_peer: peer committed",ctx.releaseRc,SQLITE_OK);
+    sqlite3_busy_handler(db,0,0);
+    if( !sqlite3_get_autocommit(peer) ) exec(peer,"ROLLBACK");
+    check("waited_peer: operation took effect",scalarInt(db,cases[i].verify)==1);
+    check("waited_peer: staged contents",scalarInt(db,
+      "SELECT count(*) FROM dolt_at_t('HEAD') WHERE k=50")==cases[i].peerInHead);
+    check("waited_peer: integrity",scalarInt(db,
+      "SELECT integrity_check='ok' FROM pragma_integrity_check")==1);
+    checkRc("waited_peer: observer open",sqlite3_open(zPath,&observer),SQLITE_OK);
+    check("waited_peer: main rows preserved",rowCount(observer)==cases[i].nRows);
+    check("waited_peer: peer row durable",scalarInt(observer,
+      "SELECT count(*) FROM t WHERE k=50 AND v='peer'")==1);
+    sqlite3_close(observer);
+    sqlite3_close(peer);
+    sqlite3_close(db);
+  }
+  remove(zPath);
 }
 
 static void test_ref_busy_handler(const char *zPath){
@@ -553,6 +617,7 @@ int main(void){
   test_peer_branch_busy_code(zPath);
   test_no_internal_code_escapes(zPath);
   test_commit_busy(zPath);
+  test_waited_peer_commit(zPath);
   test_ref_busy_handler(zPath);
   test_detached_after_gc(zPath);
 
