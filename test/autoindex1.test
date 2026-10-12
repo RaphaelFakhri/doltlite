@@ -187,26 +187,53 @@ do_eqp_test autoindex1-500.1 {
   `--LIST SUBQUERY xxxxxx
      `--SCAN t502
 }
-do_eqp_test autoindex1-501 {
-  SELECT b FROM t501
-   WHERE t501.a IN (SELECT x FROM t502 WHERE y=t501.b);
-} {
+set plan501 {
   QUERY PLAN
   |--SCAN t501
   `--CORRELATED LIST SUBQUERY xxxxxx
      |--BLOOM FILTER ON t502 (y=?)
      `--SEARCH t502 USING AUTOMATIC COVERING INDEX (y=?)
 }
-do_eqp_test autoindex1-502 {
-  SELECT b FROM t501
-   WHERE t501.a=123
-     AND t501.a IN (SELECT x FROM t502 WHERE y=t501.b);
-} {
+set plan502 {
   QUERY PLAN
   |--SEARCH t501 USING INTEGER PRIMARY KEY (rowid=?)
   `--CORRELATED LIST SUBQUERY xxxxxx
      `--SCAN t502
 }
+ifcapable doltlite {
+  set plan501 {
+    QUERY PLAN
+    |--SCAN t501
+    `--SEARCH t502 EXISTS USING INTEGER PRIMARY KEY (rowid=?)
+  }
+  set plan502 {
+    QUERY PLAN
+    |--SEARCH t501 USING INTEGER PRIMARY KEY (rowid=?)
+    `--SEARCH t502 EXISTS USING INTEGER PRIMARY KEY (rowid=?)
+  }
+}
+do_eqp_test autoindex1-501 {
+  SELECT b FROM t501
+   WHERE t501.a IN (SELECT x FROM t502 WHERE y=t501.b);
+} $plan501
+do_eqp_test autoindex1-502 {
+  SELECT b FROM t501
+   WHERE t501.a=123
+     AND t501.a IN (SELECT x FROM t502 WHERE y=t501.b);
+} $plan502
+do_execsql_test autoindex1-503 {
+  INSERT INTO t501 VALUES(1,'match'),(2,'match'),(3,NULL),(4,'orphan'),
+                         (123,'selected'),(124,'selected');
+  INSERT INTO t502 VALUES(1,'match'),(2,'different'),(3,NULL),(6,'orphan'),
+                         (99,'match'),(123,'selected'),(124,'different');
+  SELECT a,b FROM t501
+   WHERE t501.a IN (SELECT x FROM t502 WHERE y=t501.b) ORDER BY a;
+} {1 match 123 selected}
+do_execsql_test autoindex1-504 {
+  SELECT b FROM t501
+   WHERE t501.a=123
+     AND t501.a IN (SELECT x FROM t502 WHERE y=t501.b);
+} {selected}
 
 # The following code checks a performance regression reported on the
 # mailing list on 2010-10-19.  The problem is that the nRowEst field
