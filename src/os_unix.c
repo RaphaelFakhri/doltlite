@@ -334,6 +334,7 @@ static pid_t randomnessPid = 0;
 #define UNIXFILE_NOLOCK      0x80     /* Do no file locking */
 #ifdef DOLTLITE_PROLLY
 # define UNIXFILE_MULTILINK  0x100
+# define UNIXFILE_PRESENCE   0x200
 #endif
 
 /*
@@ -1333,6 +1334,8 @@ struct unixInodeInfo {
 #ifdef DOLTLITE_PROLLY
   unixFile *pGraphLock;
   int graphLockPid;
+  int nPresence;
+  unsigned char bPresenceExcl;
 #endif
   UnixUnusedFd *pUnused;            /* Unused file descriptors to close */
   int nRef;                       /* Number of pointers to this structure */
@@ -1847,6 +1850,70 @@ static int unixGraphLock(unixFile *pFile, int bLock){
 }
 #endif
 
+#ifdef DOLTLITE_PROLLY
+/* Every DoltLite connection holds a shared lock on this byte for as long as
+** it has the database open; GC, which rewrites the file in place of a
+** stop-the-world pause, needs it exclusively. POSIX locks are per process,
+** so connections in one process are counted on the inode. */
+#define DOLTLITE_PRESENCE_BYTE (PENDING_BYTE-2)
+static int unixPresenceFcntl(unixFile *pFile, short eType){
+  struct flock lock;
+  lock.l_whence = SEEK_SET;
+  lock.l_start = DOLTLITE_PRESENCE_BYTE;
+  lock.l_len = 1;
+  lock.l_type = eType;
+  if( osFcntl(pFile->h, F_SETLK, &lock)==0 ) return SQLITE_OK;
+  if( errno==EAGAIN || errno==EACCES ) return SQLITE_BUSY;
+  storeLastErrno(pFile, errno);
+  return eType==F_UNLCK ? SQLITE_IOERR_UNLOCK : SQLITE_IOERR_LOCK;
+}
+
+static int unixPresence(unixFile *pFile, int op){
+  unixInodeInfo *pInode = pFile->pInode;
+  int bHeld = (pFile->ctrlFlags & UNIXFILE_PRESENCE)!=0;
+  int rc = SQLITE_OK;
+  if( !pInode ) return SQLITE_NOTFOUND;
+  sqlite3_mutex_enter(pInode->pLockMutex);
+  switch( op ){
+    case DOLTLITE_PRESENCE_SHARED:
+      if( bHeld ) break;
+      if( pInode->bPresenceExcl ){ rc = SQLITE_BUSY; break; }
+      if( pInode->nPresence==0 ){
+        rc = unixPresenceFcntl(pFile, F_RDLCK);
+        if( rc!=SQLITE_OK ) break;
+        pInode->nLock++;
+      }
+      pInode->nPresence++;
+      pFile->ctrlFlags |= UNIXFILE_PRESENCE;
+      break;
+    case DOLTLITE_PRESENCE_EXCLUSIVE:
+      if( !bHeld || pInode->nPresence!=1 ){ rc = SQLITE_BUSY; break; }
+      if( pInode->bPresenceExcl ) break;
+      rc = unixPresenceFcntl(pFile, F_WRLCK);
+      if( rc==SQLITE_OK ) pInode->bPresenceExcl = 1;
+      break;
+    case DOLTLITE_PRESENCE_DOWNGRADE:
+      if( !bHeld || !pInode->bPresenceExcl ) break;
+      rc = unixPresenceFcntl(pFile, F_RDLCK);
+      if( rc==SQLITE_OK ) pInode->bPresenceExcl = 0;
+      break;
+    default:
+      if( !bHeld ) break;
+      pFile->ctrlFlags &= ~UNIXFILE_PRESENCE;
+      pInode->nPresence--;
+      if( pInode->nPresence==0 ){
+        pInode->bPresenceExcl = 0;
+        rc = unixPresenceFcntl(pFile, F_UNLCK);
+        pInode->nLock--;
+        if( pInode->nLock==0 ) closePendingFds(pFile);
+      }
+      break;
+  }
+  sqlite3_mutex_leave(pInode->pLockMutex);
+  return rc;
+}
+#endif
+
 static int unixFileLock(unixFile *pFile, struct flock *pLock){
   int rc;
   unixInodeInfo *pInode = pFile->pInode;
@@ -2296,7 +2363,7 @@ static int posixUnlock(sqlite3_file *id, int eFileLock, int handleNFSUnlock){
       lock.l_whence = SEEK_SET;
       lock.l_start = lock.l_len = 0L;
 #ifdef DOLTLITE_PROLLY
-      if( pInode->pGraphLock ){
+      if( pInode->pGraphLock || pInode->nPresence>0 ){
         lock.l_start = PENDING_BYTE;
         lock.l_len = SHARED_SIZE + 2;
       }
@@ -2401,6 +2468,7 @@ static int unixClose(sqlite3_file *id){
   verifyDbFile(pFile);
 #ifdef DOLTLITE_PROLLY
   unixGraphLock(pFile, 0);
+  unixPresence(pFile, DOLTLITE_PRESENCE_RELEASE);
 #endif
   unixUnlock(id, NO_LOCK);
   assert( unixFileMutexNotheld(pFile) );
@@ -4219,6 +4287,9 @@ static int unixFileControl(sqlite3_file *id, int op, void *pArg){
       return SQLITE_OK;
     }
 #ifdef DOLTLITE_PROLLY
+    case SQLITE_FCNTL_DOLTLITE_PRESENCE: {
+      return unixPresence(pFile, *(int*)pArg);
+    }
     case SQLITE_FCNTL_DOLTLITE_MODEOF: {
       DoltliteFileMode *pMode = (DoltliteFileMode*)pArg;
       struct stat from, to;

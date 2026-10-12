@@ -65,8 +65,9 @@ For a DoltLite-format main database, the concurrency contract is:
   reads, and closes the database does not prevent a live read transaction from
   upgrading to a writer. An idle connection follows a peer's completed
   `.restore` or backup replacement, while an unrelated file moved over the path
-  remains read-only. An open iterator completes safely while another process
-  runs GC. Readers do not create SQLite `-wal`/`-shm` sidecars.
+  remains read-only. An open reader holds off GC: a peer's `dolt_gc` waits for
+  it to close, so an iterator never sees the file rewritten under it. Readers
+  do not create SQLite `-wal`/`-shm` sidecars.
 - **Multi-process commits are CAS-safe.** A process that races `dolt_commit`
   against a peer either wins a clean tip advance or loses with a busy /
   conflict outcome. The loser's stale tip must not clobber the winner's
@@ -81,10 +82,15 @@ For a DoltLite-format main database, the concurrency contract is:
   plain ref updates. A stale push is rejected instead of replacing a peer's
   ref update. A push also refuses to replace a target branch with uncommitted
   working or staged changes.
-- **GC cooperates with writers.** `dolt_gc` / `VACUUM` may be deferred or
-  report busy while a writer holds the graph lock; after the writer finishes,
-  GC completes without dropping reachable data. Multiproc GC-vs-commit and
-  GC-vs-GC races leave committed rows intact.
+<!-- contract: gc.stop_the_world -->
+- **GC is stop-the-world.** `dolt_gc` and `VACUUM` rewrite the database file,
+  so they run only when no other connection, in any process, has it open.
+  With another connection open they wait up to the busy timeout and then
+  return `SQLITE_BUSY` ("gc requires exclusive access: another connection has
+  the database open"); a connection that opens while GC runs waits for it to
+  finish. Compaction during `PRAGMA wal_checkpoint` likewise skips the rewrite
+  while others are open. `VACUUM INTO` writes a copy and is unaffected. GC that
+  runs keeps every reachable commit.
 - **Conflicts are never durable.** A conflicted merge exists only inside the
   transaction that produced it. Commit is refused while conflicts remain;
   nothing conflicted is left on disk for a later connection to inherit.

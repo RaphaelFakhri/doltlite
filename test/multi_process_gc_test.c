@@ -150,6 +150,8 @@ static void test_gc_vs_gc_parallel(void){
   pid_t pid1, pid2;
   int status1, status2;
 
+  /* GC is stop-the-world: while both are open each may only refuse with a
+  ** busy; once one closes the other can run. Neither may fail otherwise. */
   printf("--- Test 1: Two concurrent dolt_gc() calls ---\n");
   setup_db_with_rows(path, 100);
   make_garbage(path, 30);
@@ -161,7 +163,7 @@ static void test_gc_vs_gc_parallel(void){
     sqlite3_open(path, &db);
     r = callWithRetry(db, "SELECT dolt_gc()", 200);
     sqlite3_close(db);
-    _exit(looks_like_lock_busy(r) ? 1 : 0);
+    _exit(looks_like_error(r) && !looks_like_lock_busy(r) ? 1 : 0);
   }
   pid2 = fork();
   if( pid2==0 ){
@@ -170,7 +172,7 @@ static void test_gc_vs_gc_parallel(void){
     sqlite3_open(path, &db);
     r = callWithRetry(db, "SELECT dolt_gc()", 200);
     sqlite3_close(db);
-    _exit(looks_like_lock_busy(r) ? 1 : 0);
+    _exit(looks_like_error(r) && !looks_like_lock_busy(r) ? 1 : 0);
   }
 
   waitpid(pid1, &status1, 0);
@@ -929,9 +931,9 @@ static void test_concurrent_staging_then_gc(void){
     close(pipefd_stage[0]);
 
     sqlite3_open(path, &db);
-    sqlite3_busy_timeout(db, 30000);
-    r = callWithRetry(db, "SELECT dolt_gc()", 200);
-    check("staging_gc_parent_gc_ok", !looks_like_lock_busy(r));
+    sqlite3_busy_timeout(db, 100);
+    r = queryScalarText(db, "SELECT dolt_gc()");
+    check("staging_gc_refused_while_stager_open", looks_like_lock_busy(r));
     sqlite3_close(db);
 
     mpWrite(pipefd_gc[1], "G");
@@ -945,6 +947,8 @@ static void test_concurrent_staging_then_gc(void){
   {
     sqlite3 *db = 0;
     sqlite3_open(path, &db);
+    check("staging_gc_after_stager_closed",
+          !looks_like_error(queryScalarText(db, "SELECT dolt_gc()")));
     check("staging_gc_final_count",
       strcmp(queryScalarText(db, "SELECT count(*) FROM t"), "52")==0);
     check("staging_gc_staged_a_present",
@@ -986,8 +990,9 @@ static void test_stale_session_roots_after_gc(void){
   sqlite3_busy_timeout(db2, 30000);
   r = queryScalarText(db2, "SELECT dolt_reset('--hard')");
   check("stale_session_reset_ok", !looks_like_error(r));
+  sqlite3_busy_timeout(db2, 100);
   r = queryScalarText(db2, "SELECT dolt_gc()");
-  check("stale_session_db2_gc_ok", !looks_like_error(r));
+  check("stale_session_db2_gc_refused_while_db1_open", looks_like_lock_busy(r));
   check("stale_session_db2_integrity",
         strcmp(queryScalarText(db2, "PRAGMA integrity_check"), "ok")==0);
   sqlite3_close(db2);
@@ -1006,9 +1011,9 @@ static void test_stale_session_roots_after_gc(void){
 }
 
 
-/* A peer rewrites the only branch tip, then compacts. Every tip the idle
-** connection remembers is gone from the new file, which must still be
-** recognised as the same store: fresh reads, and writes still allowed. */
+/* A peer rewrites the only branch tip, then tries to compact. GC is
+** stop-the-world, so it is refused while the idle connection is open; that
+** connection's write still lands, and compaction runs once it closes. */
 static void test_peer_rewrite_then_gc(void){
   static const char *azRewrite[] = {
     "SELECT dolt_commit('-a','--amend','-m','c2 amended')",
@@ -1037,12 +1042,15 @@ static void test_peer_rewrite_then_gc(void){
       sqlite3_busy_timeout(b, 5000);
       execSql(b, "INSERT INTO t VALUES(3,'three')");
       queryScalarText(b, azRewrite[i]);
-      snprintf(name, sizeof(name), "peer_rewrite_%d_compact_%d_ok", i, j);
-      check(name, !looks_like_error(queryScalarText(b, azCompact[j])));
-      sqlite3_close(b);
+      sqlite3_busy_timeout(b, 100);
+      snprintf(name, sizeof(name), "peer_rewrite_%d_compact_%d_refused", i, j);
+      check(name, looks_like_lock_busy(queryScalarText(b, azCompact[j])));
       snprintf(name, sizeof(name), "peer_rewrite_%d_compact_%d_write", i, j);
       check(name, execSql(a, "INSERT INTO t VALUES(4,'mine')")==SQLITE_OK);
       sqlite3_close(a);
+      snprintf(name, sizeof(name), "peer_rewrite_%d_compact_%d_ok", i, j);
+      check(name, !looks_like_error(queryScalarText(b, azCompact[j])));
+      sqlite3_close(b);
       sqlite3_open(path, &c);
       snprintf(name, sizeof(name), "peer_rewrite_%d_compact_%d_rows", i, j);
       check(name, strcmp(queryScalarText(c,

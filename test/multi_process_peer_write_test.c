@@ -170,6 +170,7 @@ struct Op {
   const char *zCheck;
   int bCommitOnly;
   const char *zFails;
+  int bStopTheWorld;
 };
 
 static const Op aOp[] = {
@@ -238,8 +239,11 @@ static const Op aOp[] = {
   { "fetch", 0, "SELECT dolt_fetch('origin')", "peer_write_kept_fetch" },
   { "pull", 0, "SELECT dolt_pull('origin','main')", "peer_write_kept_pull" },
   { "push", 0, "SELECT dolt_push('origin','f2')", "peer_write_kept_push" },
-  { "gc", 0, "SELECT dolt_gc()", "peer_write_kept_gc" },
-  { "vacuum", 0, "VACUUM", "peer_write_kept_vacuum" },
+  /* GC is stop-the-world: with the peer open it can only refuse. */
+  { "gc", 0, "SELECT dolt_gc()", "peer_write_kept_gc", 0,
+    "another connection has the database open", 1 },
+  { "vacuum", 0, "VACUUM", "peer_write_kept_vacuum", 0,
+    "another connection has the database open", 1 },
   { "vacuum_into", 0, "VACUUM INTO '%s'", "peer_write_kept_vacuum_into" },
 };
 
@@ -279,10 +283,12 @@ static void opSql(const Op *p, char *zOut, int nOut){
 /* Returns whether the operation ran (see opRan). */
 static int runOpSql(const Op *p, sqlite3 *db, const char *zSql, int *pBusy){
   char *zErr = 0;
-  int rc = sqlite3_exec(db, zSql, 0, 0, &zErr);
+  int rc;
+  if( p->bStopTheWorld ) sqlite3_busy_timeout(db, 0);
+  rc = sqlite3_exec(db, zSql, 0, 0, &zErr);
   int ran = opRan(p, rc, zErr);
   if( pBusy ){
-    *pBusy = rc!=SQLITE_OK
+    *pBusy = rc!=SQLITE_OK && !p->bStopTheWorld
           && ((rc&0xff)==SQLITE_BUSY || (zErr && isBusy(zErr)));
   }
   sqlite3_free(zErr);

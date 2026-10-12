@@ -25,8 +25,13 @@ foreach maintenance {none gc vacuum} {
         if {$staged} { peer eval {SELECT dolt_add('.')} }
         set peerHead [peer one {SELECT dolt_hashof('HEAD')}]
         set peerStatus [peer eval {SELECT staged,status FROM dolt_status ORDER BY staged}]
-        if {$maintenance eq "gc"} { peer eval {SELECT dolt_gc()} }
-        if {$maintenance eq "vacuum"} { peer eval {VACUUM} }
+        # GC is stop-the-world: db is open, so the peer's maintenance is refused.
+        if {$maintenance ne "none"} {
+          set sql [expr {$maintenance eq "gc" ? "SELECT dolt_gc()" : "VACUUM"}]
+          do_test $prefix.maintenance-refused {
+            catch {peer eval $sql}
+          } 1
+        }
         do_test $prefix.refused {
           list [catch {db eval {SELECT dolt_checkout('b1')}} msg] \
                [sqlite3_errcode db]

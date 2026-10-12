@@ -394,10 +394,13 @@ do_test doltlite_recover_rawformat_3-5.4 {
 do_test doltlite_recover_rawformat_3-5.5 {
   list [execsql {PRAGMA quick_check}] [execsql {PRAGMA quick_check} db2]
 } {ok ok}
+# VACUUM is stop-the-world in DoltLite, so the peer connection closes first.
 do_test doltlite_recover_rawformat_3-5.6 {
+  db2 close
   set r1 [sqlite3_db_config db RESET_DB 1]
   db eval VACUUM
   set r2 [sqlite3_db_config db RESET_DB 0]
+  sqlite3 db2 test.db
   list $r1 $r2 [execsql {
     SELECT count(*) FROM sqlite_master WHERE name LIKE 'rt1%';
     PRAGMA quick_check;

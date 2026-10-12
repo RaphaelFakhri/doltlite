@@ -1090,4 +1090,110 @@ static int csReloadFromDisk(ChunkStore *cs){
 }
 
 
+
+static int csPresenceStale(sqlite3_file *pFile){
+  int bMoved = 0;
+  sqlite3OsFileControlHint(pFile, SQLITE_FCNTL_HAS_MOVED, &bMoved);
+  return bMoved;
+}
+
+static int csPresenceOp(sqlite3_file *pFile, int op){
+  int arg = op;
+  if( !pFile || !pFile->pMethods ) return SQLITE_NOTFOUND;
+  return pFile->pMethods->xFileControl(pFile,
+      SQLITE_FCNTL_DOLTLITE_PRESENCE, &arg);
+}
+
+int chunkStorePresenceOpen(ChunkStore *cs, const char *zMainDbName,
+                           sqlite3_file **ppFile){
+  int flags = (cs->readOnly ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE)
+            | SQLITE_OPEN_MAIN_DB;
+  sqlite3_file *pFile = 0;
+  int rc;
+  *ppFile = 0;
+  rc = sqlite3OsOpenMalloc(cs->file.pVfs, zMainDbName, &pFile, flags, 0);
+  if( rc!=SQLITE_OK ) return rc;
+  rc = csPresenceOp(pFile, DOLTLITE_PRESENCE_SHARED);
+  if( rc!=SQLITE_OK ){
+    sqlite3OsCloseFree(pFile);
+    return rc;
+  }
+  *ppFile = pFile;
+  return SQLITE_OK;
+}
+
+void chunkStorePresenceInstall(ChunkStore *cs, sqlite3_file *pFile,
+                               char *zName){
+  chunkStorePresenceRelease(cs);
+  cs->pPresenceFile = pFile;
+  cs->zPresenceName = zName;
+  cs->presencePending = 0;
+}
+
+void chunkStorePresenceRelease(ChunkStore *cs){
+  if( cs->pPresenceFile ){
+    sqlite3OsCloseFree(cs->pPresenceFile);
+    cs->pPresenceFile = 0;
+  }
+  sqlite3_free(cs->zPresenceName);
+  cs->zPresenceName = 0;
+  cs->presenceExcl = 0;
+}
+
+int chunkStorePresenceAcquire(ChunkStore *cs){
+  const char *zPath = cs->file.zFilename;
+  sqlite3_file *pFile = 0;
+  char *zName = 0;
+  int rc;
+  if( cs->isMemory || cs->isBuffer || cs->presenceUnsupported || !zPath
+   || strcmp(zPath, ":memory:")==0 || cs->file.pVfs==0 ){
+    return SQLITE_OK;
+  }
+  if( cs->pPresenceFile ){
+    if( !csPresenceStale(cs->pPresenceFile) ) return SQLITE_OK;
+    chunkStorePresenceRelease(cs);
+  }
+  rc = chunkStoreDupFilenameDoubleNul(zPath, &zName);
+  if( rc!=SQLITE_OK ) return rc;
+  rc = chunkStorePresenceOpen(cs, zName, &pFile);
+  if( rc==SQLITE_NOTFOUND ){
+    sqlite3_free(zName);
+    cs->presenceUnsupported = 1;
+    cs->presencePending = 0;
+    return SQLITE_OK;
+  }
+  if( rc!=SQLITE_OK ){
+    sqlite3_free(zName);
+    cs->presencePending = 1;
+    return rc==SQLITE_BUSY || rc==SQLITE_NOMEM || rc==SQLITE_IOERR_NOMEM
+         ? rc : SQLITE_OK;
+  }
+  chunkStorePresenceInstall(cs, pFile, zName);
+  return SQLITE_OK;
+}
+
+int chunkStorePresenceExclusive(ChunkStore *cs){
+  int rc;
+  if( cs->presenceUnsupported || cs->isMemory || cs->isBuffer
+   || cs->readOnly ){
+    return SQLITE_OK;
+  }
+  if( !cs->pPresenceFile ){
+    rc = chunkStorePresenceAcquire(cs);
+    if( rc!=SQLITE_OK ) return rc;
+    if( !cs->pPresenceFile ) return cs->presenceUnsupported ? SQLITE_OK
+                                                           : SQLITE_BUSY;
+  }
+  rc = csPresenceOp(cs->pPresenceFile, DOLTLITE_PRESENCE_EXCLUSIVE);
+  if( rc==SQLITE_NOTFOUND ) return SQLITE_OK;
+  if( rc==SQLITE_OK ) cs->presenceExcl = 1;
+  return rc;
+}
+
+void chunkStorePresenceDowngrade(ChunkStore *cs){
+  if( !cs->presenceExcl || !cs->pPresenceFile ) return;
+  (void)csPresenceOp(cs->pPresenceFile, DOLTLITE_PRESENCE_DOWNGRADE);
+  cs->presenceExcl = 0;
+}
+
 #endif

@@ -156,7 +156,17 @@ foreach maintenance {commit gc vacuum} {
   sqlite3_backup B db main src main
   do_test $prefix.step {B step -1} SQLITE_DONE
   set ::backupArmed 0
-  do_test $prefix.raced {set ::backupRace} 0
+  # GC is stop-the-world: with src open the peer's gc/VACUUM is refused,
+  # after its insert and commit have landed.
+  if {$maintenance eq "commit"} {
+    do_test $prefix.raced {set ::backupRace} 0
+  } else {
+    do_test $prefix.raced {
+      list $::backupRace \
+           [string match "*another connection has the database open*" \
+                         $::backupMessage]
+    } {1 1}
+  }
   do_test $prefix.finish {B finish} SQLITE_OK
   do_test $prefix.snapshot {
     db eval {SELECT id,length(v) FROM t; SELECT message FROM dolt_log LIMIT 1}

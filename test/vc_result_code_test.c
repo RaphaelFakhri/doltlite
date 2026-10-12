@@ -225,14 +225,14 @@ static void test_detached_after_gc(const char *zPath){
   check("detached_gc: peer open", sqlite3_open(zPath, &peer)==SQLITE_OK);
   check("detached_gc: peer deletes branch",
         exec(peer, "SELECT dolt_branch('-D','x')")==SQLITE_OK);
-  check("detached_gc: peer gc", exec(peer, "SELECT dolt_gc()")==SQLITE_OK);
+  check("detached_gc: peer gc refused while detached reader is open",
+        exec(peer, "SELECT dolt_gc()")==SQLITE_BUSY);
   sqlite3_close(peer);
 
   for(i=0; azRead[i]; i++){
     char *zErr = 0;
     int rc = sqlite3_exec(db, azRead[i], 0, 0, &zErr);
-    checkRc(azRead[i], rc, SQLITE_CORRUPT);
-    check("detached_gc: says why", zErr!=0 && zErr[0]!=0);
+    checkRc(azRead[i], rc, SQLITE_OK);
     sqlite3_free(zErr);
   }
   sqlite3_close(db);
@@ -425,8 +425,7 @@ static void test_ref_busy_handler(const char *zPath){
      "SELECT v='a' FROM t WHERE k=1"},
     {"", "SELECT dolt_clean()", "SELECT count(*) FROM t"},
     {"CREATE TABLE untracked(id INTEGER PRIMARY KEY)", "SELECT dolt_clean()",
-     "SELECT count(*)=0 FROM sqlite_master WHERE name='untracked'"},
-    {"", "VACUUM", "SELECT count(*) FROM t"}
+     "SELECT count(*)=0 FROM sqlite_master WHERE name='untracked'"}
   };
   int i;
   for(i=0; i<(int)(sizeof(cases)/sizeof(cases[0])); i++){
@@ -445,13 +444,6 @@ static void test_ref_busy_handler(const char *zPath){
     memset(&ctx, 0, sizeof(ctx));
     ctx.peer = peer;
     sqlite3_busy_handler(db, refBusyHandler, &ctx);
-    if( strcmp(cases[i].sql, "VACUUM")==0 ){
-      sqlite3_mutex_enter(sqlite3_db_mutex(db));
-      rc = doltliteGcCompactStore(db, doltliteGetChunkStore(db));
-      sqlite3_mutex_leave(sqlite3_db_mutex(db));
-      checkRc("ref_busy: automatic compaction defers", rc, SQLITE_BUSY);
-      check("ref_busy: automatic compaction does not wait", ctx.calls==0);
-    }
     rc = exec(db, cases[i].sql);
     checkRc(cases[i].sql, rc, SQLITE_BUSY);
     if( ctx.calls==0 ) fprintf(stderr, "No busy callback: %s\n", cases[i].sql);
@@ -503,11 +495,69 @@ static void test_gc_busy(const char *zPath){
   sqlite3_busy_timeout(db, 20);
   rc = sqlite3_exec(db, "SELECT dolt_gc()", 0, 0, &zErr);
   checkRc("gc_busy: peer holds lock", rc, SQLITE_BUSY);
-  check("gc_busy: peer lock names the lock",
-        zErr && strstr(zErr, "failed to acquire lock for gc")!=0);
+  check("gc_busy: peer names the open connection",
+        zErr && strstr(zErr, "another connection has the database open")!=0);
   sqlite3_free(zErr);
   sqlite3_close(db);
   sqlite3_close(peer);
+  remove(zPath);
+}
+
+typedef struct GcPresenceCtx GcPresenceCtx;
+struct GcPresenceCtx {
+  sqlite3 *peer;
+  int calls;
+};
+
+static int gcPresenceCloseHandler(void *pArg, int nPrior){
+  GcPresenceCtx *p = (GcPresenceCtx*)pArg;
+  (void)nPrior;
+  p->calls++;
+  if( p->peer ){
+    sqlite3_close(p->peer);
+    p->peer = 0;
+  }
+  return 1;
+}
+
+/* GC is stop-the-world: any other open connection, even an idle one,
+** refuses it with a retryable busy, and a busy handler can wait it out. */
+static void test_gc_presence(const char *zPath){
+  static const char *azGc[] = { "SELECT dolt_gc()", "VACUUM", 0 };
+  int i;
+  for(i=0; azGc[i]; i++){
+    sqlite3 *db = 0;
+    GcPresenceCtx ctx;
+    char *zErr = 0;
+    int rc;
+    remove(zPath);
+    checkRc("gc_presence: open", sqlite3_open(zPath, &db), SQLITE_OK);
+    checkRc("gc_presence: seed", exec(db, seedSql), SQLITE_OK);
+    memset(&ctx, 0, sizeof(ctx));
+    checkRc("gc_presence: peer open", sqlite3_open(zPath, &ctx.peer),
+            SQLITE_OK);
+    checkRc("gc_presence: peer reads",
+            exec(ctx.peer, "SELECT count(*) FROM t"), SQLITE_OK);
+    sqlite3_mutex_enter(sqlite3_db_mutex(db));
+    rc = doltliteGcCompactStore(db, doltliteGetChunkStore(db));
+    sqlite3_mutex_leave(sqlite3_db_mutex(db));
+    checkRc("gc_presence: automatic compaction defers", rc, SQLITE_BUSY);
+    rc = sqlite3_exec(db, azGc[i], 0, 0, &zErr);
+    checkRc(azGc[i], rc, SQLITE_BUSY);
+    check("gc_presence: says another connection is open",
+          zErr && strstr(zErr, "another connection has the database open")!=0);
+    sqlite3_free(zErr);
+    sqlite3_busy_handler(db, gcPresenceCloseHandler, &ctx);
+    rc = exec(db, azGc[i]);
+    checkRc("gc_presence: waits for the peer to close", rc, SQLITE_OK);
+    check("gc_presence: handler was called", ctx.calls>0);
+    sqlite3_busy_handler(db, 0, 0);
+    check("gc_presence: data intact", rowCount(db)==1);
+    checkRc("gc_presence: write after gc",
+            exec(db, "INSERT INTO t VALUES(7,'x')"), SQLITE_OK);
+    if( ctx.peer ) sqlite3_close(ctx.peer);
+    sqlite3_close(db);
+  }
   remove(zPath);
 }
 
@@ -613,6 +663,7 @@ int main(void){
   test_readonly_code(zPath);
   test_busy_code(zBase, zWork);
   test_gc_busy(zPath);
+  test_gc_presence(zPath);
   test_stale_cherry_pick(zPath);
   test_peer_branch_busy_code(zPath);
   test_no_internal_code_escapes(zPath);

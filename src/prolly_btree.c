@@ -973,6 +973,11 @@ static int prollyBtreeOpenImpl(
   }else{
     rc = chunkStoreOpenDeferred(&pBt->store, pVfs, zOpenFilename, vfsFlags);
   }
+  if( rc==SQLITE_OK ){
+    rc = chunkStorePresenceAcquire(&pBt->store);
+    if( rc==SQLITE_BUSY ) rc = SQLITE_OK;
+    if( rc!=SQLITE_OK ) chunkStoreClose(&pBt->store);
+  }
   if( rc!=SQLITE_OK ){
     releaseOpenStoreFilename(zStoreFilename, bStoreUri);
     sqlite3_free(pBt);

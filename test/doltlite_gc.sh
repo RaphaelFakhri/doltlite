@@ -390,7 +390,8 @@ case "$(uname -s 2>/dev/null || echo unknown)" in
     fi
     ;;
   *)
-    if [ "$gc_replaced" = 1 ]; then
+    # GC is stop-the-world: the open reader makes it refuse.
+    if grep -q 'another connection has the database open' "$GC_OUT"; then
       PASS=$((PASS+1))
     else
       FAIL=$((FAIL+1))

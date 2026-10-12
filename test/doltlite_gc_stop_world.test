@@ -47,14 +47,16 @@ do_test 2.1 {
     INSERT INTO t2 VALUES(2, 'peer');
     SELECT dolt_commit('-A', '-m', 'peer');
   }
-  set gc [execsql {SELECT dolt_gc()}]
-  list [regexp {chunks removed.*chunks kept} $gc] \
+  list [catchsql {SELECT dolt_gc()}] \
        [db2 eval {SELECT count(*) FROM t2}] \
-       [db2 eval {SELECT count(*) FROM dolt_log}] \
        [db2 eval {PRAGMA integrity_check}]
-} {1 2 3 ok}
+} {{1 {gc requires exclusive access: another connection has the database open}} 2 ok}
 
 db2 close
+
+do_test 2.1.1 {
+  regexp {chunks removed.*chunks kept} [execsql {SELECT dolt_gc()}]
+} {1}
 db close
 sqlite3 db test.db
 

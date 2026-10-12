@@ -30,14 +30,16 @@ foreach maintenance {gc vacuum} {
             }
           }
           db1 eval {SELECT dolt_reset('--hard')}
+          # GC is stop-the-world: db1 and db2 are open, so it is refused.
           if {$maintenance eq "gc"} {
-            db eval {SELECT dolt_gc()}
+            set refused [catch {db eval {SELECT dolt_gc()}} msg]
           } else {
-            db eval {VACUUM}
+            set refused [catch {db eval {VACUUM}} msg]
           }
-          set result [db one {PRAGMA integrity_check}]
-          set result
-        } ok
+          list $refused \
+               [string match "*another connection has the database open*" $msg] \
+               [db one {PRAGMA integrity_check}]
+        } {1 1 ok}
         do_test $prefix.reset {
           if {$txn eq "begin"} { db2 eval {BEGIN} }
           if {$txn eq "savepoint"} { db2 eval {SAVEPOINT s} }
@@ -103,10 +105,11 @@ foreach maintenance {gc vacuum} {
       SELECT dolt_commit('-Am','peer');
     }
     if {$maintenance eq "gc"} {
-      peer eval {SELECT dolt_gc()}
+      set refused [catch {peer eval {SELECT dolt_gc()}}]
     } else {
-      peer eval {VACUUM}
+      set refused [catch {peer eval {VACUUM}}]
     }
+    do_test $prefix.maintenance-refused {set refused} 1
     set peerHead [peer one {SELECT dolt_hashof('HEAD')}]
     do_test $prefix.refused {
       set rc [catch {db eval {SELECT dolt_reset('--hard')}} msg]

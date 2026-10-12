@@ -187,6 +187,11 @@ void sqlite3OsFileControlHint(sqlite3_file*,int,void*);
 #define SQLITE_FCNTL_DB_UNCHANGED 0xca093fa0
 #ifdef DOLTLITE_PROLLY
 #define SQLITE_FCNTL_DOLTLITE_MODEOF 0x444c4d01
+#define SQLITE_FCNTL_DOLTLITE_PRESENCE 0x444c5001
+#define DOLTLITE_PRESENCE_RELEASE   0
+#define DOLTLITE_PRESENCE_SHARED    1
+#define DOLTLITE_PRESENCE_EXCLUSIVE 2
+#define DOLTLITE_PRESENCE_DOWNGRADE 3
 typedef struct DoltliteFileMode DoltliteFileMode;
 struct DoltliteFileMode {
   const char *zReference;

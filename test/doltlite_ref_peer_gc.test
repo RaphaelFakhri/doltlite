@@ -1,11 +1,18 @@
 set testdir [file dirname $argv0]
 source $testdir/tester.tcl
 
+# GC is stop-the-world: with this session open the peer's maintenance is
+# refused, so the stale commit is never collected under it.
+proc ref_gc_peer {} {
+  peer eval $::refGcSql
+  set ::refGcRefused [catch {peer eval $::refGcMaint} ::refGcMessage]
+}
+
 proc ref_gc_busy {attempt} {
   incr ::refGcBusyCalls
   if {$attempt>0} {return 1}
   peer eval {ROLLBACK}
-  peer eval $::refGcSql
+  ref_gc_peer
   return 0
 }
 
@@ -43,9 +50,9 @@ foreach maintenance {gc vacuum} {
           }
           append refGcSql "INSERT INTO t VALUES(99,'peer working');"
           if {$maintenance eq "gc"} {
-            append refGcSql {SELECT dolt_gc();}
+            set refGcMaint {SELECT dolt_gc();}
           } else {
-            append refGcSql {VACUUM;}
+            set refGcMaint {VACUUM;}
           }
           set args {}
           switch $target {
@@ -62,17 +69,18 @@ foreach maintenance {gc vacuum} {
             branch {set sql "SELECT dolt_branch('target'$args)"}
             force {set sql "SELECT dolt_branch('-f','target'$args)"}
           }
-          set refused [expr {$target eq "raw"
-            || ($scenario eq "deleted" && $target ne "other")}]
+          set refused [expr {$scenario eq "deleted"
+            && $target ne "other" && $target ne "raw"}]
           set expected $base
           if {$target eq "ancestor" && !$refused} {set expected $initial}
+          if {$target eq "raw"} {set expected $stale}
           if {$refused && $operation ne "force"} {set expected {}}
           set refGcBusyCalls 0
           if {$timing eq "wait"} {
             peer eval {BEGIN IMMEDIATE; INSERT INTO t VALUES(98,'rolled back')}
             db busy ref_gc_busy
           } else {
-            peer eval $refGcSql
+            ref_gc_peer
           }
           do_test $prefix.operation {
             set failed [catch {db eval $sql} message]
@@ -82,9 +90,13 @@ foreach maintenance {gc vacuum} {
           if {$timing eq "wait"} {
             do_test $prefix.waited {set refGcBusyCalls} 1
           }
-          do_test $prefix.collected {
+          do_test $prefix.maintenance-refused {
+            list $refGcRefused [string match \
+              "*another connection has the database open*" $refGcMessage]
+          } {1 1}
+          do_test $prefix.not-collected {
             catch {peer eval "SELECT count(*) FROM dolt_log('$stale')"}
-          } 1
+          } 0
           sqlite3 observer test.db/main
           if {$operation eq "tag"} {
             set query {SELECT tag_hash FROM dolt_tags WHERE tag_name='target'}
@@ -153,8 +165,10 @@ foreach txn {begin savepoint} {
       peer eval {
         UPDATE t SET v='peer';
         SELECT dolt_commit('-am','c3');
-        SELECT dolt_gc();
       }
+      do_test $prefix.gc-refused {
+        catch {peer eval {SELECT dolt_gc()}}
+      } 1
       set args {}
       if {$target eq "head"} {set args ",'HEAD'"}
       if {$target eq "ancestor"} {set args ",'HEAD~1'"}

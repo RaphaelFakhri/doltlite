@@ -856,6 +856,7 @@ int chunkStoreClose(ChunkStore *cs){
   csWriteCleanCloseMarker(cs);
   sqlite3EndBenignMalloc();
   chunkStoreUnlock(cs);
+  chunkStorePresenceRelease(cs);
   csFileUnlock(CS_GRAPH_LOCK(cs), &cs->pGraphLockName);
   CS_GRAPH_LOCK(cs) = CS_FILE_LOCK_INIT;
   if( cs->file.pFile ){

@@ -307,6 +307,13 @@ struct ChunkStore {
                           ** is SQLITE_NOTADB and does not overwrite (misc5-4.1). */
   struct CsFileLockState *pGraphLockFile;
   char *pGraphLockName;        /* owned name for pGraphLockFile (xOpen) */
+  /* Lifetime presence lock (own handle, never swapped): GC is stop-the-world
+  ** and refuses while any other connection holds one. */
+  sqlite3_file *pPresenceFile;
+  char *zPresenceName;
+  u8 presencePending;
+  u8 presenceUnsupported;
+  u8 presenceExcl;
   sqlite3_mutex *pLockMutex;
   int lockDepth;
 
@@ -367,6 +374,14 @@ int chunkStoreSetBranchWorkingSet(ChunkStore *cs, const char *zBranch, const Pro
 void chunkStoreAdoptWorkingSetBasis(ChunkStore *cs, const char *zBranch);
 void chunkStoreFollowWorkingSetBasis(ChunkStore *cs, const char *zBranch);
 void chunkStoreFreeWsBranches(ChunkStore *cs);
+int chunkStorePresenceAcquire(ChunkStore *cs);
+int chunkStorePresenceExclusive(ChunkStore *cs);
+void chunkStorePresenceDowngrade(ChunkStore *cs);
+void chunkStorePresenceRelease(ChunkStore *cs);
+int chunkStorePresenceOpen(ChunkStore *cs, const char *zMainDbName,
+                           sqlite3_file **ppFile);
+void chunkStorePresenceInstall(ChunkStore *cs, sqlite3_file *pFile,
+                               char *zName);
 void chunkStoreReadoptWorkingSetBasis(ChunkStore *cs);
 int chunkStoreWorkingSetMovedFromBasis(ChunkStore *cs, const char *zBranch);
 void chunkStoreGetWorkingSetBasis(ChunkStore *cs, const char *zBranch,

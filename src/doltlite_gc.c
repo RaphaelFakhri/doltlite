@@ -975,6 +975,23 @@ static int gcRewriteFile(
         chunkFileSetHandle(&cs->file, pNewFile);
         chunkFileSetSize(&cs->file, finalSize);
         walStateSetDataSize(&cs->wal, 0);
+      }
+      if( *pReplaced && cs->pPresenceFile ){
+        /* The old inode is gone; hold presence on the file now at the path. */
+        sqlite3_file *pPresence = 0;
+        char *zPresence = 0;
+        int prc = chunkStoreDupFilenameDoubleNul(
+            chunkFileGetFilename(&cs->file), &zPresence);
+        if( prc==SQLITE_OK ){
+          prc = chunkStorePresenceOpen(cs, zPresence, &pPresence);
+        }
+        if( prc==SQLITE_OK ){
+          chunkStorePresenceInstall(cs, pPresence, zPresence);
+        }else{
+          sqlite3_free(zPresence);
+          chunkStorePresenceRelease(cs);
+          cs->presencePending = 1;
+        }
       }else if( pNewFile ){
         sqlite3OsCloseFree(pNewFile);
       }
@@ -1066,6 +1083,11 @@ static int gcLockAndRefresh(sqlite3 *db, ChunkStore *cs, int bBusyRetry){
 
 /* Lock, mark, sweep, verify. On failure pzPhase names the stage; the lock
 ** is released before return on every acquired path. */
+static void gcRelease(ChunkStore *cs){
+  chunkStorePresenceDowngrade(cs);
+  chunkStoreUnlock(cs);
+}
+
 static int gcRun(
   sqlite3 *db,
   ChunkStore *cs,
@@ -1090,9 +1112,24 @@ static int gcRun(
     return SQLITE_BUSY;
   }
 
+  /* GC is stop-the-world: it rewrites the file in place, so no other
+  ** connection may have the database open. Wait for that before taking the
+  ** graph lock, which a peer needs in order to finish and close. */
+  do {
+    rc = chunkStorePresenceExclusive(cs);
+  }while( rc==SQLITE_BUSY && bBusyRetry
+       && sqlite3InvokeBusyHandler(&db->busyHandler) );
+  if( rc!=SQLITE_OK ){
+    *pzPhase = rc==SQLITE_BUSY
+             ? "gc requires exclusive access: another connection has the database open"
+             : "failed to acquire exclusive access for gc";
+    return rc;
+  }
+
   chunkStoreSourceCloseWriter(cs);
   rc = gcLockAndRefresh(db, cs, bBusyRetry);
   if( rc!=SQLITE_OK ){
+    chunkStorePresenceDowngrade(cs);
     *pzPhase = "failed to acquire lock for gc";
     return rc;
   }
@@ -1100,16 +1137,17 @@ static int gcRun(
   ** or one whose file was replaced underneath it, must not. Checked after
   ** refresh, which detects the replacement. */
   if( chunkStoreWriteRefused(cs) ){
-    chunkStoreUnlock(cs);
+    gcRelease(cs);
     *pzPhase = cs->movedReadOnly
              ? "cannot rewrite a database file that was replaced"
              : "attempt to write a readonly database";
     return SQLITE_READONLY;
   }
+
   if( bForceRefresh ){
     rc = chunkStoreForceRefresh(cs);
     if( rc!=SQLITE_OK ){
-      chunkStoreUnlock(cs);
+      gcRelease(cs);
       *pzPhase = "failed to refresh store for gc";
       return rc;
     }
@@ -1120,7 +1158,7 @@ static int gcRun(
     rc = chunkStoreHasExternalChanges(cs, &bChanged);
     if( rc==SQLITE_OK && bChanged ) rc = SQLITE_BUSY;
     if( rc!=SQLITE_OK ){
-      chunkStoreUnlock(cs);
+      gcRelease(cs);
       *pzPhase = "database changed during gc; retry";
       return rc;
     }
@@ -1128,7 +1166,7 @@ static int gcRun(
 
   rc = gcMarksInit(&marked, cs);
   if( rc!=SQLITE_OK ){
-    chunkStoreUnlock(cs);
+    gcRelease(cs);
     *pzPhase = "gc mark phase failed";
     return rc;
   }
@@ -1136,7 +1174,7 @@ static int gcRun(
   rc = gcMarkReachable(db, cs, &marked, &markTrace);
   if( rc!=SQLITE_OK ){
     gcMarksFree(&marked);
-    chunkStoreUnlock(cs);
+    gcRelease(cs);
     if( markTrace.hasMissing && zPhaseBuf && nPhaseBuf>0 ){
       gcFormatMarkFailure(zPhaseBuf, nPhaseBuf, &markTrace);
       *pzPhase = zPhaseBuf;
@@ -1151,7 +1189,7 @@ static int gcRun(
 #ifdef DOLTLITE_PROLLY_CHECK
   if( rc==SQLITE_OK ) gcVerifySessionResolvable(db, cs);
 #endif
-  chunkStoreUnlock(cs);
+  gcRelease(cs);
   if( rc!=SQLITE_OK ) *pzPhase = "gc sweep phase failed";
   return rc;
 }

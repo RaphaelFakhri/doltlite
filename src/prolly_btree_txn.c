@@ -692,6 +692,14 @@ int prollyBtreeBeginTrans(Btree *p, int wrFlag, int *pSchemaVersion){
   }
   pBt->bCommitAbortedUnlocked = 0;
 
+  /* A GC was running when this connection opened; wait it out. */
+  if( pBt->store.presencePending ){
+    do {
+      rc = chunkStorePresenceAcquire(&pBt->store);
+    }while( rc==SQLITE_BUSY && prollyInvokeBusyHandler(pBt) );
+    if( rc!=SQLITE_OK ) return rc;
+  }
+
   if( p->inTrans==TRANS_READ && !wrFlag ){
     /* Another statement still reading keeps this snapshot, as in stock WAL:
     ** a refresh under it would let a write computed from its rows pass the

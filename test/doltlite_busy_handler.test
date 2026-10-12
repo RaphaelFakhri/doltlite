@@ -5,6 +5,8 @@ proc ref_busy {attempt} {
   incr ::busy_calls
   if {!$::release_peer || $attempt>0} {return 1}
   peer eval ROLLBACK
+  # VACUUM is stop-the-world: it proceeds only once the peer is gone.
+  if {$::release_closes} { peer close; set ::peer_closed 1 }
   return 0
 }
 
@@ -25,6 +27,8 @@ foreach {name sql} {
     SELECT dolt_branch('feature');
   }
   sqlite3 peer test.db
+  set peer_closed 0
+  set release_closes [expr {$name eq "vacuum"}]
   peer eval {BEGIN IMMEDIATE; INSERT INTO t VALUES(2);}
   set busy_calls 0
   set release_peer 0
@@ -42,6 +46,6 @@ foreach {name sql} {
   } {0 1}
   db busy {}
   do_execsql_test ref-busy-$name-rows {SELECT * FROM t} {1}
-  peer close
+  if {!$peer_closed} { peer close }
 }
 finish_test
