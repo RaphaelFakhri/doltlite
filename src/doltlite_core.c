@@ -1444,11 +1444,18 @@ int doltliteVcSealEnclosingTxn(sqlite3 *db){
   return SQLITE_OK;
 }
 
-int doltliteVcSealSavepointError(sqlite3 *db){
-  if( db->pSavepoint ){
+/* A SAVEPOINT that opened the txn stands in for Dolt's autocommit, where the
+** statement ends the txn anyway. Inside BEGIN, Dolt keeps the caller's
+** savepoints across ref-only commands and failed commands. */
+int doltliteVcSealAutocommitSavepoint(sqlite3 *db){
+  if( doltliteSavepointIsTopLevelTxn(db) ){
     return doltliteVcSealActiveSavepoints(db);
   }
   return SQLITE_OK;
+}
+
+int doltliteVcSealSavepointError(sqlite3 *db){
+  return doltliteVcSealAutocommitSavepoint(db);
 }
 
 void doltliteVcResultError(sqlite3_context *ctx, sqlite3 *db, const char *zMsg){

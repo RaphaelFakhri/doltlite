@@ -30,7 +30,7 @@ int branchNameEmpty(const char *zName){
 static void branchSealSavepointsOnError(sqlite3_context *ctx, int bHadSavepoint){
   if( bHadSavepoint ){
     sqlite3 *db = sqlite3_context_db_handle(ctx);
-    (void)doltliteVcSealActiveSavepoints(db);
+    (void)doltliteVcSealSavepointError(db);
   }
 }
 
