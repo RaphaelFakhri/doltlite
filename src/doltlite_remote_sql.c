@@ -1511,6 +1511,23 @@ static void doltPullParsed(
   }
 
   if( prollyHashCompare(&localCommit, &trackingCommit)==0 ){
+    /* Nothing new to merge. A dirty working set is still refused.
+    ** A branch that is ahead of the remote is not this case: that pull
+    ** returns 0 and keeps the uncommitted edits. An ignored untracked
+    ** table is not a change. */
+    char *zErr = 0;
+    rc = doltliteSeparateIgnoredChanges(db, &dirty, &ignoredCat, &zErr);
+    if( rc!=SQLITE_OK ){
+      remoteSqlRestoreAndReport(ctx, db, cs, &savedState, rc, zErr);
+      sqlite3_free(zErr);
+      return;
+    }
+    sqlite3_free(zErr);
+    if( dirty ){
+      remoteSqlRestoreAndReport(ctx, db, cs, &savedState, SQLITE_ERROR,
+                                "cannot pull with uncommitted changes");
+      return;
+    }
     doltliteNoteSessionMissedDiskTip(db);
     remoteSqlClearAndSucceed(ctx, &savedState);
     return;
@@ -1544,10 +1561,10 @@ static void doltPullParsed(
           "materialize the store first");
         return;
       }
-      /* A fast-forward already refuses a dirty working set below. Merge
-      ** would keep unconflicted local edits and commit them, so refuse
-      ** here too, including --no-ff and --squash. An ignored table is
-      ** not one of those edits; merge puts it back. */
+      /* A fast-forward refuses a dirty working set below. Merge would
+      ** keep unconflicted local edits and commit them, so refuse here
+      ** too, including --no-ff and --squash. An ignored table is not
+      ** one of those edits; merge puts it back. */
       {
         char *zErr = 0;
         rc = doltliteSeparateIgnoredChanges(db, &dirty, &ignoredCat, &zErr);
