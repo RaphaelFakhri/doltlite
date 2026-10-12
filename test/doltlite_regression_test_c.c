@@ -10168,6 +10168,44 @@ static void run_publication_handoff(const char *zPath){
   }
 }
 
+static int publicationTimeoutBusy(void *pArg, int n){
+  int *pn = (int*)pArg;
+  (void)n;
+  if( *pn>=80 ) return 0;
+  (*pn)++;
+  return 1;
+}
+
+/* Exclusive lock stays busy past the publication spin. The connection
+** busy handler has to keep retrying or the commit is lost. */
+static void run_commit_publication_timeout(void){
+  sqlite3 *db = 0;
+  sqlite3 *fresh = 0;
+  char dbpath[512];
+  int nBusy = 0;
+  int rc;
+  check("publication_timeout_register", registerFailVfs()==SQLITE_OK);
+  make_dbpath(dbpath, sizeof(dbpath), "commit_publication_timeout");
+  removeDbFiles(dbpath);
+  check("publication_timeout_open", open_fail_db(dbpath, &db)==SQLITE_OK);
+  check("publication_timeout_seed", execSql(db,
+    "CREATE TABLE t(k INTEGER PRIMARY KEY); INSERT INTO t VALUES(1);"
+    "SELECT dolt_commit('-Am','base')")==SQLITE_OK);
+  check("publication_timeout_handler",
+        sqlite3_busy_handler(db, publicationTimeoutBusy, &nBusy)==SQLITE_OK);
+  gFailExclusiveBusy = 180;
+  rc = execSqlSilent(db, "INSERT INTO t VALUES(2)");
+  gFailExclusiveBusy = 0;
+  check("publication_timeout_waits", nBusy>0);
+  check("publication_timeout_commits", rc==SQLITE_OK);
+  check("publication_timeout_fresh_open", open_db(dbpath, &fresh)==SQLITE_OK);
+  check("publication_timeout_rows",
+        queryInt64(fresh, "SELECT count(*) FROM t")==2);
+  sqlite3_close(fresh);
+  sqlite3_close(db);
+  removeDbFiles(dbpath);
+}
+
 static void run_commit_publication(void){
   char dbpath[512];
   int fail;
@@ -17779,6 +17817,8 @@ static const RegressionCase aCases[] = {
   { "hard_reset_failure_restores_memory_state", "Hard Reset Failure Restores Memory State Test", run_hard_reset_failure_restores_memory_state },
   { "hard_reset_command_failure_preserves_durable_state", "Hard Reset Command Failure Preserves Durable State Test", run_hard_reset_command_failure_preserves_durable_state },
   { "commit_publication", "Commit Publication Test", run_commit_publication },
+  { "commit_publication_timeout", "Commit Publication Timeout Test",
+    run_commit_publication_timeout },
   { "vc_interrupt", "VC Interrupt Test", run_vc_interrupt },
   { "vc_late_io_failure", "VC Late IO Failure Test", run_vc_late_io_failure },
   { "serialize_while_peer_writes", "Serialize While Peer Writes Test",

@@ -24,8 +24,9 @@ For a DoltLite-format main database, the concurrency contract is:
 - **A read-only connection never blocks a writer.** Reads, `dolt_status`
   included, take no exclusive lock on a connection opened read-only, so
   polling status from a second process cannot make a writer's `INSERT` or
-  `dolt_commit` fail. Such a connection still sees a peer's uncommitted and
-  committed work.
+  `dolt_commit` fail. A writer's `COMMIT` waits for that reader, up to the
+  writer's busy timeout, before it publishes. Such a connection still sees a
+  peer's uncommitted and committed work.
 <!-- contract: writer.vacuum_into_destination -->
 - **`VACUUM INTO` reserves its destination.** The destination is held for the
   whole operation, so a peer cannot commit a database at that path between the
