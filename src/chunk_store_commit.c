@@ -179,7 +179,6 @@ static int csCommitResolveAppendPoint(
 ){
   int rc = SQLITE_OK;
   i64 fileSize = 0;
-  i64 physFileSize = -1;
   int sectorSize = 1;
 
   if( cs->file.pFile == 0 ){
@@ -204,7 +203,6 @@ static int csCommitResolveAppendPoint(
   }else{
     rc = cs->file.pFile->pMethods->xFileSize(cs->file.pFile, &fileSize);
     if( rc != SQLITE_OK ) return rc;
-    physFileSize = fileSize;
   }
 
   if( hadFile && !lockHeld ){
@@ -235,13 +233,8 @@ static int csCommitResolveAppendPoint(
     }
   }
 #endif
-  /* Append at logical EOF; truncate crash garbage past it. */
   if( hadFile && cs->file.iFileSize > fileSize ){
     fileSize = cs->file.iFileSize;
-  }
-  if( physFileSize > fileSize
-   && sqlite3OsTruncate(cs->file.pFile, fileSize)==SQLITE_OK ){
-    cs->iFailedTailEnd = 0;
   }
 
   /* Without powersafe overwrite, start each batch on a fresh sector. */
@@ -462,6 +455,16 @@ static int csCommitToFile(ChunkStore *cs, int (*xBusy)(void*), void *pBusyArg){
     }
     publicationLocked = 1;
     pPublicationFile = cs->file.pFile;
+  }
+  {
+    i64 physFileSize = 0;
+    rc = sqlite3OsFileSize(cs->file.pFile, &physFileSize);
+    if( rc!=SQLITE_OK ) goto commit_done;
+    if( physFileSize>fileSize ){
+      rc = sqlite3OsTruncate(cs->file.pFile, fileSize);
+      if( rc!=SQLITE_OK ) goto commit_done;
+      cs->iFailedTailEnd = 0;
+    }
   }
 
 #ifdef SQLITE_TEST
@@ -757,7 +760,7 @@ void chunkStoreRollback(ChunkStore *cs){
       }
       if( cs->file.pFile ){
         sqlite3BeginBenignMalloc();
-        (void)sqlite3OsTruncate(cs->file.pFile, cs->file.iFileSize);
+        (void)csReclaimTail(cs);
         sqlite3EndBenignMalloc();
       }
       cs->staging.iUncommittedStart = 0;

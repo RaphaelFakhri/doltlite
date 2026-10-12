@@ -48,6 +48,32 @@ int csFileLockPromote(sqlite3_file *pFile){
   return sqlite3OsLock(pFile, SQLITE_LOCK_RESERVED);
 }
 
+int csReclaimTail(ChunkStore *cs){
+  i64 size = 0;
+  int rc, rc2, retries = 0;
+  PROLLY_ASSERT_STORE_GRAPH_LOCKED(cs);
+  if( !cs->file.pFile ) return SQLITE_OK;
+  rc = sqlite3OsFileSize(cs->file.pFile, &size);
+  if( rc!=SQLITE_OK || size<=cs->file.iFileSize ) return rc;
+  if( !cs->isBuffer ){
+    rc = sqlite3OsLock(cs->file.pFile, SQLITE_LOCK_SHARED);
+    if( rc==SQLITE_OK ) rc = sqlite3OsLock(cs->file.pFile, SQLITE_LOCK_RESERVED);
+    if( rc==SQLITE_OK ){
+      do {
+        rc = sqlite3OsLock(cs->file.pFile, SQLITE_LOCK_EXCLUSIVE);
+        if( rc!=SQLITE_BUSY || retries++>=100 ) break;
+        sqlite3_sleep(1);
+      }while( rc==SQLITE_BUSY );
+    }
+  }
+  if( rc==SQLITE_OK ) rc = sqlite3OsTruncate(cs->file.pFile, cs->file.iFileSize);
+  if( !cs->isBuffer ){
+    rc2 = sqlite3OsUnlock(cs->file.pFile, SQLITE_LOCK_NONE);
+    if( rc==SQLITE_OK ) rc = rc2;
+  }
+  return rc;
+}
+
 #if SQLITE_OS_UNIX
 static void csGuardUnlock(sqlite3_file *pFile){
   int bLock = 0;
@@ -1072,17 +1098,10 @@ static int csReloadFromDisk(ChunkStore *cs){
   chunkStoreClose(&tmp);
   cs->reloadGen++;
 
-  /* Torn-tail recovery rewinds logical EOF in memory; crash garbage past
-  ** it retrips the size check. Under the graph lock, truncate it. Failures
-  ** are silent, so allocations are benign. */
   if( !cs->readOnly && !cs->corruptMidStream
    && cs->lockDepth>0 ){
-    i64 physSize = 0;
     sqlite3BeginBenignMalloc();
-    if( sqlite3OsFileSize(cs->file.pFile, &physSize)==SQLITE_OK
-     && physSize > cs->file.iFileSize ){
-      (void)sqlite3OsTruncate(cs->file.pFile, cs->file.iFileSize);
-    }
+    (void)csReclaimTail(cs);
     sqlite3EndBenignMalloc();
   }
 

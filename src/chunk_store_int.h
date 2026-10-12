@@ -36,6 +36,7 @@ int csFileLock(sqlite3_vfs *pVfs, const char *path, int openFlags,
                CsFileLock *ppFile, char **pzName);
 int csReadLock(ChunkStore *cs, CsReadLock *pLock);
 int csReadUnlock(ChunkStore *cs, CsReadLock *pLock);
+int csReclaimTail(ChunkStore *cs);
 int csFileLockPromote(sqlite3_file *pFile);
 int csFileLockOutput(sqlite3_file *pFile);
 int csScanForCommittedRootEx(ChunkStore *cs, int *pEverCommitted,
