@@ -2125,6 +2125,28 @@ static void test_unindexed_damaged_wal_start(void){
   removeDb(path);
 }
 
+static void test_zeroed_first_batch_with_later_commits(void){
+  const char *path = DOLTLITE_TEST_TMPDIR "/test_corr_zeroed_first_batch.db";
+  unsigned char zeros[200];
+  ChunkStore cs;
+  off_t walOffset;
+  int rc;
+  check("zeroed_first_create", create_good_db(path)==0);
+  walOffset = (off_t)read_i64_le_at(path, 84);
+  check("zeroed_first_has_no_index", read_i64_le_at(path, 40)==0);
+  memset(zeros, 0, sizeof(zeros));
+  check("zeroed_first_damage", corrupt_bytes(path, walOffset,
+    zeros, sizeof(zeros))==0);
+  rc = chunkStoreOpen(&cs, sqlite3_vfs_find(0), path,
+    SQLITE_OPEN_READWRITE | SQLITE_OPEN_MAIN_DB);
+  /* Later commits prove the first batch was written; a torn-creation
+  ** recovery here would silently serve an empty store. */
+  check("zeroed_first_not_empty",
+        rc!=SQLITE_OK || cs.corruptMidStream || cs.wal.recoveredMidStream);
+  if( rc==SQLITE_OK ) chunkStoreClose(&cs);
+  removeDb(path);
+}
+
 int main(void){
   printf("=== DoltLite Corruption Detection Tests ===\n\n");
 
@@ -2164,6 +2186,7 @@ int main(void){
   test_unsealed_wal_root_keeps_prior_commit();
   test_compacted_torn_tail();
   test_unindexed_damaged_wal_start();
+  test_zeroed_first_batch_with_later_commits();
 
   printf("\n=== Results: %d passed, %d failed out of %d tests ===\n",
     nPass, nFail, nPass+nFail);

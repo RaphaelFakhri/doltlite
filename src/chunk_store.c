@@ -368,12 +368,18 @@ static int csReadManifest(ChunkStore *cs){
 /* Distinguish crashed first-commit from a damaged committed DB. */
 static int csScanForCommittedRoot(ChunkStore *cs, int *pEverCommitted,
                                   int *pCreationRoot){
+  return csScanForCommittedRootEx(cs, pEverCommitted, pCreationRoot, 0);
+}
+
+int csScanForCommittedRootEx(ChunkStore *cs, int *pEverCommitted,
+                             int *pCreationRoot, int *pLaterBatch){
   u8 *buf;
   i64 fileSize = 0;
   i64 q = CHUNK_MANIFEST_SIZE;
   int rc = sqlite3OsFileSize(cs->file.pFile, &fileSize);
   *pEverCommitted = 0;
   *pCreationRoot = 0;
+  if( pLaterBatch ) *pLaterBatch = 0;
   if( rc != SQLITE_OK ) return rc;
   buf = sqlite3_malloc(CS_SCAN_WINDOW);
   if( !buf ) return SQLITE_NOMEM;
@@ -399,6 +405,10 @@ static int csScanForCommittedRoot(ChunkStore *cs, int *pEverCommitted,
           if( CS_READ_I64(m + CS_MANIFEST_DURABLE_TO_OFF) > CHUNK_MANIFEST_SIZE ){
             *pEverCommitted = 1;
             goto scan_done;
+          }
+          if( pLaterBatch
+           && CS_READ_I64(m + CS_MANIFEST_BATCH_START_OFF) > CHUNK_MANIFEST_SIZE ){
+            *pLaterBatch = 1;
           }
           *pCreationRoot = 1;
         }

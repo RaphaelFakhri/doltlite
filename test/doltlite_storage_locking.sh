@@ -74,4 +74,27 @@ run_test "s6_healthy_reopen_value" "SELECT v FROM t WHERE id=2;" "b" "$DB"
 
 db_rm "$DB"
 
+DB=/tmp/test_torn_creation_$$.db; db_rm "$DB"
+$DOLTLITE "$DB" "SELECT 1;" > /dev/null 2>&1
+FULL=$(wc -c < "$DB" | tr -d ' ')
+# The closed file ends with a clean-close root (169 bytes) written after the
+# first fsync; a torn creation never reached it.
+PRECLOSE=$((FULL - 169))
+for cut in 200 400 600 $((PRECLOSE - 100)); do
+  T="$DB.cut$cut"; head -c "$cut" "$DB" > "$T"
+  run_test "torn_creation_cut_${cut}_opens_empty" \
+    "CREATE TABLE t(a); INSERT INTO t VALUES(1); PRAGMA integrity_check; SELECT count(*) FROM t;" \
+    "ok
+1" "$T"
+  rm -f "$T" "$(dirname "$T")/.$(basename "$T")-lock"
+done
+T="$DB.zero"; head -c "$PRECLOSE" "$DB" > "$T"
+dd if=/dev/zero of="$T" bs=1 seek=168 count=$((PRECLOSE - 169 - 168)) conv=notrunc 2>/dev/null
+run_test "torn_creation_zeroed_data_opens_empty" \
+  "CREATE TABLE t(a); INSERT INTO t VALUES(1); PRAGMA integrity_check; SELECT count(*) FROM t;" \
+  "ok
+1" "$T"
+rm -f "$T" "$(dirname "$T")/.$(basename "$T")-lock"
+db_rm "$DB"; rm -f "$(dirname "$DB")/.$(basename "$DB")-lock"
+
 dltest_finish
