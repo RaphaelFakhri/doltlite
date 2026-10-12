@@ -2489,4 +2489,37 @@ SQL
   done
 done
 
+
+for keymode in integer text; do
+  key='id INTEGER PRIMARY KEY'
+  if [ "$keymode" = text ]; then key='id VARCHAR(32) PRIMARY KEY'; fi
+  for operation in merge cherry_pick; do
+    for direction in forward reverse; do
+      tag="balanced_drop_rename_default_${keymode}_${operation}_${direction}"
+      DB="$TMPROOT/$tag.db"
+      edits="ALTER TABLE t DROP COLUMN gone; UPDATE t SET b='ours' WHERE id=1;"
+      layout="ALTER TABLE t DROP COLUMN gone; ALTER TABLE t RENAME COLUMN a TO renamed; ALTER TABLE t ADD COLUMN extra INTEGER NOT NULL DEFAULT 9; INSERT INTO t(id,b,c) VALUES(3,'B3','C3');"
+      main_sql="$edits"; feat_sql="$layout"
+      if [ "$direction" = reverse ]; then main_sql="$layout"; feat_sql="$edits"; fi
+      dl_setup "$DB" "$tag" <<SQL
+CREATE TABLE t($key, a TEXT DEFAULT 'd', gone TEXT, b TEXT, c TEXT DEFAULT 'e');
+INSERT INTO t(id,gone,b,c) VALUES(1,'G1','B1','C1'),(2,'G2','B2','C2');
+SELECT dolt_commit('-Am','base');
+SELECT dolt_branch('feat');
+$main_sql
+SELECT dolt_commit('-Am','main');
+SELECT dolt_checkout('feat');
+$feat_sql
+SELECT dolt_commit('-Am','feat');
+SELECT dolt_checkout('main');
+SQL
+      run_dual_command_outcome "${tag}_apply" "$DB" \
+        "SELECT dolt_${operation}('feat');" "CALL dolt_${operation}('feat');" ok
+      query="SELECT concat(id,'|',renamed,'|',b,'|',c,'|',extra) FROM t ORDER BY id;"
+      expect_dual_value "${tag}_rows" "$DB" \
+        $'1|d|ours|C1|9\n2|d|B2|C2|9\n3|d|B3|C3|9' "$query" "$query"
+    done
+  done
+done
+
 vc_oracle_finish

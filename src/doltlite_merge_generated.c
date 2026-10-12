@@ -185,16 +185,34 @@ int mergeRowPolicy(
       ? findSchemaEntry(c->aOursSchema, c->nOursSchema, zName)
       : findSchemaEntry(c->aTheirsSchema, c->nTheirsSchema, zName);
   ParsedColumn *aAnc = 0, *aSelected = 0, *aOther = 0;
+  ParsedColumn *aOriginal = 0;
+  SchemaEntry *aOriginalSchema = 0, *pOriginal;
+  int nOriginalSchema = 0, nOriginal = 0;
   int nAnc = 0, nSelected = 0, nOther = 0;
   int i, j, k, rc;
 
   if( !pAnc || !pAnc->zSql || !pSelected || !pTab ) return SQLITE_OK;
+  rc = loadSchemaFromCatalog(c->db, doltliteGetChunkStore(c->db),
+      doltliteGetCache(c->db), c->pCatOurs, &aOriginalSchema, &nOriginalSchema);
+  if( rc!=SQLITE_OK ) return rc;
+  pOriginal = findSchemaEntry(aOriginalSchema, nOriginalSchema, zName);
+  if( !pOriginal ){
+    SchemaEntry *pOur = findSchemaEntry(c->aOursSchema, c->nOursSchema, zName);
+    if( pOur ) pOriginal = findSchemaEntryByRootpage(
+        aOriginalSchema, nOriginalSchema, pOur->iRootpage);
+  }
+  if( pOriginal && pOriginal->zSql ){
+    rc = parseColumns(pOriginal->zSql, &aOriginal, &nOriginal);
+  }
+  freeSchemaEntries(aOriginalSchema, nOriginalSchema);
+  if( rc!=SQLITE_OK ) return rc;
   pPolicy->bSchemaIsTheirs = useTheirs;
   rc = parseColumns(pAnc->zSql, &aAnc, &nAnc);
-  if( rc!=SQLITE_OK ) return rc;
+  if( rc!=SQLITE_OK ){ freeColumns(aOriginal, nOriginal); return rc; }
   rc = parseColumns(pSelected->zSql, &aSelected, &nSelected);
   if( rc!=SQLITE_OK ){
     freeColumns(aAnc, nAnc);
+    freeColumns(aOriginal, nOriginal);
     return rc;
   }
   if( pOther && pOther->zSql ){
@@ -202,6 +220,7 @@ int mergeRowPolicy(
     if( rc!=SQLITE_OK ){
       freeColumns(aAnc, nAnc);
       freeColumns(aSelected, nSelected);
+      freeColumns(aOriginal, nOriginal);
       return rc;
     }
   }
@@ -213,6 +232,7 @@ int mergeRowPolicy(
     freeColumns(aAnc, nAnc);
     freeColumns(aSelected, nSelected);
     freeColumns(aOther, nOther);
+    freeColumns(aOriginal, nOriginal);
     return SQLITE_NOMEM;
   }
   for(i=0; i<pTab->nCol; i++){
@@ -231,7 +251,8 @@ int mergeRowPolicy(
     ** value, including an omitted field or an encoded NULL, is a change. */
     if( iAnc<0 && aOther
      && parsedColumnIndexByName(aSelected, nSelected, zCol)>=0
-     && parsedColumnIndexByName(aOther, nOther, zCol)>=0 ){
+     && parsedColumnIndexByName(aOther, nOther, zCol)>=0
+     && parsedColumnIndexByName(aOriginal, nOriginal, zCol)>=0 ){
       pPolicy->aiDualAddFields[pPolicy->nDualAddFields++] =
           HasRowid(pTab) ? sqlite3TableColumnToStorage(pTab, i)
           : sqlite3TableColumnToIndex(sqlite3PrimaryKeyIndex(pTab), i);
@@ -256,6 +277,7 @@ int mergeRowPolicy(
   freeColumns(aAnc, nAnc);
   freeColumns(aSelected, nSelected);
   freeColumns(aOther, nOther);
+  freeColumns(aOriginal, nOriginal);
   return SQLITE_OK;
 }
 
