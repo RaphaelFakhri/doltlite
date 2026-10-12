@@ -1115,6 +1115,17 @@ static int commitPhaseTwoFailRestore(
   return commitRc;
 }
 
+/* Publish staged chunks. The connection busy handler covers the
+** publication lock, so a reader still holding the shared lock waits
+** out inside the busy timeout. Sequences end with the batch. */
+static int commitChunkStore(BtShared *pBt){
+  int rc;
+  rc = chunkStoreCommitWithBusyHandler(
+      &pBt->store, prollyInvokeBusyHandler, pBt);
+  csDropTxnSequences(&pBt->store);
+  return rc;
+}
+
 static SQLITE_NOINLINE int commitPhaseTwoWrite(Btree *p, BtShared *pBt){
   int rc = SQLITE_OK;
   u8 *catData = 0;
@@ -1172,7 +1183,7 @@ static SQLITE_NOINLINE int commitPhaseTwoWrite(Btree *p, BtShared *pBt){
     return SQLITE_OK;
   }
 
-  rc = chunkStoreCommit(&pBt->store);
+  rc = commitChunkStore(pBt);
   if( rc!=SQLITE_OK ){
     return commitPhaseTwoFailRestore(
         p, pBt, rc, &catData, &reloadBtree, &bHaveReloadCatalog);
@@ -1508,7 +1519,7 @@ int prollyBtreeRollback(Btree *p, int tripCode, int writeOnly){
           rc = chunkStoreSerializeRefs(&pBt->store);
         }
         if( rc==SQLITE_OK ){
-          rc = chunkStoreCommit(&pBt->store);
+          rc = commitChunkStore(pBt);
         }
       }
       sqlite3_free(catData);
@@ -1630,7 +1641,7 @@ static int persistRolledBackSessionState(Btree *p, BtShared *pBt){
   if( rc!=SQLITE_OK ) return rc;
   rc = chunkStoreSerializeRefs(&pBt->store);
   if( rc!=SQLITE_OK ) return rc;
-  return chunkStoreCommit(&pBt->store);
+  return commitChunkStore(pBt);
 }
 
 static void btreeDiscardAllSavepoints(Btree *p){
