@@ -105,6 +105,52 @@ remote_flow "ff_log_count" "$FF_SEED" "$FF_ADVANCE" "$FF_PULL" \
   "SELECT 'R|'||count(*) FROM dolt_log;" \
   "SELECT CONCAT('R|',count(*)) FROM dolt_log;"
 
+echo "--- fast-forward-only pull ancestry ---"
+LOCAL_AHEAD="
+INSERT INTO t VALUES (100,'local');
+SELECT dolt_commit('-A','-m','local ahead');
+"
+FF_STATE_DL="
+SELECT 'R|row|'||id||'|'||v FROM t;
+SELECT 'R|log|'||message FROM dolt_log;
+SELECT 'R|status|'||table_name||'|'||staged||'|'||status FROM dolt_status;
+SELECT 'R|tracking|'||latest_commit_message FROM dolt_remote_branches WHERE name='remotes/origin/main';
+SELECT 'R|staged|'||id||'|'||v FROM dolt_at_t('STAGED');
+"
+FF_STATE_DT="
+SELECT CONCAT('R|row|',id,'|',v) FROM t;
+SELECT CONCAT('R|log|',message) FROM dolt_log;
+SELECT CONCAT('R|status|',table_name,'|',staged,'|',status) FROM dolt_status;
+SELECT CONCAT('R|tracking|',latest_commit_message) FROM dolt_remote_branches WHERE name='remotes/origin/main';
+SELECT CONCAT('R|staged|',id,'|',v) FROM t AS OF 'STAGED';
+"
+for pull_args in "'--ff-only','origin','main'" "'--ff-only','origin'" "'--ff-only'"; do
+  case "$pull_args" in
+    *main*) mode=explicit ;;
+    *origin*) mode=remote ;;
+    *) mode=default ;;
+  esac
+  remote_flow "ff_only_ahead_$mode" "$FF_SEED" "" \
+    "$LOCAL_AHEAD SELECT dolt_pull($pull_args);" \
+    "$FF_STATE_DL" "$FF_STATE_DT"
+done
+remote_flow "ff_only_ahead_keeps_staged_and_working" "$FF_SEED" "" \
+  "$LOCAL_AHEAD
+   UPDATE t SET v='staged' WHERE id=1;
+   SELECT dolt_add('t');
+   INSERT INTO t VALUES (101,'unstaged');
+   SELECT dolt_pull('--ff-only','origin','main');" \
+  "$FF_STATE_DL" "$FF_STATE_DT"
+remote_flow "ff_only_equal" "$FF_SEED" "" \
+  "SELECT dolt_pull('--ff-only','origin','main');" \
+  "$FF_STATE_DL" "$FF_STATE_DT"
+remote_flow "ff_only_behind" "$FF_SEED" "$FF_ADVANCE" \
+  "SELECT dolt_pull('--ff-only','origin','main');" \
+  "$FF_STATE_DL" "$FF_STATE_DT"
+VC_ORACLE_EXPECTATION=allow-error remote_flow "ff_only_diverged_refuses" "$FF_SEED" "$FF_ADVANCE" \
+  "$LOCAL_AHEAD SELECT dolt_pull('--ff-only','origin','main');" \
+  "$FF_STATE_DL" "$FF_STATE_DT"
+
 echo "--- fetch then track origin/main ---"
 FETCH_TRACK="
 SELECT dolt_fetch('origin','main');
