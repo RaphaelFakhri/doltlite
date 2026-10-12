@@ -2858,6 +2858,7 @@ DOLTLITE_C_TESTS = \
 	fetch_tracking_order_test$(T.exe) \
 	http_conn_lost_test$(T.exe) \
 	file_remote_read_lock_test$(T.exe) \
+	fetch_download_lock_test$(T.exe) \
 	push_tracking_precondition_test$(T.exe) \
 	record_info_stack_test$(T.exe) \
 	oom_dolt_fault_test$(T.exe) \
@@ -2911,6 +2912,10 @@ http_conn_lost_test$(T.exe): $(TOP)/test/http_conn_lost_test.c libdoltlite$(T.li
 
 file_remote_read_lock_test$(T.exe): $(TOP)/test/file_remote_read_lock_test.c libdoltlite$(T.lib)
 	$(T.link) -I. -I$(TOP)/src -o $@ $(TOP)/test/file_remote_read_lock_test.c \
+		libdoltlite$(T.lib) -lz -lpthread -lm
+
+fetch_download_lock_test$(T.exe): $(TOP)/test/fetch_download_lock_test.c libdoltlite$(T.lib)
+	$(T.link) -I. -I$(TOP)/src -o $@ $(TOP)/test/fetch_download_lock_test.c \
 		libdoltlite$(T.lib) -lz -lpthread -lm
 
 push_tracking_precondition_test$(T.exe): $(TOP)/test/push_tracking_precondition_test.c libdoltlite$(T.lib)

@@ -706,12 +706,101 @@ static int localEnsureLocked(LocalAsRemote *p){
   return SQLITE_OK;
 }
 
+/* Commit staged chunks. The commit takes the graph lock for the write and
+** drops it before returning, so a peer can proceed between batches. A caller
+** that already holds the lock keeps it; their own commit publishes the batch. */
+static int localFlushChunks(LocalAsRemote *p){
+  ChunkStore *cs;
+  int rc;
+  int nBusy;
+
+  cs = p->pStore;
+  if( cs->staging.nPending==0 && cs->staging.nRecentUncommitted==0 ){
+    return SQLITE_OK;
+  }
+  if( p->locked || cs->lockDepth>0 ) return SQLITE_OK;
+  nBusy = 0;
+  do {
+    rc = chunkStoreCommitWithBusyHandler(cs, 0, 0);
+  }while( rc==SQLITE_BUSY && fsBusyRetry(&p->base, nBusy++) );
+  return rc;
+}
+
+/* DOLTLITE_FETCH_FLUSH_BYTES, when a positive integer, commits once the
+** staged buffer reaches that many bytes. Otherwise the store drain limit
+** applies. */
+static int localStagingShouldFlush(ChunkStore *cs){
+  const char *zEnv;
+  int n;
+
+  zEnv = getenv("DOLTLITE_FETCH_FLUSH_BYTES");
+  if( zEnv && zEnv[0] ){
+    n = atoi(zEnv);
+    if( n>0 ) return cs->staging.nWriteBuf >= (i64)n;
+  }
+  return chunkStoreStagingExceedsDrain(cs);
+}
+
+/* DOLTLITE_PAUSE_DURING_LOCAL_PUT names a file. While it exists, the put
+** waits (bounded) and writes <file>.ready. <file>.fail after the wait makes
+** the put fail so a test can stop a download before refs are installed. */
+static int localPauseDuringPut(void){
+  const char *zPause;
+  sqlite3_vfs *pVfs;
+  sqlite3_file *pReady;
+  char zReady[512];
+  char zFail[512];
+  int exists;
+  int failExists;
+  int waited;
+
+  zPause = getenv("DOLTLITE_PAUSE_DURING_LOCAL_PUT");
+  if( !zPause || !zPause[0] ) return SQLITE_OK;
+  pVfs = sqlite3_vfs_find(0);
+  if( !pVfs ) return SQLITE_OK;
+  exists = 0;
+  if( sqlite3OsAccess(pVfs, zPause, SQLITE_ACCESS_EXISTS, &exists)!=SQLITE_OK
+   || !exists ){
+    return SQLITE_OK;
+  }
+  pReady = 0;
+  sqlite3_snprintf(sizeof(zReady), zReady, "%s.ready", zPause);
+  if( sqlite3OsOpenMalloc(pVfs, zReady, &pReady,
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_MAIN_DB, 0)
+      ==SQLITE_OK ){
+    sqlite3OsWrite(pReady, "x", 1, 0);
+    sqlite3OsCloseFree(pReady);
+  }
+  waited = 0;
+  while( waited<30000
+      && sqlite3OsAccess(pVfs, zPause, SQLITE_ACCESS_EXISTS, &exists)==SQLITE_OK
+      && exists ){
+    sqlite3_sleep(20);
+    waited += 20;
+  }
+  failExists = 0;
+  sqlite3_snprintf(sizeof(zFail), zFail, "%s.fail", zPause);
+  if( sqlite3OsAccess(pVfs, zFail, SQLITE_ACCESS_EXISTS, &failExists)==SQLITE_OK
+   && failExists ){
+    return SQLITE_ERROR;
+  }
+  return SQLITE_OK;
+}
+
 static int localPutChunk(DoltliteRemote *pRemote, const ProllyHash *pHash,
                          const u8 *pData, int nData){
   LocalAsRemote *p = (LocalAsRemote*)pRemote;
-  int rc = localEnsureLocked(p);
+  int rc;
+
+  /* Chunks are content-addressed and unreferenced until the tracking ref is
+  ** installed, so the download itself does not hold the graph lock. */
+  rc = remotePutChunk(pRemote, pHash, pData, nData);
   if( rc!=SQLITE_OK ) return rc;
-  return remotePutChunk(pRemote, pHash, pData, nData);
+  rc = localPauseDuringPut();
+  if( rc!=SQLITE_OK ) return rc;
+  if( p->locked || p->pStore->lockDepth>0 ) return SQLITE_OK;
+  if( localStagingShouldFlush(p->pStore) ) return localFlushChunks(p);
+  return SQLITE_OK;
 }
 
 static int localSetRefs(DoltliteRemote *pRemote, const char *zBranch,
@@ -780,19 +869,32 @@ static int localCheckRefsIf(
 static int localCommit(DoltliteRemote *pRemote){
   LocalAsRemote *p = (LocalAsRemote*)pRemote;
   int rc;
-  if( !p->locked ) return SQLITE_OK;
-  rc = chunkStoreCommit(p->pStore);
-  if( rc!=SQLITE_OK ) chunkStoreRollback(p->pStore);
-  chunkStoreUnlock(p->pStore);
-  p->locked = 0;
-  return rc;
+  if( p->locked ){
+    rc = chunkStoreCommit(p->pStore);
+    if( rc!=SQLITE_OK ) chunkStoreRollback(p->pStore);
+    chunkStoreUnlock(p->pStore);
+    p->locked = 0;
+    return rc;
+  }
+  /* The caller already holds the graph lock. Leave the batch for that
+  ** commit, and do not drop their hold. */
+  if( p->pStore->lockDepth>0 ) return SQLITE_OK;
+  return localFlushChunks(p);
 }
 
 static void localClose(DoltliteRemote *pRemote){
   LocalAsRemote *p = (LocalAsRemote*)pRemote;
+  ChunkStore *cs;
+
+  cs = p->pStore;
   if( p->locked ){
-    chunkStoreRollback(p->pStore);
-    chunkStoreUnlock(p->pStore);
+    chunkStoreRollback(cs);
+    chunkStoreUnlock(cs);
+  }else if( cs->lockDepth<=0 && cs->staging.nRecentUncommitted==0
+         && cs->staging.nPending>0 ){
+    /* A failed download must not leave staged chunks for a later commit.
+    ** Batches already committed are unreferenced until gc. */
+    chunkStoreRollback(cs);
   }
   sqlite3_free(p);
 }
