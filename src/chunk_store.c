@@ -877,6 +877,9 @@ int chunkStoreClose(ChunkStore *cs){
   cs->index.aIndex = 0;
   cs->index.aIndexMmapBase = 0;
   cs->index.aIndexMmapSize = 0;
+  sqlite3_free(cs->aStoredHit);
+  cs->aStoredHit = 0;
+  cs->nStoredHit = cs->nStoredHitAlloc = 0;
   sqlite3_free(cs->staging.aPending);
   sqlite3_free(cs->staging.aPendingZeroTail);
   sqlite3_free(cs->staging.aRecent);
@@ -1371,6 +1374,51 @@ static int csDrainPendingToWal(ChunkStore *cs){
   return SQLITE_OK;
 }
 
+static void csNoteStoredHit(ChunkStore *cs, const ProllyHash *h){
+  int idx = -1;
+  if( cs->isMemory || cs->isBuffer ) return;
+  if( csSearchPending(cs, h, &idx)==SQLITE_OK && idx>=0 ) return;
+  if( cs->nStoredHit==0 && !cs->storedHitLost ){
+    cs->storedHitReloadGen = cs->reloadGen;
+  }
+  if( cs->storedHitLost ) return;
+  if( cs->nStoredHit>=cs->nStoredHitAlloc ){
+    int nNew = cs->nStoredHitAlloc ? cs->nStoredHitAlloc*2 : 16;
+    ProllyHash *aNew;
+    sqlite3BeginBenignMalloc();
+    aNew = sqlite3_realloc64(cs->aStoredHit, (u64)nNew*sizeof(ProllyHash));
+    sqlite3EndBenignMalloc();
+    if( !aNew ){
+      cs->storedHitLost = 1;
+      return;
+    }
+    cs->aStoredHit = aNew;
+    cs->nStoredHitAlloc = nNew;
+  }
+  cs->aStoredHit[cs->nStoredHit++] = *h;
+}
+
+/* Chunks leave the store only when a gc replaces the file, which forces a
+** full reload; without one since the first hit, every hit still holds. */
+int csVerifyStoredHits(ChunkStore *cs){
+  int i;
+  if( cs->nStoredHit==0 && !cs->storedHitLost ) return SQLITE_OK;
+  if( cs->reloadGen==cs->storedHitReloadGen ) return SQLITE_OK;
+  if( cs->storedHitLost ) return SQLITE_BUSY;
+  for(i=0; i<cs->nStoredHit; i++){
+    int has = 0;
+    int rc = chunkStoreHas(cs, &cs->aStoredHit[i], &has);
+    if( rc!=SQLITE_OK ) return rc;
+    if( !has ) return SQLITE_BUSY;
+  }
+  return SQLITE_OK;
+}
+
+void chunkStoreClearStoredHits(ChunkStore *cs){
+  cs->nStoredHit = 0;
+  cs->storedHitLost = 0;
+}
+
 int chunkStorePut(
   ChunkStore *cs,
   const u8 *pData,
@@ -1390,6 +1438,7 @@ int chunkStorePut(
     int bHas = 0;
     int hasRc = chunkStoreHas(cs, &h, &bHas);
     if( hasRc==SQLITE_OK && bHas ){
+      csNoteStoredHit(cs, &h);
       return SQLITE_OK;
     }
     if( hasRc!=SQLITE_OK ) return hasRc;
@@ -1478,6 +1527,7 @@ int chunkStorePutSparse(
     int bHas = 0;
     int hasRc = chunkStoreHas(cs, &h, &bHas);
     if( hasRc==SQLITE_OK && bHas ){
+      csNoteStoredHit(cs, &h);
       return SQLITE_OK;
     }
     if( hasRc!=SQLITE_OK ) return hasRc;

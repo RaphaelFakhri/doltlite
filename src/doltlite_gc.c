@@ -412,6 +412,10 @@ static int gcMarkReachable(
       rc = gcQueuePush(&queue, &aPend[i].hash, 0, GC_PENDING,
                        0, -1, -1, -1);
     }
+    for(i=0; rc==SQLITE_OK && i<cs->nStoredHit; i++){
+      rc = gcQueuePush(&queue, &cs->aStoredHit[i], 0, GC_PENDING,
+                       0, -1, -1, -1);
+    }
   }
 
   if( rc==SQLITE_OK ){

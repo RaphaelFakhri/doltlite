@@ -422,6 +422,9 @@ static int csCommitToFile(ChunkStore *cs, int (*xBusy)(void*), void *pBusyArg){
     return rc;
   }
 
+  rc = csVerifyStoredHits(cs);
+  if( rc!=SQLITE_OK ) goto commit_done;
+
   rc = csCommitPlanPendingIndex(
       cs, batchStart, crashWriteActive,
       aSmallCommittedPending,
@@ -624,6 +627,7 @@ static int csCommitToFile(ChunkStore *cs, int (*xBusy)(void*), void *pBusyArg){
   }
   if( publicationLocked ) sqlite3OsUnlock(pPublicationFile, SQLITE_LOCK_NONE);
   csFileUnlock(lockFd, &lockName);
+  chunkStoreClearStoredHits(cs);
   return SQLITE_OK;
 
 commit_done:
@@ -655,6 +659,7 @@ commit_done:
   }
   sqlite3_free(aMergePending);
   sqlite3_free(aMerged);
+  chunkStoreClearStoredHits(cs);
   return rc;
 }
 
