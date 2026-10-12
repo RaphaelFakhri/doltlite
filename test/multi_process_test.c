@@ -949,8 +949,8 @@ static void test_ref_commands_busy_handler(void){
           mpRead(release[0], &ch);
           if( useTimeout ) sqlite3_sleep(100);
           if( execSql(db, commitPeer ? "COMMIT" : "ROLLBACK")!=SQLITE_OK ) _exit(3);
-          mpWrite(ready[1], "D");
           sqlite3_close(db);
+          mpWrite(ready[1], "D");
           _exit(0);
         }
         if( pid<0 ){ perror("fork"); _exit(1); }
