@@ -1016,6 +1016,27 @@ int chunkStoreForceRefresh(ChunkStore *cs){
   return rc;
 }
 
+int chunkStoreAdoptDiskState(ChunkStore *cs){
+  int rc;
+  int wasPinned;
+  if( cs->isMemory || cs->isBuffer ) return SQLITE_OK;
+  if( cs->movedReadOnly ) return SQLITE_READONLY;
+  /* Only the outermost lock holder reloads. */
+  if( cs->lockDepth != 1 ) return SQLITE_OK;
+  if( cs->staging.nRecentUncommitted>0 ) return SQLITE_BUSY_SNAPSHOT;
+  /* Same sealed tail and no local ref edit: nothing to adopt. */
+  if( csDiskStateMatchesMemory(cs)
+   && prollyHashCompare(&cs->refs.refsHash,
+                        &cs->refs.committedRefsHash)==0 ){
+    return SQLITE_OK;
+  }
+  wasPinned = cs->snapshotPinned;
+  cs->snapshotPinned = 0;
+  rc = csReloadFromDisk(cs);
+  cs->snapshotPinned = wasPinned;
+  return rc;
+}
+
 static int csReloadFromDisk(ChunkStore *cs){
   ChunkStore tmp;
   ChunkStoreReloadState saved;

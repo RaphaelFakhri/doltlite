@@ -706,9 +706,10 @@ static int localEnsureLocked(LocalAsRemote *p){
   return SQLITE_OK;
 }
 
-/* Commit staged chunks. The commit takes the graph lock for the write and
-** drops it before returning, so a peer can proceed between batches. A caller
-** that already holds the lock keeps it; their own commit publishes the batch. */
+/* Commit staged chunks. The commit takes the graph lock, adopts the peer's
+** refs (a pinned snapshot and this handle's uncommitted ref edits included),
+** and drops the lock before returning. A caller that already holds the lock
+** keeps it; their own commit publishes the batch. */
 static int localFlushChunks(LocalAsRemote *p){
   ChunkStore *cs;
   int rc;
@@ -721,8 +722,20 @@ static int localFlushChunks(LocalAsRemote *p){
   if( p->locked || cs->lockDepth>0 ) return SQLITE_OK;
   nBusy = 0;
   do {
-    rc = chunkStoreCommitWithBusyHandler(cs, 0, 0);
+    rc = chunkStoreLockAndRefresh(cs);
   }while( rc==SQLITE_BUSY && fsBusyRetry(&p->base, nBusy++) );
+  if( rc!=SQLITE_OK ) return rc;
+  p->locked = 1;
+  rc = chunkStoreAdoptDiskState(cs);
+  if( rc==SQLITE_OK ){
+    nBusy = 0;
+    do {
+      rc = chunkStoreCommitWithBusyHandler(cs, 0, 0);
+    }while( rc==SQLITE_BUSY && fsBusyRetry(&p->base, nBusy++) );
+  }
+  if( rc!=SQLITE_OK ) chunkStoreRollback(cs);
+  chunkStoreUnlock(cs);
+  p->locked = 0;
   return rc;
 }
 

@@ -492,6 +492,11 @@ int chunkStoreRefreshIfChanged(ChunkStore *cs, int *pChanged);
 ** (WAL reuse can hide a peer commit). Outermost lock only. */
 int chunkStoreForceRefresh(ChunkStore *cs);
 
+/* Reload the on-disk store over this handle, including under a pinned
+** snapshot, and keep staged chunks. Uncommitted ref edits are dropped.
+** Outermost lock only. */
+int chunkStoreAdoptDiskState(ChunkStore *cs);
+
 /* Duplicate z with two trailing nuls (SQLITE_OPEN_MAIN_DB xOpen URI term). */
 int chunkStoreDupFilenameDoubleNul(const char *z, char **pzOut);
 
