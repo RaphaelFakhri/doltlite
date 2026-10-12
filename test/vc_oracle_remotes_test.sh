@@ -888,4 +888,16 @@ CALL dolt_branch('topic', 'origin/branchA');
 CALL dolt_checkout('topic');" \
   "SELECT concat(active_branch(), char(9), count(*), char(9), (SELECT count(*)-1 FROM dolt_log)) FROM t;"
 
+echo "--- savepoints inside BEGIN ---"
+
+TXNSP_SETUP="CREATE TABLE t(id INT PRIMARY KEY);
+INSERT INTO t VALUES (1);
+SELECT dolt_commit('-Am', 'init');
+SELECT dolt_tag('existing');
+SELECT dolt_branch('other');"
+
+vc_oracle_txn_savepoint "txnsp_remote_add" "$TXNSP_SETUP" "SELECT dolt_remote('add', 'origin', 'file:///tmp/vc-oracle-nowhere')"
+vc_oracle_txn_savepoint "txnsp_remote_remove_missing" "$TXNSP_SETUP" "SELECT dolt_remote('remove', 'nosuch')"
+vc_oracle_txn_savepoint "txnsp_fetch_missing_remote" "$TXNSP_SETUP" "SELECT dolt_fetch('nosuch')"
+
 vc_oracle_finish

@@ -132,6 +132,46 @@ vc_oracle_run_dolt_script_for_error() {
   )
 }
 
+# Inside BEGIN, run CALL between a savepoint and ROLLBACK TO it, then COMMIT.
+# Both engines must agree on whether the savepoint survived, the rows that
+# committed, and the tags. SETUP must leave t(id) committed without id=2.
+vc_oracle_txn_savepoint() {
+  local name="$1" setup="$2" call="$3"
+  local dir="$TMPROOT/${name}_txnsp"
+  mkdir -p "$dir/dl" "$dir/dt"
+  local script="$setup
+BEGIN;
+SAVEPOINT sp;
+INSERT INTO t VALUES(2);
+$call;
+ROLLBACK TO SAVEPOINT sp;
+COMMIT;"
+  local probe=".headers off
+.mode list
+SELECT count(*) FROM t;
+SELECT coalesce(group_concat(tag_name), '') FROM (SELECT tag_name FROM dolt_tags ORDER BY tag_name);"
+  local dl_sp=kept dt_sp=kept dl_state dt_state dolt_script
+  vc_oracle_run_doltlite_script "$dir/dl/db" "$dir/dl.out" "$dir/dl.err" \
+    "$script" --allow-error
+  grep -q "no such savepoint" "$dir/dl.err" && dl_sp=released
+  dl_state=$(printf '%s\n' "$probe" | vc_oracle_run_doltlite "$dir/dl/db" 2>>"$dir/dl.err" | tr '\n' ' ')
+  dolt_script=$(vc_oracle_translate_for_dolt "$script")
+  vc_oracle_run_dolt_script_for_error "$dir/dt" "$dir/dt.out" "$dir/dt.err" \
+    "$dolt_script" --continue -r csv
+  grep -qi "savepoint sp does not exist" "$dir/dt.err" "$dir/dt.out" && dt_sp=released
+  dt_state=$(cd "$dir/dt" && "$DOLT" sql -r csv -q "SELECT count(*) FROM t; SELECT coalesce(group_concat(tag_name ORDER BY tag_name), '') FROM dolt_tags;" 2>>"$dir/dt.err" \
+    | tr -d '"' | grep -v '^count\|^coalesce' | tr '\n' ' ')
+  if [ "$dl_sp" = "$dt_sp" ] && [ "$dl_state" = "$dt_state" ]; then
+    pass=$((pass+1))
+  else
+    fail=$((fail+1))
+    FAILED_NAMES="$FAILED_NAMES $name"
+    echo "  FAIL: $name"
+    echo "    doltlite savepoint=$dl_sp rows/tags=$dl_state"
+    echo "    dolt     savepoint=$dt_sp rows/tags=$dt_state"
+  fi
+}
+
 vc_oracle_error() {
   local name="$1" setup="$2" mode="${3:-}" pattern="${4:-}"
   local dir="$TMPROOT/${name}_err"

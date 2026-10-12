@@ -96,7 +96,7 @@ static void doltTagParsedFunc(
       doltliteRefResultError(ctx, rc, "tag not found", 0);
       return;
     }
-    rc = doltliteVcSealActiveSavepoints(db);
+    rc = doltliteVcSealAutocommitSavepoint(db);
     if( rc!=SQLITE_OK ){
       doltliteVcResultSealError(ctx, db, rc);
       return;
@@ -153,7 +153,7 @@ static void doltTagParsedFunc(
     doltliteRefResultError(ctx, rc, "tag not found", "tag already exists");
     return;
   }
-  rc = doltliteVcSealActiveSavepoints(db);
+  rc = doltliteVcSealAutocommitSavepoint(db);
   if( rc!=SQLITE_OK ){
     doltliteVcResultSealError(ctx, db, rc);
     return;

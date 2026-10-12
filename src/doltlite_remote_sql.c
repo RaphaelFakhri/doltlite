@@ -424,7 +424,7 @@ static void doltRemoteFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv)
     return;
   }
 
-  rc = doltliteVcSealActiveSavepoints(db);
+  rc = doltliteVcSealAutocommitSavepoint(db);
   if( rc!=SQLITE_OK ){
     doltliteVcResultSealError(ctx, db, rc);
     return;

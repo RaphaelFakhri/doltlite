@@ -326,4 +326,18 @@ SELECT dolt_tag('-d', 'missing');
 ROLLBACK TO sp1;
 "
 
+echo "--- savepoints inside BEGIN ---"
+
+TXNSP_SETUP="CREATE TABLE t(id INT PRIMARY KEY);
+INSERT INTO t VALUES (1);
+SELECT dolt_commit('-Am', 'init');
+SELECT dolt_tag('existing');
+SELECT dolt_branch('other');"
+
+vc_oracle_txn_savepoint "txnsp_tag_create" "$TXNSP_SETUP" "SELECT dolt_tag('v1')"
+vc_oracle_txn_savepoint "txnsp_tag_create_message" "$TXNSP_SETUP" "SELECT dolt_tag('-m', 'msg', 'v2')"
+vc_oracle_txn_savepoint "txnsp_tag_create_missing_commit" "$TXNSP_SETUP" "SELECT dolt_tag('v1', 'nosuch')"
+vc_oracle_txn_savepoint "txnsp_tag_delete" "$TXNSP_SETUP" "SELECT dolt_tag('-d', 'existing')"
+vc_oracle_txn_savepoint "txnsp_tag_delete_missing" "$TXNSP_SETUP" "SELECT dolt_tag('-d', 'missing')"
+
 vc_oracle_finish

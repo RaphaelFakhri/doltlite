@@ -540,4 +540,21 @@ SELECT dolt_branch('feature2');
 SELECT dolt_branch('-c', 'main', 'mainline');
 "
 
+echo "--- savepoints inside BEGIN ---"
+
+TXNSP_SETUP="CREATE TABLE t(id INT PRIMARY KEY);
+INSERT INTO t VALUES (1);
+SELECT dolt_commit('-Am', 'init');
+SELECT dolt_tag('existing');
+SELECT dolt_branch('other');"
+
+vc_oracle_txn_savepoint "txnsp_branch_create" "$TXNSP_SETUP" "SELECT dolt_branch('b2')"
+vc_oracle_txn_savepoint "txnsp_branch_create_missing_start" "$TXNSP_SETUP" "SELECT dolt_branch('b2', 'nosuch')"
+vc_oracle_txn_savepoint "txnsp_branch_delete" "$TXNSP_SETUP" "SELECT dolt_branch('-d', 'other')"
+vc_oracle_txn_savepoint "txnsp_branch_delete_missing" "$TXNSP_SETUP" "SELECT dolt_branch('-d', 'nosuch')"
+vc_oracle_txn_savepoint "txnsp_checkout_missing" "$TXNSP_SETUP" "SELECT dolt_checkout('nosuch')"
+vc_oracle_txn_savepoint "txnsp_checkout_b_existing" "$TXNSP_SETUP" "SELECT dolt_checkout('-b', 'other')"
+vc_oracle_txn_savepoint "txnsp_commit" "$TXNSP_SETUP" "SELECT dolt_commit('-Am', 'c')"
+vc_oracle_txn_savepoint "txnsp_commit_nothing_staged" "$TXNSP_SETUP" "SELECT dolt_commit('-m', 'c')"
+
 vc_oracle_finish
