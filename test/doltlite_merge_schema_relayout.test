@@ -582,7 +582,7 @@ foreach keymode {integer text without-rowid} {
   if {$keymode ne "integer"} {set key {id TEXT PRIMARY KEY}}
   if {$keymode eq "without-rowid"} {set suffix {WITHOUT ROWID}}
   foreach indexmode {none expression} {
-    foreach operation {merge cherry_pick} {
+    foreach {operation notnull} {merge 1 merge 0 cherry_pick 1 cherry_pick 0} {
       foreach direction {forward reverse} {
         reset_db
         execsql "CREATE TABLE t($key, a TEXT DEFAULT 'd', gone TEXT, b TEXT, c TEXT DEFAULT 'e') $suffix"
@@ -599,7 +599,11 @@ foreach keymode {integer text without-rowid} {
           SELECT dolt_checkout('side');
           ALTER TABLE t DROP COLUMN gone;
           ALTER TABLE t RENAME COLUMN a TO renamed;
-          ALTER TABLE t ADD COLUMN extra INTEGER NOT NULL DEFAULT 9;
+        }
+        set extra {INTEGER DEFAULT 9}
+        if {$notnull} {set extra {INTEGER NOT NULL DEFAULT 9}}
+        execsql "ALTER TABLE t ADD COLUMN extra $extra"
+        execsql {
           INSERT INTO t(id,b,c) VALUES(3,'B3','C3');
           SELECT dolt_commit('-Am','theirs');
         }
@@ -612,6 +616,7 @@ foreach keymode {integer text without-rowid} {
           set reopen "[file normalize test.db]/side"
         }
         set name balanced-layout-$keymode-$indexmode-$operation-$direction
+        if {!$notnull} {append name -nullable}
         set rows {1 d ours C1 9 2 d B2 C2 9 3 d B3 C3 9}
         do_test $name-apply {
           execsql {BEGIN}
@@ -638,6 +643,19 @@ foreach keymode {integer text without-rowid} {
           SELECT * FROM t ORDER BY id;
           PRAGMA integrity_check;
         } [concat {id renamed b c extra} $rows ok]
+        do_execsql_test $name-reopen-branch {SELECT active_branch()} \
+            [expr {$direction eq "forward" ? "main" : "side"}]
+        if {$direction eq "reverse"} {
+          sqlite3 main_db [file normalize test.db]
+          do_test $name-main-branch {
+            main_db eval {
+              SELECT active_branch();
+              SELECT name FROM pragma_table_info('t') ORDER BY cid;
+              SELECT * FROM t ORDER BY id;
+            }
+          } {main id a b c 1 d ours C1 2 d B2 C2}
+          main_db close
+        }
       }
     }
   }
