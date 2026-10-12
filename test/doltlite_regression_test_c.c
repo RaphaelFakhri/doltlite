@@ -17869,6 +17869,25 @@ static void run_uri_branch_readonly_open(void){
   run_deferred_branch_open();
 }
 
+/* MinGW's mkdir takes a path only. direct.h is included on Windows. */
+static int testMakeDir(const char *zDir){
+  int rc;
+#ifdef _WIN32
+  rc = mkdir(zDir);
+#else
+  rc = mkdir(zDir, 0755);
+#endif
+  return rc==0 || errno==EEXIST;
+}
+
+/* getcwd may return backslashes. Stored file:// URLs use slashes. */
+static void testSlashPath(char *z){
+  while( z && *z ){
+    if( *z=='\\' ) *z = '/';
+    z++;
+  }
+}
+
 static void run_file_remote_url_absolute(void){
   char zSaved[1024];
   char zRoot[256];
@@ -17891,7 +17910,8 @@ static void run_file_remote_url_absolute(void){
     check("file_url_getcwd", 0);
     return;
   }
-  snprintf(zRoot, sizeof(zRoot), "/tmp/dl_fileurl_%ld", (long)getpid());
+  snprintf(zRoot, sizeof(zRoot),
+           DOLTLITE_TEST_TMPDIR "/dl_fileurl_%ld", (long)getpid());
   snprintf(zDirA, sizeof(zDirA), "%s/a", zRoot);
   snprintf(zDirB, sizeof(zDirB), "%s/b", zRoot);
   snprintf(zDb, sizeof(zDb), "%s/x.db", zRoot);
@@ -17902,9 +17922,8 @@ static void run_file_remote_url_absolute(void){
   removeDbFiles(zExpect);
   snprintf(zExpect, sizeof(zExpect), "%s/rel.db", zDirB);
   removeDbFiles(zExpect);
-  mkdir(zRoot, 0755);
-  mkdir(zDirA, 0755);
-  mkdir(zDirB, 0755);
+  check("file_url_mkdir",
+        testMakeDir(zRoot) && testMakeDir(zDirA) && testMakeDir(zDirB));
 
   if( chdir(zDirA)==0 && open_db(zDb, &db)==SQLITE_OK ){
     setupOk = 1;
@@ -17914,6 +17933,7 @@ static void run_file_remote_url_absolute(void){
       "SELECT dolt_commit('-Am','first');"
       "SELECT dolt_remote('add','origin','file://rel.db');")==SQLITE_OK);
     check("file_url_here", getcwd(zHere, sizeof(zHere))!=0);
+    testSlashPath(zHere);
     snprintf(zExpect, sizeof(zExpect), "file://%s/rel.db", zHere);
     check("file_url_stored_absolute", strcmp(queryScalarText(db,
         "SELECT url FROM dolt_remotes"), zExpect)==0);
@@ -17964,6 +17984,7 @@ static void run_file_remote_url_absolute(void){
     snprintf(zExpect, sizeof(zExpect), "%s/rel.db", zDirB);
     check("file_url_no_second_remote", stat(zExpect, &st)!=0);
     if( getcwd(zHere, sizeof(zHere)) ){
+      testSlashPath(zHere);
       snprintf(zExpect, sizeof(zExpect), "%s/../a/rel.db", zHere);
     }
     check("file_url_remote_has_both",
@@ -17980,6 +18001,7 @@ static void run_file_remote_url_absolute(void){
     check("file_url_clone", strcmp(queryScalarText(db,
         "SELECT dolt_clone('file://rel.db')"), "0")==0);
     check("file_url_clone_here", getcwd(zHere, sizeof(zHere))!=0);
+    testSlashPath(zHere);
     snprintf(zExpect, sizeof(zExpect), "file://%s/rel.db", zHere);
     check("file_url_clone_stores_absolute", strcmp(queryScalarText(db,
         "SELECT url FROM dolt_remotes"), zExpect)==0);
@@ -17996,7 +18018,9 @@ static void run_file_remote_url_absolute(void){
     }
   }
 
-  if( zSaved[0] ) chdir(zSaved);
+  if( zSaved[0] && chdir(zSaved)!=0 ){
+    check("file_url_restore_cwd", 0);
+  }
   removeDbFiles(zDb);
   removeDbFiles(zClone);
   snprintf(zExpect, sizeof(zExpect), "%s/rel.db", zDirA);
