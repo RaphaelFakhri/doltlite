@@ -98,6 +98,13 @@ when it cannot fast-forward, conflicts included.
 - Remotes carry commits, tags, and branch refs. Working sets never travel:
   cloned branches start clean, and a push is refused while the **target**
   database's branch has uncommitted changes.
+- `dolt_push(remote, ':branch')` deletes that remote branch and its local
+  tracking ref. The remote default branch cannot be deleted. Deleting a
+  branch that is already absent returns 0, including when this database
+  never fetched a tracking ref for it. Dolt errors in that case; the remote
+  branch list is unchanged either way. A read-only connection, or another
+  connection holding a write transaction, is refused before the remote ref
+  moves.
 - A lazy clone installs refs without copying chunks and fetches them on
   demand from `origin`. Reopen it with `?lazy_origin=1` to keep that
   behaviour in a new process; `--revision` picks the branch to check out, or a

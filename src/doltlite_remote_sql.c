@@ -447,6 +447,18 @@ static int mutatePushTracking(sqlite3 *db, ChunkStore *cs, void *pArg){
   return chunkStoreUpdateTracking(cs, p->zRemote, p->zBranch, &p->commit);
 }
 
+/* Hold the local graph lock for a branch push before the remote changes.
+** A read-only or query_only connection fails here, so the remote stays put.
+** The lock is recursive: the later tracking update reuses this view. */
+static int pushAcquireLocal(sqlite3 *db, ChunkStore *cs){
+  int rc;
+  if( chunkStoreWriteRefused(cs) ) return SQLITE_READONLY;
+  do {
+    rc = chunkStoreLockAndRefresh(cs);
+  }while( rc==SQLITE_BUSY && sqlite3InvokeBusyHandler(&db->busyHandler) );
+  return rc;
+}
+
 #define REMOTE_HEADS_PREFIX "refs/heads/"
 #define REMOTE_TAGS_PREFIX  "refs/tags/"
 
@@ -476,6 +488,8 @@ static int doltPushParsedFunc(
   PushTrackingMutation mutation;
   int bBranch = 0;
   int bTagRef = 0;
+  int bLocalLock = 0;
+  int bPrecondition = 0;
   int rc;
 
   if( !cs ){ doltliteVcResultError(ctx, db, "no database"); return SQLITE_ERROR; }
@@ -561,7 +575,13 @@ static int doltPushParsedFunc(
     mutation.zBranch = zRef;
     bBranch = 1;
     memcpy(&mutation.commit, &srcCommit, sizeof(mutation.commit));
-    rc = doltlitePushAs(cs, pRemote, 0, zRef, bForce, &srcCommit);
+    rc = pushAcquireLocal(db, cs);
+    if( rc!=SQLITE_OK ){
+      bPrecondition = 1;
+    }else{
+      bLocalLock = 1;
+      rc = doltlitePushAs(cs, pRemote, 0, zRef, bForce, &srcCommit);
+    }
   }else if( !bTagRef
          && (zRef[0]==':' || chunkStoreFindBranch(cs, zRef, 0)==SQLITE_OK) ){
     mutation.zRemote = zRemoteName;
@@ -571,9 +591,22 @@ static int doltPushParsedFunc(
     if( !mutation.bDelete ){
       chunkStoreFindBranch(cs, zRef, &mutation.commit);
     }
-    rc = doltlitePush(cs, pRemote, zRef, bForce);
+    rc = pushAcquireLocal(db, cs);
+    if( rc!=SQLITE_OK ){
+      bPrecondition = 1;
+    }else{
+      bLocalLock = 1;
+      rc = doltlitePush(cs, pRemote, zRef, bForce);
+    }
   }else{
     rc = doltlitePushTag(cs, pRemote, zRef);
+  }
+  if( bPrecondition ){
+    pRemote->xClose(pRemote);
+    sqlite3_free(zSrc);
+    (void)doltliteVcSealSavepointError(db);
+    remoteSqlResultError(ctx, rc, 0);
+    return rc;
   }
   if( rc!=SQLITE_OK ){
     const char *zMsg = remoteSqlRemoteMsg(pRemote, rc);
@@ -589,6 +622,7 @@ static int doltPushParsedFunc(
       zMsg = "push failed: branch or tag not found";
     }
     zOwned = zMsg ? sqlite3_mprintf("%s", zMsg) : 0;
+    if( bLocalLock ) chunkStoreUnlock(cs);
     pRemote->xClose(pRemote);
     sqlite3_free(zSrc);
     (void)doltliteVcSealSavepointError(db);
@@ -599,14 +633,19 @@ static int doltPushParsedFunc(
   pRemote->xClose(pRemote);
   if( bBranch ){
     rc = doltliteMutateRefs(db, mutatePushTracking, &mutation);
-    if( rc!=SQLITE_OK ){
-      sqlite3_free(zSrc);
-      remoteSqlResultError(ctx, rc, rc==SQLITE_NOTFOUND
-          ? "push failed: remote-tracking branch not found" : 0);
-      return rc;
+    /* The remote already moved. A missing tracking row on delete, or a
+    ** local lock that appeared after the remote accepted the push, does
+    ** not make the push a failure. Other errors still do. */
+    if( rc==SQLITE_BUSY || rc==SQLITE_READONLY || rc==SQLITE_NOTFOUND ){
+      rc = SQLITE_OK;
     }
   }
   sqlite3_free(zSrc);
+  if( bLocalLock ) chunkStoreUnlock(cs);
+  if( rc!=SQLITE_OK ){
+    remoteSqlResultError(ctx, rc, 0);
+    return rc;
+  }
   return SQLITE_OK;
 }
 
