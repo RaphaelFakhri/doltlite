@@ -366,8 +366,8 @@ static int csReadManifest(ChunkStore *cs){
 }
 
 /* Distinguish crashed first-commit from a damaged committed DB. */
-int csScanForCommittedRoot(ChunkStore *cs, int *pEverCommitted,
-                           int *pCreationRoot){
+static int csScanForCommittedRoot(ChunkStore *cs, int *pEverCommitted,
+                                  int *pCreationRoot){
   return csScanForCommittedRootEx(cs, pEverCommitted, pCreationRoot, 0);
 }
 
