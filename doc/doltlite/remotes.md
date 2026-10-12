@@ -14,6 +14,10 @@ SELECT dolt_pull('origin', 'main');   -- fetch, then fast-forward or merge
 SELECT * FROM dolt_remotes;
 ```
 
+A `file://` URL is stored with an absolute path. `file://rel.db` is recorded
+as `file:///<directory>/rel.db`, and `dolt_clone` records `origin` the same
+way, so push, fetch, and pull open that file from any working directory.
+
 Clone into an empty database:
 
 ```sql

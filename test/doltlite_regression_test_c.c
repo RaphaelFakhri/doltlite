@@ -17869,6 +17869,149 @@ static void run_uri_branch_readonly_open(void){
   run_deferred_branch_open();
 }
 
+static void run_file_remote_url_absolute(void){
+  char zSaved[1024];
+  char zRoot[256];
+  char zDirA[300];
+  char zDirB[300];
+  char zDb[320];
+  char zClone[320];
+  char zHere[1024];
+  char zParent[1024];
+  char zExpect[1200];
+  char zSql[1400];
+  char *zSlash;
+  sqlite3 *db = 0;
+  sqlite3 *remote = 0;
+  struct stat st;
+  int setupOk = 0;
+
+  zSaved[0] = 0;
+  if( getcwd(zSaved, sizeof(zSaved))==0 ){
+    check("file_url_getcwd", 0);
+    return;
+  }
+  snprintf(zRoot, sizeof(zRoot), "/tmp/dl_fileurl_%ld", (long)getpid());
+  snprintf(zDirA, sizeof(zDirA), "%s/a", zRoot);
+  snprintf(zDirB, sizeof(zDirB), "%s/b", zRoot);
+  snprintf(zDb, sizeof(zDb), "%s/x.db", zRoot);
+  snprintf(zClone, sizeof(zClone), "%s/clone.db", zRoot);
+  removeDbFiles(zDb);
+  removeDbFiles(zClone);
+  snprintf(zExpect, sizeof(zExpect), "%s/rel.db", zDirA);
+  removeDbFiles(zExpect);
+  snprintf(zExpect, sizeof(zExpect), "%s/rel.db", zDirB);
+  removeDbFiles(zExpect);
+  mkdir(zRoot, 0755);
+  mkdir(zDirA, 0755);
+  mkdir(zDirB, 0755);
+
+  if( chdir(zDirA)==0 && open_db(zDb, &db)==SQLITE_OK ){
+    setupOk = 1;
+    check("file_url_init", execSql(db,
+      "CREATE TABLE t(id INT PRIMARY KEY);"
+      "INSERT INTO t VALUES(1);"
+      "SELECT dolt_commit('-Am','first');"
+      "SELECT dolt_remote('add','origin','file://rel.db');")==SQLITE_OK);
+    check("file_url_here", getcwd(zHere, sizeof(zHere))!=0);
+    snprintf(zExpect, sizeof(zExpect), "file://%s/rel.db", zHere);
+    check("file_url_stored_absolute", strcmp(queryScalarText(db,
+        "SELECT url FROM dolt_remotes"), zExpect)==0);
+    snprintf(zExpect, sizeof(zExpect), "%s/rel.db", zHere);
+    check("file_url_not_created_by_add", stat(zExpect, &st)!=0);
+    check("file_url_push", strcmp(queryScalarText(db,
+        "SELECT dolt_push('origin','main')"), "0")==0);
+    check("file_url_remote_created", stat(zExpect, &st)==0);
+    check("file_url_dot", execSql(db,
+        "SELECT dolt_remote('add','dot','file://./dot.db');")==SQLITE_OK);
+    snprintf(zExpect, sizeof(zExpect), "file://%s/dot.db", zHere);
+    check("file_url_dot_absolute", strcmp(queryScalarText(db,
+        "SELECT url FROM dolt_remotes WHERE name='dot'"), zExpect)==0);
+    sqlite3_snprintf(sizeof(zParent), zParent, "%s", zHere);
+    zSlash = strrchr(zParent, '/');
+    if( zSlash && zSlash!=zParent ) *zSlash = 0;
+    check("file_url_parent", execSql(db,
+        "SELECT dolt_remote('add','up','file://../up.db');")==SQLITE_OK);
+    snprintf(zExpect, sizeof(zExpect), "file://%s/up.db", zParent);
+    check("file_url_parent_absolute", strcmp(queryScalarText(db,
+        "SELECT url FROM dolt_remotes WHERE name='up'"), zExpect)==0);
+    snprintf(zSql, sizeof(zSql),
+        "SELECT dolt_remote('add','abs','file://%s/abs.db');", zHere);
+    check("file_url_abs_add", execSql(db, zSql)==SQLITE_OK);
+    snprintf(zExpect, sizeof(zExpect), "file://%s/abs.db", zHere);
+    check("file_url_abs_unchanged", strcmp(queryScalarText(db,
+        "SELECT url FROM dolt_remotes WHERE name='abs'"), zExpect)==0);
+    check("file_url_http", execSql(db,
+        "SELECT dolt_remote('add','web','http://example.invalid/repo');")
+        ==SQLITE_OK);
+    check("file_url_http_unchanged", strcmp(queryScalarText(db,
+        "SELECT url FROM dolt_remotes WHERE name='web'"),
+        "http://example.invalid/repo")==0);
+    sqlite3_close(db);
+    db = 0;
+  }else{
+    check("file_url_setup", 0);
+  }
+
+  if( setupOk && chdir(zDirB)==0 && open_db(zDb, &db)==SQLITE_OK ){
+    check("file_url_second", execSql(db,
+      "INSERT INTO t VALUES(2);"
+      "SELECT dolt_commit('-am','second');")==SQLITE_OK);
+    check("file_url_push_other_dir", strcmp(queryScalarText(db,
+        "SELECT dolt_push('origin','main')"), "0")==0);
+    sqlite3_close(db);
+    db = 0;
+    snprintf(zExpect, sizeof(zExpect), "%s/rel.db", zDirB);
+    check("file_url_no_second_remote", stat(zExpect, &st)!=0);
+    if( getcwd(zHere, sizeof(zHere)) ){
+      snprintf(zExpect, sizeof(zExpect), "%s/../a/rel.db", zHere);
+    }
+    check("file_url_remote_has_both",
+          open_db(zExpect, &remote)==SQLITE_OK);
+    if( remote ){
+      check("file_url_remote_rows", strcmp(queryScalarText(remote,
+          "SELECT count(*) FROM t"), "2")==0);
+      sqlite3_close(remote);
+      remote = 0;
+    }
+  }
+
+  if( setupOk && chdir(zDirA)==0 && open_db(zClone, &db)==SQLITE_OK ){
+    check("file_url_clone", strcmp(queryScalarText(db,
+        "SELECT dolt_clone('file://rel.db')"), "0")==0);
+    check("file_url_clone_here", getcwd(zHere, sizeof(zHere))!=0);
+    snprintf(zExpect, sizeof(zExpect), "file://%s/rel.db", zHere);
+    check("file_url_clone_stores_absolute", strcmp(queryScalarText(db,
+        "SELECT url FROM dolt_remotes"), zExpect)==0);
+    sqlite3_close(db);
+    db = 0;
+    check("file_url_clone_other_dir", chdir(zDirB)==0 && open_db(zClone, &db)==SQLITE_OK);
+    if( db ){
+      check("file_url_pull_other_dir", strcmp(queryScalarText(db,
+          "SELECT dolt_pull('origin','main')"), "0")==0);
+      check("file_url_pull_rows", strcmp(queryScalarText(db,
+          "SELECT count(*) FROM t"), "2")==0);
+      sqlite3_close(db);
+      db = 0;
+    }
+  }
+
+  if( zSaved[0] ) chdir(zSaved);
+  removeDbFiles(zDb);
+  removeDbFiles(zClone);
+  snprintf(zExpect, sizeof(zExpect), "%s/rel.db", zDirA);
+  removeDbFiles(zExpect);
+  snprintf(zExpect, sizeof(zExpect), "%s/dot.db", zDirA);
+  removeDbFiles(zExpect);
+  snprintf(zExpect, sizeof(zExpect), "%s/up.db", zRoot);
+  removeDbFiles(zExpect);
+  snprintf(zExpect, sizeof(zExpect), "%s/abs.db", zDirA);
+  removeDbFiles(zExpect);
+  rmdir(zDirA);
+  rmdir(zDirB);
+  rmdir(zRoot);
+}
+
 static const RegressionCase aCases[] = {
   { "refs_vtab_snapshot_stability", "Refs Vtab Snapshot Stability Test", run_refs_vtab_snapshot_stability },
   { "storage_format_v12", "Storage Format Version 12 Test", run_storage_format_v12 },
@@ -17912,6 +18055,7 @@ static const RegressionCase aCases[] = {
   { "clone_ref_install_survives_window_gc", "Clone Ref Install Survives Window GC Test", run_clone_ref_install_survives_window_gc },
   { "clone_deleted_branch_installs_nothing", "Clone Deleted Branch Installs Nothing Test", run_clone_deleted_branch_installs_nothing },
   { "fetch_preserves_concurrent_local_refs", "Fetch Preserves Concurrent Local Refs Test", run_fetch_preserves_concurrent_local_refs },
+  { "file_remote_url_absolute", "File Remote URL Absolute Test", run_file_remote_url_absolute },
   { "fetch_gc_sees_peer_commit", "Fetch GC Sees Peer Commit Test", run_fetch_gc_sees_peer_commit },
   { "chunk_walk_corruption", "Chunk Walk Corruption Test", run_chunk_walk_corruption },
   { "catalog_deserialize_corruption", "Catalog Deserialize Corruption Test", run_catalog_deserialize_corruption },
