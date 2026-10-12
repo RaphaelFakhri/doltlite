@@ -1180,6 +1180,9 @@ static void doltFetchFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
   if( rc==SQLITE_OK ) sqlite3_result_int(ctx, 0);
 
 fetch_done:
+  /* installFetchedRefs reloaded disk under the lock. A peer commit on
+  ** this branch is in that reload, and the change signal is gone. */
+  doltliteNoteSessionMissedDiskTip(db);
   doltliteFreeStringArray(azNames, nNames);
   sqlite3_free(zUrlOwned);
   doltliteCmdArgsClear(&args);
@@ -1303,6 +1306,7 @@ static void doltPullParsed(
   }
 
   if( prollyHashCompare(&localCommit, &trackingCommit)==0 ){
+    doltliteNoteSessionMissedDiskTip(db);
     remoteSqlClearAndSucceed(ctx, &savedState);
     return;
   }
@@ -1368,6 +1372,7 @@ static void doltPullParsed(
         return;
       }
       /* Pull returns 0 on success, not the merge commit hash. */
+      doltliteNoteSessionMissedDiskTip(db);
       sqlite3_result_int(ctx, 0);
       return;
     }
@@ -1443,6 +1448,7 @@ static void doltPullParsed(
     doltliteVcResultSealError(ctx, db, rc);
     return;
   }
+  doltliteNoteSessionMissedDiskTip(db);
   sqlite3_result_int(ctx, 0);
 }
 

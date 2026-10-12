@@ -3885,6 +3885,205 @@ static void run_fetch_preserves_concurrent_local_refs(void){
   removeDbFiles(localPath);
 }
 
+/* A second connection commits on main. The long-lived connection then
+** runs a command that reloads the store. Its next reads must see that
+** commit. bAdvance makes the fetch install a new remote commit so the
+** reload is not skipped. */
+static int staleOpenSession(
+  const char *zTag,
+  int bClone,
+  int bAdvance,
+  sqlite3 **ppDb,
+  char *zDb,
+  int nDb,
+  char *zRemote,
+  int nRemote
+){
+  sqlite3 *remoteDb = 0;
+  sqlite3 *db = 0;
+  char zRemoteTag[64];
+  char zSql[640];
+  int rc;
+
+  *ppDb = 0;
+  zRemote[0] = 0;
+  make_dbpath(zDb, (size_t)nDb, zTag);
+  removeDbFiles(zDb);
+  if( bClone ){
+    sqlite3_snprintf(sizeof(zRemoteTag), zRemoteTag, "%s_remote", zTag);
+    make_dbpath(zRemote, (size_t)nRemote, zRemoteTag);
+    removeDbFiles(zRemote);
+    rc = open_db(zRemote, &remoteDb);
+    if( rc!=SQLITE_OK ) return rc;
+    rc = execSql(remoteDb,
+      "CREATE TABLE z(a);"
+      "SELECT dolt_commit('-Am','r');");
+    if( rc!=SQLITE_OK ){
+      sqlite3_close(remoteDb);
+      return rc;
+    }
+  }
+  rc = open_db(zDb, &db);
+  if( rc!=SQLITE_OK ){
+    if( remoteDb ) sqlite3_close(remoteDb);
+    return rc;
+  }
+  if( bClone ){
+    sqlite3_snprintf(sizeof(zSql), zSql,
+                     "SELECT dolt_clone('file://%s')", zRemote);
+    rc = execSql(db, zSql);
+  }
+  if( rc==SQLITE_OK ){
+    rc = execSql(db,
+      "CREATE TABLE t(id INTEGER PRIMARY KEY);"
+      "SELECT dolt_commit('-Am','init');");
+  }
+  if( rc==SQLITE_OK && bAdvance ){
+    rc = execSql(remoteDb,
+      "INSERT INTO z VALUES(1);"
+      "SELECT dolt_commit('-am','r2');");
+  }
+  if( remoteDb ) sqlite3_close(remoteDb);
+  if( rc!=SQLITE_OK ){
+    sqlite3_close(db);
+    return rc;
+  }
+  *ppDb = db;
+  return SQLITE_OK;
+}
+
+static int stalePeerCommit(const char *zDb){
+  sqlite3 *peer = 0;
+  int rc;
+  rc = open_db(zDb, &peer);
+  if( rc!=SQLITE_OK ) return rc;
+  rc = execSql(peer,
+    "INSERT INTO t VALUES(900);"
+    "SELECT dolt_commit('-am','peer');");
+  sqlite3_close(peer);
+  return rc;
+}
+
+static void staleCloseSession(sqlite3 *db, const char *zDb, const char *zRemote){
+  sqlite3_close(db);
+  removeDbFiles(zDb);
+  if( zRemote && zRemote[0] ) removeDbFiles(zRemote);
+}
+
+static void checkPeerVisible(sqlite3 *db, const char *zRow, const char *zHead,
+                             const char *zAgain){
+  check(zRow, strcmp(queryScalarText(db,
+      "SELECT count(*) FROM t WHERE id=900"), "1")==0);
+  check(zHead, strcmp(queryScalarText(db,
+      "SELECT message FROM dolt_log LIMIT 1"), "peer")==0);
+  check(zAgain, strcmp(queryScalarText(db,
+      "SELECT count(*) FROM t"), "1")==0);
+}
+
+static void run_fetch_gc_sees_peer_commit(void){
+  sqlite3 *db = 0;
+  char zDb[256];
+  char zRemote[256];
+  int rc;
+
+  printf("=== Fetch GC Sees Peer Commit Test ===\n\n");
+
+  rc = staleOpenSession("stale_fetch", 1, 1, &db,
+                        zDb, (int)sizeof(zDb), zRemote, (int)sizeof(zRemote));
+  check("fetch_peer_open", rc==SQLITE_OK);
+  check("fetch_peer_warm",
+        strcmp(queryScalarText(db, "SELECT count(*) FROM t"), "0")==0);
+  check("fetch_peer_commit", stalePeerCommit(zDb)==SQLITE_OK);
+  check("fetch_peer_fetch",
+        strcmp(queryScalarText(db, "SELECT dolt_fetch('origin')"), "0")==0);
+  checkPeerVisible(db, "fetch_sees_peer_row", "fetch_sees_peer_head",
+                   "fetch_sees_peer_again");
+  check("fetch_insert_after",
+        execSql(db, "INSERT INTO t VALUES(3)")==SQLITE_OK);
+  check("fetch_insert_keeps_peer",
+        strcmp(queryScalarText(db, "SELECT count(*) FROM t"), "2")==0);
+  staleCloseSession(db, zDb, zRemote);
+  db = 0;
+
+  rc = staleOpenSession("stale_gc", 0, 0, &db,
+                        zDb, (int)sizeof(zDb), zRemote, (int)sizeof(zRemote));
+  check("gc_peer_open", rc==SQLITE_OK);
+  check("gc_peer_warm",
+        strcmp(queryScalarText(db, "SELECT count(*) FROM t"), "0")==0);
+  check("gc_peer_commit", stalePeerCommit(zDb)==SQLITE_OK);
+  {
+    const char *zGc = queryScalarText(db, "SELECT dolt_gc()");
+    check("gc_peer_gc", zGc && strstr(zGc, "chunks kept")!=0);
+  }
+  checkPeerVisible(db, "gc_sees_peer_row", "gc_sees_peer_head",
+                   "gc_sees_peer_again");
+  staleCloseSession(db, zDb, zRemote);
+  db = 0;
+
+  rc = staleOpenSession("stale_control", 0, 0, &db,
+                        zDb, (int)sizeof(zDb), zRemote, (int)sizeof(zRemote));
+  check("control_peer_open", rc==SQLITE_OK);
+  check("control_peer_warm",
+        strcmp(queryScalarText(db, "SELECT count(*) FROM t"), "0")==0);
+  check("control_peer_commit", stalePeerCommit(zDb)==SQLITE_OK);
+  check("control_peer_noop",
+        strcmp(queryScalarText(db, "SELECT 1"), "1")==0);
+  checkPeerVisible(db, "control_sees_peer_row", "control_sees_peer_head",
+                   "control_sees_peer_again");
+  staleCloseSession(db, zDb, zRemote);
+  db = 0;
+
+  rc = staleOpenSession("stale_quiet", 1, 0, &db,
+                        zDb, (int)sizeof(zDb), zRemote, (int)sizeof(zRemote));
+  check("quiet_peer_open", rc==SQLITE_OK);
+  check("quiet_peer_warm",
+        strcmp(queryScalarText(db, "SELECT count(*) FROM t"), "0")==0);
+  check("quiet_peer_commit", stalePeerCommit(zDb)==SQLITE_OK);
+  check("quiet_peer_fetch",
+        strcmp(queryScalarText(db, "SELECT dolt_fetch('origin')"), "0")==0);
+  checkPeerVisible(db, "quiet_fetch_sees_peer_row", "quiet_fetch_sees_peer_head",
+                   "quiet_fetch_sees_peer_again");
+  staleCloseSession(db, zDb, zRemote);
+  db = 0;
+
+  rc = staleOpenSession("stale_txn", 1, 1, &db,
+                        zDb, (int)sizeof(zDb), zRemote, (int)sizeof(zRemote));
+  check("txn_peer_open", rc==SQLITE_OK);
+  check("txn_peer_begin", execSql(db, "BEGIN")==SQLITE_OK);
+  check("txn_snapshot_before",
+        strcmp(queryScalarText(db, "SELECT count(*) FROM t"), "0")==0);
+  check("txn_peer_commit", stalePeerCommit(zDb)==SQLITE_OK);
+  check("txn_peer_fetch",
+        strcmp(queryScalarText(db, "SELECT dolt_fetch('origin')"), "0")==0);
+  check("txn_fetch_keeps_snapshot",
+        strcmp(queryScalarText(db, "SELECT count(*) FROM t"), "0")==0);
+  check("txn_fetch_keeps_head",
+        strcmp(queryScalarText(db,
+            "SELECT message FROM dolt_log LIMIT 1"), "init")==0);
+  check("txn_peer_commit_sql", execSql(db, "COMMIT")==SQLITE_OK);
+  checkPeerVisible(db, "txn_fetch_after_commit_sees_peer",
+                   "txn_fetch_after_commit_head",
+                   "txn_fetch_after_commit_again");
+  staleCloseSession(db, zDb, zRemote);
+  db = 0;
+
+  rc = staleOpenSession("stale_pull", 1, 1, &db,
+                        zDb, (int)sizeof(zDb), zRemote, (int)sizeof(zRemote));
+  check("pull_peer_open", rc==SQLITE_OK);
+  check("pull_peer_warm",
+        strcmp(queryScalarText(db, "SELECT count(*) FROM t"), "0")==0);
+  check("pull_peer_commit", stalePeerCommit(zDb)==SQLITE_OK);
+  check("pull_peer_pull",
+        strcmp(queryScalarText(db, "SELECT dolt_pull('origin')"), "0")==0);
+  check("pull_sees_peer_row", strcmp(queryScalarText(db,
+      "SELECT count(*) FROM t WHERE id=900"), "1")==0);
+  check("pull_sees_peer_again", strcmp(queryScalarText(db,
+      "SELECT count(*) FROM t"), "1")==0);
+  check("pull_keeps_peer_commit", strcmp(queryScalarText(db,
+      "SELECT count(*) FROM dolt_log WHERE message='peer'"), "1")==0);
+  staleCloseSession(db, zDb, zRemote);
+}
+
 static void run_chunk_walk_corruption(void){
   static const u8 badCatalog[] = {
     'D','L','C','T',
@@ -17713,6 +17912,7 @@ static const RegressionCase aCases[] = {
   { "clone_ref_install_survives_window_gc", "Clone Ref Install Survives Window GC Test", run_clone_ref_install_survives_window_gc },
   { "clone_deleted_branch_installs_nothing", "Clone Deleted Branch Installs Nothing Test", run_clone_deleted_branch_installs_nothing },
   { "fetch_preserves_concurrent_local_refs", "Fetch Preserves Concurrent Local Refs Test", run_fetch_preserves_concurrent_local_refs },
+  { "fetch_gc_sees_peer_commit", "Fetch GC Sees Peer Commit Test", run_fetch_gc_sees_peer_commit },
   { "chunk_walk_corruption", "Chunk Walk Corruption Test", run_chunk_walk_corruption },
   { "catalog_deserialize_corruption", "Catalog Deserialize Corruption Test", run_catalog_deserialize_corruption },
   { "schema_loader_missing_master", "Schema Loader Missing Master Test", run_schema_loader_missing_master },
