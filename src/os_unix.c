@@ -1330,6 +1330,10 @@ struct unixInodeInfo {
   int nLock;                        /* Number of outstanding file locks */
   unsigned char eFileLock;          /* One of SHARED_LOCK, RESERVED_LOCK etc. */
   unsigned char bProcessLock;       /* An exclusive process lock is held */
+#ifdef DOLTLITE_PROLLY
+  unixFile *pGraphLock;
+  int graphLockPid;
+#endif
   UnixUnusedFd *pUnused;            /* Unused file descriptors to close */
   int nRef;                       /* Number of pointers to this structure */
   unixShmNode *pShmNode;          /* Shared memory associated with this inode */
@@ -1805,6 +1809,44 @@ static int osSetPosixAdvisoryLock(
 ** Zero is returned if the call completes successfully, or -1 if a call
 ** to fcntl() fails. In this case, errno is set appropriately (by fcntl()).
 */
+#ifdef DOLTLITE_PROLLY
+static int unixGraphLock(unixFile *pFile, int bLock){
+  unixInodeInfo *pInode = pFile->pInode;
+  struct flock lock;
+  int rc = SQLITE_OK;
+  int pid = osGetpid(0);
+  if( !pInode ) return SQLITE_NOTFOUND;
+  sqlite3_mutex_enter(pInode->pLockMutex);
+  if( pInode->pGraphLock && pInode->graphLockPid!=pid ){
+    pInode->pGraphLock = 0;
+    pInode->nLock--;
+  }
+  if( bLock && pInode->pGraphLock ){
+    rc = pInode->pGraphLock==pFile ? SQLITE_OK : SQLITE_BUSY;
+  }else if( bLock || pInode->pGraphLock==pFile ){
+    lock.l_whence = SEEK_SET;
+    lock.l_start = PENDING_BYTE - 1;
+    lock.l_len = 1;
+    lock.l_type = bLock ? F_WRLCK : F_UNLCK;
+    rc = osFcntl(pFile->h, F_SETLK, &lock);
+    if( rc!=0 ){
+      rc = sqliteErrorFromPosixError(errno,
+          bLock ? SQLITE_IOERR_LOCK : SQLITE_IOERR_UNLOCK);
+    }else if( bLock ){
+      pInode->pGraphLock = pFile;
+      pInode->graphLockPid = pid;
+      pInode->nLock++;
+    }else{
+      pInode->pGraphLock = 0;
+      pInode->nLock--;
+      if( pInode->nLock==0 ) closePendingFds(pFile);
+    }
+  }
+  sqlite3_mutex_leave(pInode->pLockMutex);
+  return rc;
+}
+#endif
+
 static int unixFileLock(unixFile *pFile, struct flock *pLock){
   int rc;
   unixInodeInfo *pInode = pFile->pInode;
@@ -2253,6 +2295,12 @@ static int posixUnlock(sqlite3_file *id, int eFileLock, int handleNFSUnlock){
       lock.l_type = F_UNLCK;
       lock.l_whence = SEEK_SET;
       lock.l_start = lock.l_len = 0L;
+#ifdef DOLTLITE_PROLLY
+      if( pInode->pGraphLock ){
+        lock.l_start = PENDING_BYTE;
+        lock.l_len = SHARED_SIZE + 2;
+      }
+#endif
       if( unixFileLock(pFile, &lock)==0 ){
         pInode->eFileLock = NO_LOCK;
       }else{
@@ -2351,6 +2399,9 @@ static int unixClose(sqlite3_file *id){
 
   assert( pInode!=0 );
   verifyDbFile(pFile);
+#ifdef DOLTLITE_PROLLY
+  unixGraphLock(pFile, 0);
+#endif
   unixUnlock(id, NO_LOCK);
   assert( unixFileMutexNotheld(pFile) );
   unixEnterMutex();
@@ -4185,6 +4236,9 @@ static int unixFileControl(sqlite3_file *id, int op, void *pArg){
         return SQLITE_IOERR_ACCESS;
       }
       return SQLITE_OK;
+    }
+    case SQLITE_FCNTL_DOLTLITE_GRAPH_LOCK: {
+      return unixGraphLock(pFile, *(int*)pArg);
     }
 #endif
     case SQLITE_FCNTL_LOCKSTATE: {

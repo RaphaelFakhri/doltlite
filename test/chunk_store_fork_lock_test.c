@@ -3,6 +3,7 @@
 #include <string.h>
 #include "sqlite3.h"
 #include "chunk_store_int.h"
+#include "doltlite_internal.h"
 #include "lib/test_tmpdir.h"
 
 #ifndef _WIN32
@@ -169,9 +170,148 @@ done:
 #endif
 }
 
+
+#ifndef _WIN32
+static void check_process_busy(const char *zPath, const char *zName){
+  int status = 0;
+  pid_t pid = fork();
+  if( pid==0 ){
+    sqlite3 *child = 0;
+    int ok = sqlite3_open(zPath, &child)==SQLITE_OK;
+    if( ok ){
+      int rc = sqlite3_exec(child, "INSERT INTO t VALUES(99,'child')",0,0,0);
+      ok = rc==SQLITE_BUSY;
+      rc = sqlite3_exec(child, "SELECT dolt_branch('child')",0,0,0);
+      ok = ok && rc==SQLITE_BUSY;
+    }
+    sqlite3_close(child);
+    _exit(ok ? 0 : 1);
+  }
+  if( pid>0 ) waitpid(pid, &status, 0);
+  check(zName, pid>0 && WIFEXITED(status) && WEXITSTATUS(status)==0);
+}
+#endif
+
+static void test_unlinked_graph_lock(int cached){
+#ifdef _WIN32
+  (void)cached;
+#else
+  const char *zPath = DOLTLITE_TEST_TMPDIR "/test_unlinked_graph_lock.db";
+  const char *zLock = DOLTLITE_TEST_TMPDIR "/.test_unlinked_graph_lock.db-lock";
+  sqlite3 *db = 0, *peer = 0, *reader = 0;
+  sqlite3_stmt *stmt = 0;
+  int rc;
+
+  rm_db(zPath);
+  check("unlink_setup", create_committed_db(zPath)==SQLITE_OK);
+  check("unlink_open", sqlite3_open(zPath, &db)==SQLITE_OK);
+  if( cached ){
+    check("unlink_cached_open", sqlite3_open(zPath, &peer)==SQLITE_OK);
+    check("unlink_cached_lock", exec_sql(peer, "BEGIN IMMEDIATE; ROLLBACK")==SQLITE_OK);
+  }
+  check("unlink_writer_begin", exec_sql(db,
+    "BEGIN IMMEDIATE; INSERT INTO t VALUES(2,'owner')")==SQLITE_OK);
+  check("unlink_sidecar_removed", remove(zLock)==0);
+
+  check_process_busy(zPath, "unlink_process_sql_and_vc_busy");
+  if( !peer ) check("unlink_peer_open", sqlite3_open(zPath, &peer)==SQLITE_OK);
+  check("unlink_peer_sql_busy", sqlite3_exec(peer,
+    "INSERT INTO t VALUES(3,'peer')", 0, 0, 0)==SQLITE_BUSY);
+  check("unlink_peer_vc_busy", sqlite3_exec(peer,
+    "SELECT dolt_branch('peer')", 0, 0, 0)==SQLITE_BUSY);
+  rc = sqlite3_prepare_v2(peer, "SELECT count(*) FROM t", -1, &stmt, 0);
+  check("unlink_reader", rc==SQLITE_OK && sqlite3_step(stmt)==SQLITE_ROW
+                          && sqlite3_column_int(stmt, 0)==1);
+  sqlite3_finalize(stmt);
+  check("unlink_reader_open", sqlite3_open(zPath, &reader)==SQLITE_OK);
+  check("unlink_reader_close", sqlite3_close(reader)==SQLITE_OK);
+  check_process_busy(zPath, "unlink_process_busy_after_reader_close");
+  check("unlink_owner_commit", exec_sql(db, "COMMIT")==SQLITE_OK);
+  check("unlink_peer_retry", exec_sql(peer,
+    "INSERT INTO t VALUES(3,'peer'); SELECT dolt_commit('-Am','both')")==SQLITE_OK);
+  check("unlink_old_handle_retry", exec_sql(db,
+    "INSERT INTO t VALUES(4,'owner-again')")==SQLITE_OK);
+  sqlite3_close(peer);
+  sqlite3_close(db);
+  check("unlink_reopen", sqlite3_open(zPath, &db)==SQLITE_OK);
+  stmt = 0;
+  rc = sqlite3_prepare_v2(db, "SELECT count(*) FROM t", -1, &stmt, 0);
+  check("unlink_rows_durable", rc==SQLITE_OK && sqlite3_step(stmt)==SQLITE_ROW
+                                && sqlite3_column_int(stmt, 0)==4);
+  sqlite3_finalize(stmt);
+  stmt = 0;
+  rc = sqlite3_prepare_v2(db, "PRAGMA integrity_check", -1, &stmt, 0);
+  check("unlink_integrity", rc==SQLITE_OK && sqlite3_step(stmt)==SQLITE_ROW
+                           && strcmp((const char*)sqlite3_column_text(stmt,0),"ok")==0);
+  sqlite3_finalize(stmt);
+  sqlite3_close(db);
+  rm_db(zPath);
+  remove(zLock);
+#endif
+}
+
+static void test_unlinked_lock_replacement(int backup){
+#ifndef _WIN32
+  const char *zPath = DOLTLITE_TEST_TMPDIR "/test_unlinked_replacement.db";
+  const char *zLock = DOLTLITE_TEST_TMPDIR "/.test_unlinked_replacement.db-lock";
+  sqlite3 *db = 0, *src = 0, *peer = 0;
+  ChunkStore *cs;
+  int rc;
+
+  rm_db(zPath);
+  check("unlink_replace_setup", create_committed_db(zPath)==SQLITE_OK);
+  check("unlink_replace_open", sqlite3_open(zPath, &db)==SQLITE_OK);
+  cs = doltliteGetChunkStore(db);
+  if( backup ){
+    check("unlink_replace_source", sqlite3_open(":memory:", &src)==SQLITE_OK);
+    check("unlink_replace_source_rows", exec_sql(src,
+      "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT); INSERT INTO t VALUES(1,'replacement')")==SQLITE_OK);
+  }
+  sqlite3_mutex_enter(sqlite3_db_mutex(db));
+  rc = chunkStoreLockAndRefresh(cs);
+  check("unlink_replace_lock", rc==SQLITE_OK);
+  check("unlink_replace_remove", remove(zLock)==0);
+  if( rc==SQLITE_OK ){
+    if( backup ){
+      sqlite3_backup *pBackup = sqlite3_backup_init(db, "main", src, "main");
+      check("unlink_replace_backup_init", pBackup!=0);
+      if( pBackup ){
+        check("unlink_replace_backup_step", sqlite3_backup_step(pBackup,-1)==SQLITE_DONE);
+        check("unlink_replace_backup_finish", sqlite3_backup_finish(pBackup)==SQLITE_OK);
+      }
+    }else{
+      check("unlink_replace_gc", doltliteGcCompactStore(db, cs)==SQLITE_OK);
+    }
+    check("unlink_replace_peer_open", sqlite3_open(zPath, &peer)==SQLITE_OK);
+    check("unlink_replace_sql_busy", sqlite3_exec(peer,
+      "INSERT INTO t VALUES(2,'peer')",0,0,0)==SQLITE_BUSY);
+    check("unlink_replace_vc_busy", sqlite3_exec(peer,
+      "SELECT dolt_branch('peer')",0,0,0)==SQLITE_BUSY);
+    check_process_busy(zPath, "unlink_replace_process_busy");
+    chunkStoreUnlock(cs);
+    check("unlink_replace_retry", exec_sql(peer,
+      "INSERT INTO t VALUES(2,'peer'); SELECT dolt_commit('-Am','peer')")==SQLITE_OK);
+    check("unlink_replace_owner_retry", exec_sql(db,
+      "INSERT INTO t VALUES(3,'owner')")==SQLITE_OK);
+  }
+  sqlite3_mutex_leave(sqlite3_db_mutex(db));
+  sqlite3_close(peer);
+  sqlite3_close(src);
+  sqlite3_close(db);
+  rm_db(zPath);
+  remove(zLock);
+#else
+  (void)backup;
+#endif
+}
+
 int main(void){
   test_fork_child_does_not_keep_parent_lock();
   test_graph_lock_promotion_has_one_winner();
+  test_unlinked_graph_lock(0);
+  test_unlinked_graph_lock(1);
+  test_unlinked_lock_replacement(0);
+  test_unlinked_lock_replacement(1);
 
   printf("\n");
   printf("chunk_store_fork_lock_test: %d passed, %d failed\n", nPass, nFail);

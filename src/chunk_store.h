@@ -305,7 +305,7 @@ struct ChunkStore {
                           ** served, so a reload must not adopt it as empty */
   u8 notADatabase;        /* Wrong/missing magic. Open succeeds; first use
                           ** is SQLITE_NOTADB and does not overwrite (misc5-4.1). */
-  sqlite3_file *pGraphLockFile;
+  struct CsFileLockState *pGraphLockFile;
   char *pGraphLockName;        /* owned name for pGraphLockFile (xOpen) */
   sqlite3_mutex *pLockMutex;
   int lockDepth;
@@ -341,6 +341,7 @@ void chunkStoreUnlock(ChunkStore *cs);
        || ((cs)->pGraphLockFile!=0 && (cs)->lockDepth>0) ); \
 }while(0)
 int chunkStoreHasExternalChanges(ChunkStore *cs, int *pChanged);
+int chunkStoreReplaceLockedFile(ChunkStore *cs, const char *zTmp, int *pRetainTmp);
 int chunkStorePublishPathReplacementProof(
   ChunkStore *cs,
   const ProllyHash *pFrom,

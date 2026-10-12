@@ -10,7 +10,15 @@
 #include <stdlib.h>
 #include <limits.h>
 
-typedef sqlite3_file *CsFileLock;
+typedef struct CsFileLockState *CsFileLock;
+struct CsFileLockState {
+  sqlite3_file *pFile;
+  sqlite3_file *pGuard;
+  char *zGuard;
+  char *zPath;
+  sqlite3_vfs *pVfs;
+  int readOnly;
+};
 typedef struct CsReadLock CsReadLock;
 struct CsReadLock {
   sqlite3_file *pFile;
@@ -24,12 +32,13 @@ struct CsReadLock {
 #define CS_PENDING_DRAIN_LIMIT (64*1024*1024)
 
 
-int csFileLock(sqlite3_vfs *pVfs, const char *path,
-               sqlite3_file **ppFile, char **pzName);
+int csFileLock(sqlite3_vfs *pVfs, const char *path, int openFlags,
+               CsFileLock *ppFile, char **pzName);
 int csReadLock(ChunkStore *cs, CsReadLock *pLock);
 int csReadUnlock(ChunkStore *cs, CsReadLock *pLock);
 int csFileLockPromote(sqlite3_file *pFile);
-void csFileUnlock(sqlite3_file *pFile, char **pzName);
+int csFileLockOutput(sqlite3_file *pFile);
+void csFileUnlock(CsFileLock pFile, char **pzName);
 int csReloadFromDiskPreservingLocalRefs(ChunkStore *cs);
 int csRestoreOrMergeLocalRefs(ChunkStore *cs, SavedRefsState *pSaved,
                               const ProllyHash *pSavedRefsHash,

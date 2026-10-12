@@ -776,7 +776,7 @@ static void csWriteCleanCloseMarker(ChunkStore *cs){
 
   lockHeld = cs->lockDepth>0;
   if( !lockHeld ){
-    rc = csFileLock(cs->file.pVfs, cs->file.zFilename, &lockFd, &lockName);
+    rc = csFileLock(cs->file.pVfs, cs->file.zFilename, 0, &lockFd, &lockName);
     if( rc!=SQLITE_OK ) return;
   }
 

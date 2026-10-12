@@ -1872,8 +1872,6 @@ exclusive exclusive-2.11 class=intentional  # locking_mode=exclusive not enforce
 exclusive exclusive-3.1 class=intentional  # locking_mode=exclusive not enforced; extra rows are the peer's successful concurrent writes
 exclusive exclusive-3.2 class=intentional  # locking_mode=exclusive not enforced; extra rows are the peer's successful concurrent writes
 exclusive exclusive-3.5 class=intentional  # locking_mode=exclusive not enforced; extra rows are the peer's successful concurrent writes
-exclusive exclusive-5.2 class=intentional  # retained graph-lock handle raises the instrumented open-file count
-exclusive exclusive-5.7 class=intentional  # retained graph-lock handle raises the instrumented open-file count
 exclusive exclusive-6.2 class=intentional  # locking_mode=exclusive not enforced; extra rows are the peer's successful concurrent writes
 exclusive exclusive-6.3 class=intentional  # locking_mode=exclusive not enforced; extra rows are the peer's successful concurrent writes
 exclusive exclusive-7.1 class=intentional  # locking_mode=exclusive not enforced; extra rows are the peer's successful concurrent writes
@@ -3012,7 +3010,6 @@ e_reindex e_reindex-2.6.8 class=intentional
 # filename and the parameter list differ.
 e_uri e_uri-3.2 class=intentional  # parse_uri records the LAST xOpen seen by a testvfs. doltlite's chunk store performs extra VFS opens after the initial URI open (traced with a log-all-xOpens repro): for relative paths it re-opens the resolved absolute path with no URI parameter block, so the recorded open has the right file but empty params (3.2/3.3); for absolute paths the recorded open is the eager ".{db}-lock" sidecar (4.2-4.4, 12.x, 13.x), so both the filename and the parameter list differ.
 e_uri e_uri-3.3 class=intentional
-e_uri e_uri-4.1 class=intentional
 e_uri e_uri-4.2 class=intentional
 e_uri e_uri-4.3 class=intentional
 e_uri e_uri-4.4 class=intentional
@@ -3473,111 +3470,6 @@ sysfault sysfault-1.2.2-vfsfault-transient.8 class=intentional
 # doltlite intentionally rejects ("journal_mode is not configurable on
 # doltlite-format databases"), so every fault index — including the
 # fault-free final iteration — fails with that error.
-sysfault sysfault-2.1-vfsfault-transient.1 class=intentional  # sections 2.1/2.2: the body runs PRAGMA journal_mode=truncate, which doltlite intentionally rejects ("journal_mode is not configurable on doltlite-format databases"), so every fault index — including the fault-free final iteration — fails with that error.
-sysfault sysfault-2.1-vfsfault-transient.2 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.3 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.4 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.5 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.6 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.7 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.8 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.9 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.10 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.11 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.12 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.13 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.14 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.15 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.16 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.17 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.18 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.19 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.20 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.21 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.22 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.23 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.24 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.25 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.26 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.27 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.28 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.29 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.30 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.31 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.32 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.33 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.34 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.35 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.36 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.37 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.38 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.39 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.40 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.41 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.42 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.43 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.44 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.45 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.46 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.47 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.48 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.49 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.50 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.51 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.52 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.53 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.54 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.55 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.56 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.57 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.58 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.59 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.60 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.61 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.62 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.63 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.64 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.65 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.66 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.67 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.68 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.69 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.70 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.71 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.72 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.73 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.74 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.75 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.76 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.77 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.78 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.79 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.80 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.81 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.82 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.83 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.84 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.85 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.86 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.87 class=intentional
-sysfault sysfault-2.2-vfsfault-transient.1 class=intentional
-sysfault sysfault-2.2-vfsfault-transient.2 class=intentional
-sysfault sysfault-2.2-vfsfault-transient.3 class=intentional
-sysfault sysfault-2.2-vfsfault-transient.5 class=intentional
-sysfault sysfault-2.2-vfsfault-transient.50 class=intentional
-sysfault sysfault-2.2-vfsfault-transient.51 class=intentional
-sysfault sysfault-2.2-vfsfault-transient.52 class=intentional
-sysfault sysfault-2.2-vfsfault-transient.53 class=intentional
-sysfault sysfault-2.2-vfsfault-transient.55 class=intentional
-sysfault sysfault-2.2-vfsfault-transient.56 class=intentional
-sysfault sysfault-2.2-vfsfault-transient.57 class=intentional
-sysfault sysfault-2.2-vfsfault-transient.59 class=intentional
-sysfault sysfault-2.2-vfsfault-persistent.107 class=intentional
-sysfault sysfault-2.2-vfsfault-persistent.110 class=intentional
-sysfault sysfault-2.2-vfsfault-persistent.111 @coverage class=intentional
-sysfault sysfault-2.2-vfsfault-transient.107 class=intentional
-sysfault sysfault-2.2-vfsfault-transient.110 class=intentional
-sysfault sysfault-2.2-vfsfault-transient.111 @coverage class=intentional
 # section 3: fstat/fallocate EIO injection — stock expects every fault
 # point to still succeed ({0 20000}); doltlite hits fstat/fallocate in
 # paths where the fault becomes a "disk I/O error".
@@ -5348,41 +5240,7 @@ incrvacuum3 incrvacuum3-2.1.8.3 class=intentional
 
 # sysfault §2 vfsfault indices that fail now that journal_mode=truncate no-ops
 # (the body runs instead of erroring at the pragma); fault-index set, Linux CI is the oracle.
-sysfault sysfault-2.1-vfsfault-transient.100 class=intentional  # sysfault §2 vfsfault indices that fail now that journal_mode=truncate no-ops (the body runs instead of erroring at the pragma); fault-index set, Linux CI is the oracle.
-sysfault sysfault-2.1-vfsfault-transient.101 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.102 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.103 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.104 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.105 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.106 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.107 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.108 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.109 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.110 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.111 @coverage class=intentional
-sysfault sysfault-2.1-vfsfault-transient.112 @coverage class=intentional
-sysfault sysfault-2.1-vfsfault-transient.88 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.89 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.90 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.91 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.92 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.93 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.94 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.95 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.96 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.97 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.98 class=intentional
-sysfault sysfault-2.1-vfsfault-transient.99 class=intentional
-sysfault sysfault-2.2-vfsfault-persistent.108 class=intentional
-sysfault sysfault-2.2-vfsfault-persistent.109 class=intentional
-sysfault sysfault-2.2-vfsfault-persistent.112 @coverage class=intentional
-sysfault sysfault-2.2-vfsfault-transient.108 class=intentional
-sysfault sysfault-2.2-vfsfault-transient.109 class=intentional
-sysfault sysfault-2.2-vfsfault-transient.112 @coverage class=intentional
 
-stmt stmt-1.2 class=intentional  # retained graph-lock handle raises the instrumented open-file count
-stmt stmt-1.5 class=intentional  # retained graph-lock handle raises the instrumented open-file count
-stmt stmt-1.7 class=intentional  # retained graph-lock handle raises the instrumented open-file count
 
 # crash4: first-commit sector trash; reopen surfaces NOTADB (was crash)
 crash4 crash4-1.1.2 class=intentional  # creation-batch sector trash; reopen NOTADB, no journal recovery anchor

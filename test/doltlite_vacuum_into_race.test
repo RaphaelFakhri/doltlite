@@ -77,6 +77,32 @@ do_test doltlite_vacuum_into_race-1.3 {
 } {ok}
 chk close
 
+if {$tcl_platform(platform) eq "unix"} {
+  vacuum_race_setup
+  set ::vir_fired 0
+  set ::vir_peer_rc 0
+  proc vacuum_race_unlinked_peer {method path id offset amount} {
+    if {!$::vir_fired && [file tail $path] eq "vir_target.db" && $offset==0} {
+      forcedelete .vir_target.db-lock
+    }
+    return [vacuum_race_peer $method $path $id $offset $amount]
+  }
+  testvfs racevfs
+  racevfs filter {xWrite}
+  racevfs script vacuum_race_unlinked_peer
+  sqlite3 db vir_source.db -vfs racevfs
+  do_test doltlite_vacuum_into_race-3.0 {
+    list [catch {db eval {VACUUM INTO 'vir_target.db'}}] $::vir_fired $::vir_peer_rc
+  } {0 1 1}
+  db close
+  racevfs delete
+  sqlite3 chk vir_target.db
+  do_test doltlite_vacuum_into_race-3.1 {
+    list [chk eval {SELECT count(*) FROM source_rows}] [chk eval {PRAGMA integrity_check}]
+  } {1 ok}
+  chk close
+}
+
 # The source is never touched by any of this.
 sqlite3 s2 vir_source.db
 do_test doltlite_vacuum_into_race-1.4 {

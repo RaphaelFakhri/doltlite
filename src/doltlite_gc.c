@@ -776,7 +776,8 @@ static int gcWriteCompactedTo(
     ** this open must not be clobbered — refuse and leave their file alone. */
     if( pbTargetNonEmpty ){
       i64 szNow = 0;
-      rc = sqlite3OsFileSize(pTmpFile, &szNow);
+      rc = csFileLockOutput(pTmpFile);
+      if( rc==SQLITE_OK ) rc = sqlite3OsFileSize(pTmpFile, &szNow);
       if( rc==SQLITE_OK && szNow>0 ){
         *pbTargetNonEmpty = 1;
         rc = SQLITE_ERROR;
@@ -851,10 +852,15 @@ static int gcWriteCompactedTo(
     }
     if( rc!=SQLITE_OK ){
       sqlite3_free(w.aBuf);
+#if !SQLITE_OS_UNIX
       sqlite3OsCloseFree(pTmpFile);
+#endif
       sqlite3BeginBenignMalloc();
       sqlite3OsDelete(chunkFileGetVfs(&cs->file), zPath, 0);
       sqlite3EndBenignMalloc();
+#if SQLITE_OS_UNIX
+      sqlite3OsCloseFree(pTmpFile);
+#endif
       sqlite3_free(aNewIndex);
       return rc;
     }
@@ -921,9 +927,7 @@ static int gcRewriteFile(
 #endif
 
       GC_CRASH_CHECK();
-      rc = sqlite3OsReplaceFile(chunkFileGetVfs(&cs->file), zTmp,
-                                chunkFileGetFilename(&cs->file),
-                                &retainTmp);
+      rc = chunkStoreReplaceLockedFile(cs, zTmp, &retainTmp);
       if( rc!=SQLITE_OK ){
 #if SQLITE_OS_WIN
         if( chunkFileGetHandle(&cs->file)==0 ){
@@ -1244,7 +1248,7 @@ int doltliteGcVacuumInto(
   i64 nNewData = 0;
   i64 finalSize = 0;
   sqlite3_file *pOutFile = 0;
-  sqlite3_file *pDestLock = 0;
+  CsFileLock pDestLock = 0;
   char *zDestLockName = 0;
   char *zPath = 0;
   int rc;
@@ -1272,7 +1276,8 @@ int doltliteGcVacuumInto(
   ** The source graph lock says nothing about another process committing a
   ** database at this path, and the emptiness check below would otherwise be
   ** a guess that a peer can invalidate before the first byte goes out. */
-  rc = csFileLock(chunkFileGetVfs(&cs->file), zOut, &pDestLock, &zDestLockName);
+  rc = csFileLock(chunkFileGetVfs(&cs->file), zOut, SQLITE_OPEN_READONLY,
+                  &pDestLock, &zDestLockName);
   if( rc!=SQLITE_OK ){
     *pzPhase = "output file is in use by another connection";
     return rc==SQLITE_BUSY ? SQLITE_BUSY : rc;
