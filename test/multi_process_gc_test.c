@@ -1128,6 +1128,160 @@ static void test_gc_vs_put_deduped_against_garbage(void){
   remove(ready);
 }
 
+static void mpHoldPause(const char *pause, const char *ready){
+  FILE *hold;
+  remove(ready);
+  hold = fopen(pause, "w");
+  if( !hold ){ perror("pause"); _exit(1); }
+  if( fputc('x', hold)==EOF ){ perror("pause"); _exit(1); }
+  fclose(hold);
+}
+
+static int mpAwaitPause(const char *ready){
+  int i;
+  for( i=0; i<500 && access(ready, F_OK)!=0; i++ ) sqlite3_sleep(20);
+  return access(ready, F_OK)==0;
+}
+
+/* A commit refused after a peer moved the working set restores the session
+** to a catalog the peer's gc swept. The refusal is still BUSY, and the
+** leftovers of the refused commit do not fail this connection's next gc. */
+static void test_gc_sweeps_refused_commit_catalog(void){
+  char path[256];
+  char pause[256];
+  char ready[300];
+  sqlite3 *db = 0;
+  int status = 0;
+  pid_t pid;
+
+  printf("--- Test: refused commit after a peer swept its catalog ---\n");
+  snprintf(path, sizeof(path), DOLTLITE_TEST_TMPDIR "/mp_gc_refused_%d.db", (int)getpid());
+  snprintf(pause, sizeof(pause), DOLTLITE_TEST_TMPDIR "/mp_gc_refused_%d.pause", (int)getpid());
+  snprintf(ready, sizeof(ready), "%s.ready", pause);
+  setup_db_with_rows(path, 5);
+  mpHoldPause(pause, ready);
+  pid = fork();
+  if( pid==0 ){
+    int rc;
+    setenv("DOLTLITE_PAUSE_BEFORE_BRANCH_ADVANCE", pause, 1);
+    if( sqlite3_open(path, &db)!=SQLITE_OK ) _exit(1);
+    sqlite3_busy_timeout(db, 10000);
+    if( execSql(db, "INSERT INTO t VALUES(100,'mine')")!=SQLITE_OK ) _exit(2);
+    rc = execSql(db, "SELECT dolt_commit('-Am','mine')");
+    unsetenv("DOLTLITE_PAUSE_BEFORE_BRANCH_ADVANCE");
+    if( rc!=SQLITE_BUSY ) _exit(10);
+    if( execSql(db, "SELECT dolt_gc()")!=SQLITE_OK ) _exit(11);
+    if( countRowsDiag(db, "SELECT count(*) FROM t")!=7 ) _exit(12);
+    if( execSql(db, "SELECT dolt_commit('-Am','retry')")!=SQLITE_OK ) _exit(13);
+    sqlite3_close(db);
+    _exit(0);
+  }
+  if( pid<0 ){ perror("fork"); _exit(1); }
+  check("gc_refused_reached_pause", mpAwaitPause(ready));
+  check("gc_refused_peer_open", sqlite3_open(path, &db)==SQLITE_OK);
+  sqlite3_busy_timeout(db, 10000);
+  check("gc_refused_peer_insert",
+        execSql(db, "INSERT INTO t VALUES(200,'peer')")==SQLITE_OK);
+  check("gc_refused_peer_gc", execSql(db, "SELECT dolt_gc()")==SQLITE_OK);
+  remove(pause);
+  waitpid(pid, &status, 0);
+  if( !WIFEXITED(status) || WEXITSTATUS(status)!=0 ){
+    fprintf(stderr, "  refused-commit child exit %d\n",
+            WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+  }
+  check("gc_refused_commit_busy_then_recovers",
+        WIFEXITED(status) && WEXITSTATUS(status)==0);
+  check("gc_refused_integrity",
+        strcmp(queryScalarText(db, "PRAGMA integrity_check"), "ok")==0);
+  sqlite3_close(db);
+  remove(path);
+  remove(pause);
+  remove(ready);
+}
+
+/* dolt_add persists through a commit that detaches its local refs across
+** the graph lock. A peer's gc that lands first replaces the file; the
+** moved-file proof must still see this connection's branch tips. */
+static void test_gc_before_add_persist(void){
+  char path[256];
+  char pause[256];
+  char ready[300];
+  sqlite3 *db = 0;
+  int status = 0;
+  pid_t pid;
+
+  printf("--- Test: peer gc between dolt_add's staging and its persist ---\n");
+  snprintf(path, sizeof(path), DOLTLITE_TEST_TMPDIR "/mp_gc_addpersist_%d.db", (int)getpid());
+  snprintf(pause, sizeof(pause), DOLTLITE_TEST_TMPDIR "/mp_gc_addpersist_%d.pause", (int)getpid());
+  snprintf(ready, sizeof(ready), "%s.ready", pause);
+  setup_db_with_rows(path, 5);
+  mpHoldPause(pause, ready);
+  pid = fork();
+  if( pid==0 ){
+    int rc;
+    if( sqlite3_open(path, &db)!=SQLITE_OK ) _exit(1);
+    sqlite3_busy_timeout(db, 10000);
+    if( execSql(db, "INSERT INTO t VALUES(100,'mine')")!=SQLITE_OK ) _exit(2);
+    setenv("DOLTLITE_PAUSE_BEFORE_PERSIST", pause, 1);
+    rc = execSql(db, "SELECT dolt_add('.')");
+    unsetenv("DOLTLITE_PAUSE_BEFORE_PERSIST");
+    if( rc==SQLITE_READONLY ) _exit(10);
+    if( rc!=SQLITE_OK && (rc&0xff)!=SQLITE_BUSY ) _exit(11);
+    if( execSql(db, "INSERT INTO t VALUES(300,'after')")!=SQLITE_OK ) _exit(12);
+    if( execSql(db, "SELECT dolt_add('.')")!=SQLITE_OK ) _exit(13);
+    sqlite3_close(db);
+    _exit(0);
+  }
+  if( pid<0 ){ perror("fork"); _exit(1); }
+  check("gc_addpersist_reached_pause", mpAwaitPause(ready));
+  check("gc_addpersist_peer_open", sqlite3_open(path, &db)==SQLITE_OK);
+  sqlite3_busy_timeout(db, 10000);
+  check("gc_addpersist_peer_gc", execSql(db, "SELECT dolt_gc()")==SQLITE_OK);
+  remove(pause);
+  waitpid(pid, &status, 0);
+  if( !WIFEXITED(status) || WEXITSTATUS(status)!=0 ){
+    fprintf(stderr, "  add-persist child exit %d\n",
+            WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+  }
+  check("gc_addpersist_not_readonly",
+        WIFEXITED(status) && WEXITSTATUS(status)==0);
+  check("gc_addpersist_rows",
+        countRowsDiag(db, "SELECT count(*) FROM t WHERE id IN (100,300)")==2);
+  sqlite3_close(db);
+  remove(path);
+  remove(pause);
+  remove(ready);
+}
+
+/* gc's own refresh consumes the signal that makes the next statement reload
+** the session, so a peer's write must still be visible after this
+** connection's gc, not the catalog the sweep may have collected. */
+static void test_own_gc_sees_peer_write(void){
+  char path[256];
+  sqlite3 *db = 0;
+  sqlite3 *peer = 0;
+
+  printf("--- Test: reads after this connection's gc see a peer's write ---\n");
+  snprintf(path, sizeof(path), DOLTLITE_TEST_TMPDIR "/mp_gc_ownreload_%d.db", (int)getpid());
+  setup_db_with_rows(path, 1);
+  check("gc_ownreload_open", sqlite3_open(path, &db)==SQLITE_OK);
+  check("gc_ownreload_peer_open", sqlite3_open(path, &peer)==SQLITE_OK);
+  check("gc_ownreload_local",
+        execSql(db, "INSERT INTO t VALUES(2,'mine')")==SQLITE_OK);
+  check("gc_ownreload_loaded", countRowsDiag(db, "SELECT count(*) FROM t")==2);
+  check("gc_ownreload_peer_write",
+        execSql(peer, "INSERT INTO t VALUES(3,'peer'); DELETE FROM t WHERE id=2")
+          ==SQLITE_OK);
+  check("gc_ownreload_gc", execSql(db, "SELECT dolt_gc()")==SQLITE_OK);
+  check("gc_ownreload_sees_peer",
+        strcmp(queryScalarText(db,
+          "SELECT group_concat(id) FROM (SELECT id FROM t ORDER BY id)"),
+          "1,3")==0);
+  sqlite3_close(peer);
+  sqlite3_close(db);
+  remove(path);
+}
+
 int main(){
   printf("=== Multi-Process GC Concurrency Tests ===\n\n");
 
@@ -1146,6 +1300,9 @@ int main(){
   test_stale_session_roots_after_gc();
   test_peer_rewrite_then_gc();
   test_gc_vs_put_deduped_against_garbage();
+  test_gc_sweeps_refused_commit_catalog();
+  test_gc_before_add_persist();
+  test_own_gc_sees_peer_write();
 
   printf("\n=== Results: %d passed, %d failed out of %d tests ===\n",
     nPass, nFail, nPass+nFail);

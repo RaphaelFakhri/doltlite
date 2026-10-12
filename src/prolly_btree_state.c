@@ -1494,6 +1494,7 @@ int doltlitePersistWorkingSetWithHash(sqlite3 *db, const ProllyHash *pWorkingCat
   if( rc!=SQLITE_OK ) return rc;
   if( AtomicLoad(&db->u1.isInterrupted)
    && !doltliteVcInterruptDeferred(db, 0) ) return SQLITE_INTERRUPT;
+  doltliteTestPause("DOLTLITE_PAUSE_BEFORE_PERSIST");
   rc = chunkStoreCommitWithBusyHandler(cs, prollyInvokeBusyHandler, p->pBt);
   if( rc==SQLITE_OK ) doltliteVcCommandInstalled(db);
   return rc;
