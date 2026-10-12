@@ -592,13 +592,14 @@ int doltliteSyncSessionToBranchTip(sqlite3 *db){
     rc = chunkStoreReadDiskBranchTip(cs, doltliteGetSessionBranch(db),
                                      &tip, &found);
   }
-  chunkStoreUnlock(cs);
-  if( rc!=SQLITE_OK ) return rc;
   doltliteGetSessionHead(db, &head);
-  if( found && prollyHashCompare(&tip, &head)!=0 ){
+  if( rc==SQLITE_OK
+   && ((found && prollyHashCompare(&tip, &head)!=0)
+       || chunkStoreWorkingSetMovedFromBasis(cs, doltliteGetSessionBranch(db))) ){
     doltliteInvalidateSessionWorkingState(db);
     rc = doltliteReloadSessionWorkingState(db);
   }
+  chunkStoreUnlock(cs);
   return rc;
 }
 
