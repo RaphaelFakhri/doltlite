@@ -1799,6 +1799,10 @@ int doltlitePushAs(
     if( attempt==0 ){
       originalExists = exists;
       originalCommit = remoteCommit;
+      if( bDelete && !exists ){
+        rc = SQLITE_NOTFOUND;
+        goto push_done;
+      }
       if( !bDelete && exists && !bForce
        && !prollyHashIsEmpty(&remoteCommit)
        && prollyHashCompare(&remoteCommit, &localCommit)!=0 ){
@@ -1829,7 +1833,6 @@ int doltlitePushAs(
         goto push_done;
       }
       rc = chunkStoreDeleteBranch(&refs, zBranch);
-      if( rc==SQLITE_NOTFOUND ) rc = SQLITE_OK;
     }else{
       DoltliteRemote *pLocalSrc = doltliteLocalAsRemote(pLocal, pRemote);
       const SequenceRef *aSeq = 0;
