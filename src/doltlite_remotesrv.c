@@ -408,33 +408,30 @@ static int parseContentLength(
 }
 
 /* zPrefix holds the header block plus any body bytes already read with it.
-** nHeader is the index just past the blank line. The rest of the body is
-** read here under timeoutMs. */
-static int parseRequest(
-  DoltliteConn *fd,
-  char *zPrefix, int nPrefix, int nHeader,
-  int timeoutMs,
+** nHeader is the index just past the blank line. Body bytes are not
+** copied out here: a token check has to be able to reject the request
+** before Content-Length is allocated. */
+static int parseRequestHeaders(
+  const char *zPrefix, int nPrefix, int nHeader,
   char *zMethod, int nMethodMax,
   char *zPath, int nPathMax,
   char *zAuth, int nAuthMax,
-  u8 **ppBody, int *pnBody
+  int *pContentLength,
+  int *pContentRc
 ){
   char aBuf[MAX_HEADER_SIZE];
   int contentLength = 0;
+  int contentRc = 0;
   int seenContentLength = 0;
   int seenAuthorization = 0;
-  int nHave;
-  const u8 *pHave;
   char *p;
 
-  *ppBody = 0;
-  *pnBody = 0;
+  *pContentLength = 0;
+  *pContentRc = 0;
   if( zAuth && nAuthMax>0 ) zAuth[0] = '\0';
   if( nHeader<=0 || nHeader>nPrefix || nHeader>=MAX_HEADER_SIZE ) return -1;
   memcpy(aBuf, zPrefix, (size_t)nHeader);
   aBuf[nHeader] = '\0';
-  nHave = nPrefix - nHeader;
-  pHave = (const u8 *)(zPrefix + nHeader);
 
   p = aBuf;
   {
@@ -481,13 +478,16 @@ static int parseRequest(
 
     if( headerNameEquals(p, nName, "Content-Length") ){
       int rc;
-      if( seenContentLength ) return -1;
-      seenContentLength = 1;
-      rc = parseContentLength(pValue, pValueEnd, &contentLength);
-      if( rc!=0 ) return rc;
+      if( seenContentLength ){
+        if( contentRc==0 ) contentRc = -1;
+      }else{
+        seenContentLength = 1;
+        rc = parseContentLength(pValue, pValueEnd, &contentLength);
+        if( rc!=0 ) contentRc = rc;
+      }
     }else if( headerNameEquals(p, nName, "Transfer-Encoding") ){
       /* Chunked request bodies are not implemented. */
-      return -1;
+      if( contentRc==0 ) contentRc = -1;
     }else if( zAuth && nAuthMax>0
            && headerNameEquals(p, nName, "Authorization") ){
       int len;
@@ -504,26 +504,46 @@ static int parseRequest(
     p = pEnd + 2;
   }
 
-  if( contentLength > 0 ){
-    u8 *pBody;
-    int nCopy;
-    pBody = (u8*)sqlite3_malloc(contentLength);
-    if( !pBody ) return -1;
-    nCopy = nHave;
-    if( nCopy>contentLength ) nCopy = contentLength;
-    if( nCopy>0 ) memcpy(pBody, pHave, (size_t)nCopy);
-    if( nCopy<contentLength ){
-      doltliteConnSetTimeout(fd, timeoutMs);
-      if( readExact(fd, pBody + nCopy, contentLength - nCopy,
-                    monotonicMs(), timeoutMs)!=0 ){
-        sqlite3_free(pBody);
-        return -1;
-      }
-    }
-    *ppBody = pBody;
-    *pnBody = contentLength;
-  }
+  *pContentLength = contentRc==0 ? contentLength : 0;
+  *pContentRc = contentRc;
+  return 0;
+}
 
+/* Allocate and read Content-Length. Bytes already sitting past the header
+** in zPrefix count toward that length. */
+static int readRequestBody(
+  DoltliteConn *fd,
+  const char *zPrefix, int nPrefix, int nHeader,
+  int contentLength,
+  int timeoutMs,
+  u8 **ppBody, int *pnBody
+){
+  int nHave;
+  const u8 *pHave;
+  u8 *pBody;
+  int nCopy;
+
+  *ppBody = 0;
+  *pnBody = 0;
+  if( contentLength<=0 ) return 0;
+  nHave = nPrefix - nHeader;
+  if( nHave<0 ) return -1;
+  pHave = (const u8 *)(zPrefix + nHeader);
+  pBody = (u8*)sqlite3_malloc(contentLength);
+  if( !pBody ) return -1;
+  nCopy = nHave;
+  if( nCopy>contentLength ) nCopy = contentLength;
+  if( nCopy>0 ) memcpy(pBody, pHave, (size_t)nCopy);
+  if( nCopy<contentLength ){
+    doltliteConnSetTimeout(fd, timeoutMs);
+    if( readExact(fd, pBody + nCopy, contentLength - nCopy,
+                  monotonicMs(), timeoutMs)!=0 ){
+      sqlite3_free(pBody);
+      return -1;
+    }
+  }
+  *ppBody = pBody;
+  *pnBody = contentLength;
   return 0;
 }
 
@@ -1273,29 +1293,43 @@ static void handleRequest(
   int isHasChunksEndpoint = 0;
   int isGetChunksEndpoint = 0;
   int exists = 0;
+  int contentLength = 0;
+  int contentRc = 0;
   sqlite3_vfs *pVfs;
   RemoteSrvPending pending;
 
-  rc = parseRequest(fd, zPrefix, nPrefix, nHeader, pSrv->timeoutMs,
-                    zMethod, sizeof(zMethod),
-                    zPath, sizeof(zPath),
-                    zAuth, sizeof(zAuth), &pBody, &nBody);
+  rc = parseRequestHeaders(zPrefix, nPrefix, nHeader,
+                           zMethod, sizeof(zMethod),
+                           zPath, sizeof(zPath),
+                           zAuth, sizeof(zAuth),
+                           &contentLength, &contentRc);
   if( rc!=0 ){
-    if( rc==-2 ){
-      sendPayloadTooLarge(fd);
-    }else{
-      sendBadRequest(fd);
-    }
+    sendBadRequest(fd);
     return;
   }
 
+  /* Content-Length may be a gigabyte. Decide auth before that allocation,
+  ** and before the declared body is read. */
   if( pSrv->authKeysDir ){
     if( doltliteCredsVerifyBearer(zAuth, pSrv->audience, pSrv->authKeysDir,
                                   (long)time(NULL), 0)!=0 ){
       sendUnauthorized(fd);
-      sqlite3_free(pBody);
       return;
     }
+  }
+  if( contentRc==-2 ){
+    sendPayloadTooLarge(fd);
+    return;
+  }
+  if( contentRc!=0 ){
+    sendBadRequest(fd);
+    return;
+  }
+  rc = readRequestBody(fd, zPrefix, nPrefix, nHeader, contentLength,
+                       pSrv->timeoutMs, &pBody, &nBody);
+  if( rc!=0 ){
+    sendBadRequest(fd);
+    return;
   }
 
   if( parsePath(zPath, zDbName, sizeof(zDbName),

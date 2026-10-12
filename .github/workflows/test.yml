@@ -585,6 +585,7 @@ jobs:
         bash ../test/remotesrv_bind_warning_test.sh ./doltlite ./doltlite-remotesrv
         bash ../test/remotesrv_http_concurrency_test.sh ./doltlite ./doltlite-remotesrv
         bash ../test/remotesrv_stall_test.sh ./doltlite ./doltlite-remotesrv
+        bash ../test/remotesrv_auth_body_test.sh ./doltlite ./doltlite-remotesrv
         bash ../test/remotesrv_http_partial_failure_test.sh ./doltlite ./doltlite-remotesrv
         bash ../test/remotesrv_http_force_push_test.sh ./doltlite ./doltlite-remotesrv
 

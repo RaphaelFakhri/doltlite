@@ -356,6 +356,7 @@ jobs:
         bash ../test/remotesrv_bind_warning_test.sh ./doltlite.exe ./doltlite-remotesrv.exe
         bash ../test/remotesrv_http_concurrency_test.sh ./doltlite.exe ./doltlite-remotesrv.exe
         bash ../test/remotesrv_stall_test.sh ./doltlite.exe ./doltlite-remotesrv.exe
+        bash ../test/remotesrv_auth_body_test.sh ./doltlite.exe ./doltlite-remotesrv.exe
         bash ../test/remotesrv_http_partial_failure_test.sh ./doltlite.exe ./doltlite-remotesrv.exe
         bash ../test/remotesrv_http_force_push_test.sh ./doltlite.exe ./doltlite-remotesrv.exe
         bash ../test/amalgamation_windows_source_test.sh ./sqlite3.c
@@ -405,6 +406,11 @@ jobs:
     - name: HTTP remote stalled client tests
       if: matrix.platform == 'macos'
       run: cd build && bash ../test/remotesrv_stall_test.sh ./doltlite ./doltlite-remotesrv
+      timeout-minutes: 5
+
+    - name: HTTP remote auth before body
+      if: matrix.platform == 'macos'
+      run: cd build && bash ../test/remotesrv_auth_body_test.sh ./doltlite ./doltlite-remotesrv
       timeout-minutes: 5
 
     - name: HTTP remote partial failure tests
