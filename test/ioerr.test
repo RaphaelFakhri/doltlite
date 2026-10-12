@@ -123,14 +123,42 @@ ifcapable attach {
   if {[string match [execsql {pragma auto_vacuum}] 1]} {
     set ex [list 4 17]
   }
-  do_ioerr_test ioerr-5 -restoreprng 0 -ckrefcount true -sqlprep {
-    ATTACH 'test2.db' AS test2;
-  } -sqlbody {
-    BEGIN;
-    CREATE TABLE t1(a,b,c);
-    CREATE TABLE test2.t2(a,b,c);
-    COMMIT;
-  } -exclude $ex
+  ifcapable doltlite {
+    do_ioerr_test ioerr-5 -restoreprng 0 -ckrefcount true -sqlprep {
+      ATTACH 'test2.db' AS test2;
+    } -tclbody {
+      set rc [catch {execsql {
+        BEGIN;
+        CREATE TABLE t1(a,b,c);
+        CREATE TABLE test2.t2(a,b,c);
+        COMMIT;
+      }} msg]
+      if {$rc && ($::sqlite_io_error_hit>0
+          || $msg ne "atomic commit across multiple file-backed databases is not supported")} {
+        error $msg
+      }
+      if {!$rc} {error "multi-file write was accepted"}
+    } -cleanup {
+      catchsql ROLLBACK
+      do_test ioerr-5.$n.cleanup {
+        execsql {
+          SELECT count(*) FROM main.sqlite_master WHERE name='t1';
+          SELECT count(*) FROM test2.sqlite_master WHERE name='t2';
+          PRAGMA main.integrity_check;
+          PRAGMA test2.integrity_check;
+        }
+      } {0 0 ok ok}
+    } -exclude $ex
+  } else {
+    do_ioerr_test ioerr-5 -restoreprng 0 -ckrefcount true -sqlprep {
+      ATTACH 'test2.db' AS test2;
+    } -sqlbody {
+      BEGIN;
+      CREATE TABLE t1(a,b,c);
+      CREATE TABLE test2.t2(a,b,c);
+      COMMIT;
+    } -exclude $ex
+  }
 }
 
 # Test IO errors when replaying two hot journals from a 2-file 

@@ -847,7 +847,6 @@ e_delete e_delete-2.3.2 class=unsupported issue=2490
 e_delete e_delete-2.3.3 class=unsupported issue=2490
 jrnlmode jrnlmode-2.3 class=unsupported issue=2490
 jrnlmode jrnlmode-2.5 class=unsupported issue=2490
-ioerr ioerr-5.11.3 class=unsupported issue=2490
 savepoint savepoint-10.2.9 class=unsupported issue=2490
 savepoint savepoint-10.2.10 class=unsupported issue=2490
 savepoint savepoint-10.2.11 class=unsupported issue=2490
@@ -2214,26 +2213,6 @@ memjournal2 memjournal2-1.0 class=intentional issue=2493  # in-memory journal pr
 # shared_err sections 5/6 fault-inject shared-cache locking and schema paths.
 # DoltLite does not share SQLite pager/schema internals across connections, so
 # the fault indexes and lock states differ from stock.
-# shared_err shared_ioerr-2.*.cleanup.1: shared-cache fault injection reaches
-# different lock/fault points under DoltLite. Native cleanup coverage in
-# doltlite_recover_shared_ioerr asserts the important contract for
-# representative points 127 and 129: IOERR does not crash, peer readers see a
-# consistent committed state, writer cleanup leaves a sane connection, and
-# integrity_check remains ok.
-shared_err shared_ioerr-2.109.cleanup.1 class=unsupported issue=1837  # peer reader gets snapshot isolation instead of shared-cache read-uncommitted (fails identically with no fault)
-shared_err shared_ioerr-2.110.cleanup.1 class=unsupported issue=1837  # peer reader gets snapshot isolation instead of shared-cache read-uncommitted (fails identically with no fault)
-shared_err shared_ioerr-2.111.cleanup.1 class=unsupported issue=1837  # peer reader gets snapshot isolation instead of shared-cache read-uncommitted (fails identically with no fault)
-shared_err shared_ioerr-2.112.cleanup.1 class=unsupported issue=1837  # peer reader gets snapshot isolation instead of shared-cache read-uncommitted (fails identically with no fault)
-shared_err shared_ioerr-2.113.cleanup.1 class=unsupported issue=1837  # peer reader gets snapshot isolation instead of shared-cache read-uncommitted (fails identically with no fault)
-shared_err shared_ioerr-2.114.cleanup.1 class=unsupported issue=1837  # peer reader gets snapshot isolation instead of shared-cache read-uncommitted (fails identically with no fault)
-shared_err shared_ioerr-2.115.cleanup.1 @coverage class=unsupported issue=1837  # peer reader gets snapshot isolation instead of shared-cache read-uncommitted (fails identically with no fault)
-shared_err shared_ioerr-2.116.cleanup.1 @coverage class=unsupported issue=1837  # peer reader gets snapshot isolation instead of shared-cache read-uncommitted (fails identically with no fault)
-shared_err shared_ioerr-2.117.cleanup.1 @coverage class=unsupported issue=1837  # peer reader gets snapshot isolation instead of shared-cache read-uncommitted (fails identically with no fault)
-shared_err shared_ioerr-2.118.cleanup.1 @coverage class=unsupported issue=1837  # peer reader gets snapshot isolation instead of shared-cache read-uncommitted (fails identically with no fault)
-shared_err shared_ioerr-2.119.cleanup.1 @coverage class=unsupported issue=1837  # peer reader gets snapshot isolation instead of shared-cache read-uncommitted (fails identically with no fault)
-shared_err shared_ioerr-2.120.cleanup.1 @coverage class=unsupported issue=1837  # peer reader gets snapshot isolation instead of shared-cache read-uncommitted (fails identically with no fault)
-shared_err shared_ioerr-2.121.cleanup.1 @coverage class=unsupported issue=1837  # peer reader gets snapshot isolation instead of shared-cache read-uncommitted (fails identically with no fault)
-shared_err shared_ioerr-2.122.cleanup.1 @coverage class=unsupported issue=1837  # peer reader gets snapshot isolation instead of shared-cache read-uncommitted (fails identically with no fault)
 wal5 wal5-pragma-1.1.1 class=unsupported issue=1836  # WAL checkpoint/frame counters zero; sidecar absent
 wal5 wal5-pragma-1.1.3 class=unsupported issue=1836  # WAL checkpoint/frame counters zero; sidecar absent
 wal5 wal5-pragma-1.1.4 class=unsupported issue=1836  # WAL checkpoint/frame counters zero; sidecar absent
