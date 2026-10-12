@@ -603,6 +603,31 @@ int doltliteSyncSessionToBranchTip(sqlite3 *db){
   return rc;
 }
 
+/* A refresh in this statement already adopted disk and spent the change
+** signal. The open snapshot keeps its rows; the next autocommit read
+** reloads when the marker says this session missed that tip. */
+void doltliteNoteSessionMissedDiskTip(sqlite3 *db){
+  ChunkStore *cs;
+  ProllyHash head;
+  ProllyHash tip;
+  const char *zBranch;
+  int found;
+
+  if( !db || doltliteIsDetached(db) ) return;
+  cs = doltliteGetChunkStore(db);
+  if( !cs ) return;
+  zBranch = doltliteGetSessionBranch(db);
+  memset(&head, 0, sizeof(head));
+  memset(&tip, 0, sizeof(tip));
+  found = 0;
+  if( chunkStoreFindBranch(cs, zBranch, &tip)==SQLITE_OK ) found = 1;
+  doltliteGetSessionHead(db, &head);
+  if( (found && prollyHashCompare(&tip, &head)!=0)
+   || chunkStoreWorkingSetMovedFromBasis(cs, zBranch) ){
+    doltliteInvalidateSessionWorkingState(db);
+  }
+}
+
 int doltliteMutateRefs(sqlite3 *db, DoltliteRefsMutation xMutate, void *pArg){
   return doltliteMutateRefsExpected(db, 0, 0, xMutate, pArg);
 }

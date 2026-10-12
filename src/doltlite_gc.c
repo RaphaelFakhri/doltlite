@@ -1189,6 +1189,8 @@ static void doltliteGcFunc(
 
   rc = gcRun(db, cs, &nKept, &nRemoved, &zPhase, zPhaseBuf,
              sizeof(zPhaseBuf), 1, 1, 1);
+  /* The sweep's refresh adopted a peer tip and spent the change signal. */
+  doltliteNoteSessionMissedDiskTip(db);
   if( rc!=SQLITE_OK ){
     if( rc==SQLITE_BUSY ){
       sqlite3_result_error(context,
