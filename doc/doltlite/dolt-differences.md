@@ -56,6 +56,10 @@ Only command functions are direct-only; `dolt_hashof` and `dolt_version` are not
 - **Merges that cannot be represented are refused, not approximated.** A
   merge involving a primary-key change, or a derived index the engine cannot
   rebuild correctly, fails rather than producing a table with the wrong shape.
+- **Deleting an absent remote branch succeeds.** `dolt_push(remote, ':branch')`
+  returns 0 when that branch is already gone, including when this database
+  has no tracking ref for it. Dolt reports an error and leaves the remote
+  unchanged, which is the same end state.
 
 ## Same as Dolt, in case you wondered
 
