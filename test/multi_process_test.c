@@ -5,6 +5,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <signal.h>
+#include <fcntl.h>
 #include "sqlite3.h"
 #include "lib/test_tmpdir.h"
 
@@ -1743,6 +1744,140 @@ static void test_clean_reset_peer_process(void){
   remove(path);
 }
 
+/* A process holding the PENDING byte, as a publishing writer does, blocks
+** the read lock a statement refreshes under. The reader must wait or report
+** busy, not answer from the snapshot it had before a peer's acknowledged
+** insert. */
+static int nPendingBusy = 0;
+static int pendingToHolder[2], pendingFromHolder[2];
+
+static void pendingHolderCmd(char c){
+  char r;
+  if( write(pendingToHolder[1], &c, 1)!=1
+   || read(pendingFromHolder[0], &r, 1)!=1 ){
+    perror("pending holder");
+    exit(1);
+  }
+}
+
+static int releasePendingOnBusy(void *pArg, int n){
+  (void)pArg;
+  if( nPendingBusy++==0 ) pendingHolderCmd('u');
+  return n<200;
+}
+
+static int countRows(sqlite3 *db, int *pRc){
+  sqlite3_stmt *pStmt = 0;
+  int n = -1;
+  *pRc = sqlite3_prepare_v2(db, "SELECT count(*) FROM t", -1, &pStmt, 0);
+  if( *pRc==SQLITE_OK ){
+    *pRc = sqlite3_step(pStmt);
+    if( *pRc==SQLITE_ROW ){
+      n = sqlite3_column_int(pStmt, 0);
+      *pRc = SQLITE_OK;
+    }
+  }
+  sqlite3_finalize(pStmt);
+  return n;
+}
+
+static void test_reader_waits_for_publishing_writer(void){
+  char path[256];
+  sqlite3 *db = 0, *reader = 0, *writer = 0;
+  pid_t holder;
+  int rc, n;
+
+  printf("--- Test: reader does not answer stale while a writer publishes ---\n");
+  snprintf(path, sizeof(path), DOLTLITE_TEST_TMPDIR "/mp_pending_read_%d.db",
+           (int)getpid());
+  remove(path);
+  sqlite3_open(path, &db);
+  execSql(db, "CREATE TABLE t(id INTEGER PRIMARY KEY);"
+               "SELECT dolt_commit('-Am','init')");
+  sqlite3_close(db);
+
+  if( pipe(pendingToHolder) || pipe(pendingFromHolder) ){
+    perror("pipe");
+    exit(1);
+  }
+  holder = fork();
+  if( holder==0 ){
+    struct flock fl;
+    char ch;
+    int fd = open(path, O_RDWR);
+    close(pendingToHolder[1]);
+    close(pendingFromHolder[0]);
+    memset(&fl, 0, sizeof(fl));
+    fl.l_whence = SEEK_SET;
+    fl.l_start = 0x40000000;
+    fl.l_len = 1;
+    while( read(pendingToHolder[0], &ch, 1)==1 ){
+      fl.l_type = ch=='l' ? F_WRLCK : F_UNLCK;
+      if( fcntl(fd, F_SETLK, &fl)!=0 ) _exit(1);
+      if( write(pendingFromHolder[1], &ch, 1)!=1 ) _exit(1);
+    }
+    _exit(0);
+  }
+
+  sqlite3_open(path, &reader);
+  check("pending_read_initial", countRows(reader, &rc)==0 && rc==SQLITE_OK);
+  sqlite3_open(path, &writer);
+  check("pending_read_peer_insert",
+        execSql(writer, "INSERT INTO t VALUES(42)")==SQLITE_OK);
+  sqlite3_close(writer);
+
+  pendingHolderCmd('l');
+  n = countRows(reader, &rc);
+  check("pending_read_no_stale_without_handler",
+        (rc==SQLITE_OK && n==1) || rc==SQLITE_BUSY);
+  nPendingBusy = 0;
+  sqlite3_busy_handler(reader, releasePendingOnBusy, 0);
+  n = countRows(reader, &rc);
+  if( nPendingBusy==0 ) pendingHolderCmd('u');
+  check("pending_read_waits_then_sees_insert", rc==SQLITE_OK && n==1);
+  sqlite3_close(reader);
+
+  {
+    char featPath[320];
+    sqlite3_stmt *pStmt = 0;
+    snprintf(featPath, sizeof(featPath), "%s/feat", path);
+    sqlite3_open(path, &db);
+    execSql(db, "SELECT dolt_checkout('-b','feat');"
+                "INSERT INTO t VALUES(2);"
+                "SELECT dolt_commit('-Am','f1');"
+                "SELECT dolt_checkout('main');"
+                "INSERT INTO t VALUES(3);"
+                "SELECT dolt_commit('-Am','m1')");
+    sqlite3_close(db);
+    sqlite3_open(featPath, &reader);
+    check("pending_rebase_start",
+          execSql(reader, "SELECT dolt_rebase('-i','main')")==SQLITE_OK);
+    sqlite3_open(path, &writer);
+    execSql(writer, "INSERT INTO t VALUES(43)");
+    sqlite3_close(writer);
+    pendingHolderCmd('l');
+    rc = sqlite3_prepare_v2(reader, "SELECT dolt_rebase('--continue')", -1,
+                            &pStmt, 0);
+    if( rc==SQLITE_OK ){
+      rc = sqlite3_step(pStmt);
+      if( rc==SQLITE_ROW && sqlite3_column_type(pStmt, 0)==SQLITE_NULL ){
+        rc = SQLITE_MISUSE;
+      }
+    }
+    sqlite3_finalize(pStmt);
+    pendingHolderCmd('u');
+    check("pending_rebase_continue_reports_outcome", rc!=SQLITE_MISUSE);
+    sqlite3_close(reader);
+  }
+
+  close(pendingToHolder[1]);
+  waitpid(holder, 0, 0);
+  close(pendingToHolder[0]);
+  close(pendingFromHolder[0]);
+  close(pendingFromHolder[1]);
+  remove(path);
+}
+
 int main(){
   printf("=== Multi-Process Concurrency Tests ===\n\n");
 
@@ -1767,6 +1902,7 @@ int main(){
   test_ref_command_keeps_peer_write();
   test_cross_process_commit_after_peer();
   test_many_process_commit_contention();
+  test_reader_waits_for_publishing_writer();
 
   printf("\n=== Results: %d passed, %d failed out of %d tests ===\n",
     nPass, nFail, nPass+nFail);

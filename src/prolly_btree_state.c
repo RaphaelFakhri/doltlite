@@ -761,7 +761,7 @@ int btreeRefreshFromDisk(Btree *p){
   if( bAutocommitBoundary ){
     pBt->store.snapshotPinned = 0;
   }
-  rc = chunkStoreRefreshIfChanged(&pBt->store, &bChanged);
+  rc = chunkStoreRefreshIfChangedOrBusy(&pBt->store, &bChanged);
   if( bAutocommitBoundary ){
     pBt->store.snapshotPinned = snapshotPinned;
   }
@@ -986,7 +986,9 @@ int doltliteRefreshAutocommitWorkingState(sqlite3 *db){
   if( !db->autoCommit || db->pSavepoint || p->inTrans!=TRANS_NONE ){
     return SQLITE_OK;
   }
-  rc = btreeRefreshFromDisk(p);
+  do {
+    rc = btreeRefreshFromDisk(p);
+  }while( rc==SQLITE_BUSY && prollyInvokeBusyHandler(p->pBt) );
   if( rc!=SQLITE_OK ) return rc;
   return btreeRefreshSharedWorkingState(p);
 }

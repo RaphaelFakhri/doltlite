@@ -1028,7 +1028,9 @@ static int csRefreshIfChanged(ChunkStore *cs, int *pChanged){
   return SQLITE_OK;
 }
 
-int chunkStoreRefreshIfChanged(ChunkStore *cs, int *pChanged){
+static int csRefreshIfChangedReadLocked(
+  ChunkStore *cs, int *pChanged, int bBusyFails
+){
   int rc, rc2;
   CsReadLock readLock = {0, 0};
   int locked = cs->file.pFile && !cs->isBuffer
@@ -1039,7 +1041,8 @@ int chunkStoreRefreshIfChanged(ChunkStore *cs, int *pChanged){
     rc = csReadLock(cs, &readLock);
     if( rc!=SQLITE_OK ){
       csReadUnlock(cs, &readLock);
-      return rc==SQLITE_BUSY && !cs->openPending ? SQLITE_OK : rc;
+      return rc==SQLITE_BUSY && !cs->openPending && !bBusyFails
+             ? SQLITE_OK : rc;
     }
   }
   rc = csRefreshIfChanged(cs, pChanged);
@@ -1048,6 +1051,16 @@ int chunkStoreRefreshIfChanged(ChunkStore *cs, int *pChanged){
     if( rc==SQLITE_OK ) rc = rc2;
   }
   return rc;
+}
+
+int chunkStoreRefreshIfChanged(ChunkStore *cs, int *pChanged){
+  return csRefreshIfChangedReadLocked(cs, pChanged, 0);
+}
+
+/* A statement that answers from the old snapshot while a publishing writer
+** holds the read lock off misses rows already acknowledged to the writer. */
+int chunkStoreRefreshIfChangedOrBusy(ChunkStore *cs, int *pChanged){
+  return csRefreshIfChangedReadLocked(cs, pChanged, 1);
 }
 
 int chunkStoreForceRefresh(ChunkStore *cs){
