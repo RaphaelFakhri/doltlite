@@ -179,6 +179,20 @@ static char *csLockPath(const char *path){
   return sqlite3_mprintf("%.*s.%s-lock", nDir, path, zBase);
 }
 
+/* Delete the graph-lock sidecar a store at zPath would hold. A replaced
+** temporary store leaves its sidecar behind: the store name is gone, so
+** nothing would ever remove it (doltlite#3961). */
+void csLockSidecarDelete(sqlite3_vfs *pVfs, const char *zPath){
+  char *zRaw = csLockPath(zPath);
+  char *zLock = 0;
+  if( !zRaw ) return;
+  if( chunkStoreDupFilenameDoubleNul(zRaw, &zLock)==SQLITE_OK ){
+    (void)sqlite3OsDelete(pVfs, zLock, 0);
+    sqlite3_free(zLock);
+  }
+  sqlite3_free(zRaw);
+}
+
 /* Missing parent is CANTOPEN, not READONLY_DIRECTORY (file:// clone). */
 static int csDirectoryAccess(
   sqlite3_vfs *pVfs,
