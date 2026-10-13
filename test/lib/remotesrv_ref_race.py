@@ -12,7 +12,8 @@ def main():
     engine, url, server_db, scratch = sys.argv[1:]
     engine = os.path.abspath(os.environ.get("DOLTLITE_SYSTEM", engine))
     upstream = urllib.parse.urlsplit(url)
-    state = {"sql": None, "reads": 0, "errors": [], "once": False}
+    state = {"sql": None, "reads": 0, "errors": [], "once": False,
+             "put_sql": None, "puts": 0}
     failures = []
 
     def sql(db, statement, allow_error=False):
@@ -37,6 +38,12 @@ def main():
             conn = http.client.HTTPConnection(upstream.hostname, upstream.port, timeout=60)
             try:
                 body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                if self.command == "PUT" and self.path.endswith("/refs-if"):
+                    state["puts"] += 1
+                    if state["put_sql"]:
+                        peer_sql = state["put_sql"]
+                        state["put_sql"] = None
+                        sql(server_db, "PRAGMA busy_timeout=5000; " + peer_sql)
                 conn.request(self.command, self.path, body)
                 response = conn.getresponse()
                 data = response.read()
@@ -135,6 +142,32 @@ def main():
                 "SELECT count(*) FROM dolt_tags WHERE tag_name='client_tag';")[1] == "1")
             check("tag push preserves the latest peer write", sql(server_db,
                 "SELECT v FROM t WHERE id=1;")[1] == "tag peer 2")
+
+            for change_refs in (False, True):
+                tag = "gc_tag_refs" if change_refs else "gc_tag"
+                sql(client, "INSERT INTO t(v) VALUES('%s'); "
+                    "SELECT dolt_commit('-am','%s'); SELECT dolt_tag('%s');" % (tag, tag, tag))
+                peer = "SELECT dolt_branch('gc_peer'); " if change_refs else ""
+                state.update(put_sql=peer + "SELECT dolt_gc();", puts=0)
+                result = sql(client, "SELECT dolt_push('origin','%s');" % tag, allow_error=True)
+                check("tag push retries server GC", result == (0, "0") and state["puts"] >= 2)
+                if result != (0, "0"):
+                    print(result, flush=True)
+                graph = sql(server_db, "SELECT dolt_checkout('-b','verify_%s','%s'); "
+                    "SELECT count(*) FROM t WHERE v='%s';" % (tag, tag, tag), allow_error=True)
+                check("tag commit graph survives GC retry",
+                      graph[0] == 0 and graph[1].splitlines()[-1] == "1")
+                sql(server_db, "SELECT dolt_checkout('main');")
+                if change_refs:
+                    check("tag GC retry preserves unrelated branch", sql(server_db,
+                        "SELECT count(*) FROM dolt_branches WHERE name='gc_peer';")[1] == "1")
+
+            sql(client, "SELECT dolt_tag('raced_tag');")
+            state.update(put_sql="SELECT dolt_tag('raced_tag');", puts=0)
+            result = sql(client, "SELECT dolt_push('origin','raced_tag');", allow_error=True)
+            check("tag retry refuses a concurrent target change", result[0] != 0 and state["puts"] == 1)
+            check("concurrent target tag survives", sql(server_db,
+                "SELECT dolt_hashof('raced_tag')=dolt_hashof('main');")[1] == "1")
 
             result, reads = push(client, "SELECT dolt_push('origin',':feature');",
                                  "UPDATE t SET v='delete peer' WHERE id=1;")

@@ -1756,6 +1756,15 @@ int doltlitePush(
   return doltlitePushAs(pLocal, pRemote, 0, zRef, bForce, 0);
 }
 
+static void remotePushRetryDelay(int attempt){
+  if( attempt ){
+    u8 jitter;
+    int delay = attempt<5 ? 5 << attempt : 100;
+    sqlite3_randomness(1, &jitter);
+    sqlite3_sleep(delay + jitter%delay);
+  }
+}
+
 /* zRef names the remote branch (":name" deletes it). pSrcCommit, when set,
 ** is that commit. Otherwise zLocal, or zRef, is the local branch pushed. */
 int doltlitePushAs(
@@ -1792,12 +1801,7 @@ int doltlitePushAs(
     int nRefsData = 0;
     int exists;
     int noOp;
-    if( attempt ){
-      u8 jitter;
-      int delay = attempt<5 ? 5 << attempt : 100;
-      sqlite3_randomness(1, &jitter);
-      sqlite3_sleep(delay + jitter%delay);
-    }
+    remotePushRetryDelay(attempt);
     memset(&refs, 0, sizeof(refs));
     rc = pRemote->xGetRefs(pRemote, &refsData, &nRefsData);
     if( rc==SQLITE_NOTFOUND ) rc = SQLITE_OK;
@@ -1898,92 +1902,84 @@ push_done:
   return SQLITE_BUSY_SNAPSHOT;
 }
 
+static const TagRef *remoteFindTag(ChunkStore *pRefs, const char *zTag){
+  int i;
+  for(i=0; i<pRefs->refs.nTags; i++){
+    if( strcmp(pRefs->refs.aTags[i].zName, zTag)==0 ){
+      return &pRefs->refs.aTags[i];
+    }
+  }
+  return 0;
+}
+
 int doltlitePushTag(
   ChunkStore *pLocal,
   DoltliteRemote *pRemote,
   const char *zTag
 ){
-  const TagRef *aLocalTag = 0;
-  const TagRef *pLocalTag = 0;
-  ProllyHash expectedRefsHash;
+  const TagRef *pLocalTag = remoteFindTag(pLocal, zTag);
+  const TagRef *pOriginalTag;
+  ProllyHash tagCommit;
+  ChunkStore originalRefs;
   u8 *refsData = 0;
   int nRefsData = 0;
-  int nLocalTag = 0;
+  int attempt;
   int rc;
-  int i;
 
-  refsTableGetTags(&pLocal->refs, &nLocalTag, &aLocalTag);
-  for(i=0; i<nLocalTag; i++){
-    if( strcmp(aLocalTag[i].zName, zTag)==0 ){
-      pLocalTag = &aLocalTag[i];
-      break;
-    }
-  }
   if( !pLocalTag ) return SQLITE_NOTFOUND;
-
-  memset(&expectedRefsHash, 0, sizeof(expectedRefsHash));
+  memcpy(&tagCommit, &pLocalTag->commitHash, sizeof(tagCommit));
+  memset(&originalRefs, 0, sizeof(originalRefs));
   rc = pRemote->xGetRefs(pRemote, &refsData, &nRefsData);
   if( rc==SQLITE_OK && refsData ){
-    ChunkStore refsView;
-    const TagRef *aRemoteTag = 0;
-    int nRemoteTag = 0;
-    prollyHashCompute(refsData, nRefsData, &expectedRefsHash);
-    memset(&refsView, 0, sizeof(refsView));
-    rc = chunkStoreLoadRefsFromBlob(&refsView, refsData, nRefsData);
-    if( rc==SQLITE_OK ){
-      refsTableGetTags(&refsView.refs, &nRemoteTag, &aRemoteTag);
-      for(i=0; i<nRemoteTag; i++){
-        if( strcmp(aRemoteTag[i].zName, zTag)==0
-         && scopedTagsMatch(pLocalTag, 1, &aRemoteTag[i], 1) ){
-          chunkStoreClose(&refsView);
-          sqlite3_free(refsData);
-          return SQLITE_OK;
-        }
-      }
-    }
-    chunkStoreClose(&refsView);
+    rc = chunkStoreLoadRefsFromBlob(&originalRefs, refsData, nRefsData);
   }else if( rc==SQLITE_NOTFOUND ){
     rc = SQLITE_OK;
   }
   sqlite3_free(refsData);
   refsData = 0;
-  if( rc!=SQLITE_OK ) return rc;
-
-  {
-    DoltliteRemote *pLocalSrc = doltliteLocalAsRemote(pLocal, pRemote);
-    ProllyHash tagCommit;
-    if( !pLocalSrc ) return SQLITE_NOMEM;
-    memcpy(&tagCommit, &pLocalTag->commitHash, sizeof(tagCommit));
-    rc = doltliteSyncChunks(
-        pLocalSrc, pRemote, &tagCommit, 1);
-    pLocalSrc->xClose(pLocalSrc);
+  if( rc!=SQLITE_OK ) goto tag_done;
+  pOriginalTag = remoteFindTag(&originalRefs, zTag);
+  if( pOriginalTag && scopedTagsMatch(pLocalTag, 1, pOriginalTag, 1) ){
+    goto tag_done;
   }
-  if( rc!=SQLITE_OK ) return rc;
 
-  rc = pRemote->xGetRefs(pRemote, &refsData, &nRefsData);
-  if( rc==SQLITE_NOTFOUND ){
-    refsData = 0;
-    nRefsData = 0;
-    rc = SQLITE_OK;
-  }
-  if( rc==SQLITE_OK ){
+  for(attempt=0; attempt<64; attempt++){
+    DoltliteRemote *pLocalSrc;
     ChunkStore nextRefs;
+    const TagRef *pCurrentTag;
+    ProllyHash expectedRefsHash = {{0}};
     u8 *newRefs = 0;
     char *zScope = 0;
     int nNewRefs = 0;
+    int targetChanged = 0;
 
-    memset(&expectedRefsHash, 0, sizeof(expectedRefsHash));
-    if( refsData && nRefsData>0 ){
-      prollyHashCompute(refsData, nRefsData, &expectedRefsHash);
-    }
+    remotePushRetryDelay(attempt);
     memset(&nextRefs, 0, sizeof(nextRefs));
-    if( refsData && nRefsData>0 ){
+    pLocalSrc = doltliteLocalAsRemote(pLocal, pRemote);
+    if( !pLocalSrc ){
+      rc = SQLITE_NOMEM;
+      break;
+    }
+    rc = doltliteSyncChunks(pLocalSrc, pRemote, &tagCommit, 1);
+    pLocalSrc->xClose(pLocalSrc);
+    if( rc!=SQLITE_OK ) goto tag_attempt_done;
+
+    nRefsData = 0;
+    rc = pRemote->xGetRefs(pRemote, &refsData, &nRefsData);
+    if( rc==SQLITE_NOTFOUND ) rc = SQLITE_OK;
+    if( rc==SQLITE_OK && refsData && nRefsData>0 ){
+      prollyHashCompute(refsData, nRefsData, &expectedRefsHash);
       rc = chunkStoreLoadRefsFromBlob(&nextRefs, refsData, nRefsData);
     }
-    if( rc==SQLITE_OK
-     && chunkStoreFindTag(&nextRefs, zTag, 0)==SQLITE_OK ){
-      rc = chunkStoreDeleteTag(&nextRefs, zTag);
+    if( rc!=SQLITE_OK ) goto tag_attempt_done;
+    pCurrentTag = remoteFindTag(&nextRefs, zTag);
+    if( !scopedTagsMatch(pOriginalTag, pOriginalTag!=0,
+                         pCurrentTag, pCurrentTag!=0) ){
+      targetChanged = 1;
+      rc = SQLITE_BUSY_SNAPSHOT;
+      goto tag_attempt_done;
     }
+    if( pCurrentTag ) rc = chunkStoreDeleteTag(&nextRefs, zTag);
     if( rc==SQLITE_OK ){
       rc = chunkStoreAddTagFull(
           &nextRefs, zTag, &pLocalTag->commitHash,
@@ -2005,15 +2001,23 @@ int doltlitePushTag(
         rc = pRemote->xSetRefs(pRemote, zScope, 1, newRefs, nNewRefs);
       }
     }
+    if( rc==SQLITE_OK ){
+      doltliteTestCrashFinalize("push");
+      rc = pRemote->xCommit(pRemote);
+    }
+
+tag_attempt_done:
+    sqlite3_free(refsData);
+    refsData = 0;
     sqlite3_free(zScope);
     sqlite3_free(newRefs);
     chunkStoreClose(&nextRefs);
+    if( rc!=SQLITE_BUSY_SNAPSHOT || targetChanged ) break;
   }
-  sqlite3_free(refsData);
-  if( rc!=SQLITE_OK ) return rc;
 
-  doltliteTestCrashFinalize("push");
-  return pRemote->xCommit(pRemote);
+tag_done:
+  chunkStoreClose(&originalRefs);
+  return rc;
 }
 
 static int installFetchedRefs(
