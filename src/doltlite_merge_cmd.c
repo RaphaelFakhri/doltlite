@@ -908,7 +908,7 @@ int mergeAbortInPlace(sqlite3 *db){
     rc = mergeSplitWorkingCatalog(db, &stagedHash, &stagedHash, 0, &trackedHash,
                                  &ignoredHash, &zErr);
   }
-  if( rc==SQLITE_OK ) rc = doltliteHardReset(db, &headCatHash);
+  if( rc==SQLITE_OK ) rc = doltliteApplyHardReset(db, &headCatHash);
   workingHash = headCatHash;
   if( rc==SQLITE_OK && !prollyHashIsEmpty(&ignoredHash) ){
     rc = mergeWorkingCatalog(db, &ignoredHash, &headCatHash,
