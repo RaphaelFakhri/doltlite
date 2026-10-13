@@ -3691,6 +3691,73 @@ static void run_fetch_ref_install_survives_window_gc(void){
 
 /* Same window for a remote that is not origin: no lazy-clone source is
 ** consulted, and the refusal must still read as a fetch error. */
+/* Validating a pushed ref reads what the push added, not the history and
+** unchanged trees the server already holds complete. */
+static void run_push_validation_reads_new_chunks(void){
+  sqlite3 *db = 0;
+  ChunkStore *cs;
+  ChunkStore view;
+  ProllyHash feat;
+  char dbpath[256];
+  u8 *pCur = 0, *pNext = 0;
+  int nCur = 0, nNext = 0;
+  int missing = 0;
+  long long before, after;
+  int rc;
+
+  printf("=== Push Validation Reads New Chunks Test ===\n\n");
+  make_dbpath(dbpath, sizeof(dbpath), "test_push_validation_reads");
+  removeDbFiles(dbpath);
+  check("pvr_open", open_db(dbpath, &db)==SQLITE_OK);
+  check("pvr_seed", execSql(db,
+    "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);"
+    "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x<20000)"
+    " INSERT INTO t SELECT x, printf('%0100d', x) FROM c;"
+    "SELECT dolt_commit('-Am','big');"
+    "SELECT dolt_checkout('-b','feat');"
+    "INSERT INTO t VALUES(20001,'one');"
+    "SELECT dolt_commit('-am','one row');"
+    "SELECT dolt_checkout('main');")==SQLITE_OK);
+  cs = doltliteGetChunkStore(db);
+  check("pvr_feat", chunkStoreFindBranch(cs, "feat", &feat)==SQLITE_OK);
+  memset(&view, 0, sizeof(view));
+  rc = chunkStoreSerializeRefsToBlob(cs, &pCur, &nCur);
+  if( rc==SQLITE_OK ) rc = chunkStoreLoadRefsFromBlob(&view, pCur, nCur);
+  if( rc==SQLITE_OK ) rc = chunkStoreUpdateBranch(&view, "main", &feat);
+  if( rc==SQLITE_OK ) rc = chunkStoreSerializeRefsToBlob(&view, &pNext, &nNext);
+  check("pvr_refs_blob", rc==SQLITE_OK);
+  chunkStoreClose(&view);
+
+  before = atoll(queryScalarText(db,
+      "SELECT value FROM dolt_engine_stats WHERE name='chunk_read'"));
+  rc = doltliteValidateRefsTargetGraph(cs, pNext, nNext, "main", &missing);
+  after = atoll(queryScalarText(db,
+      "SELECT value FROM dolt_engine_stats WHERE name='chunk_read'"));
+  check("pvr_valid", rc==SQLITE_OK && !missing);
+  printf("  validation chunk reads: %lld\n", after-before);
+  check("pvr_reads_scale_with_push", after-before < 100);
+
+  {
+    ProllyHash absent;
+    memset(&absent, 0xab, sizeof(absent));
+    sqlite3_free(pNext);
+    pNext = 0;
+    memset(&view, 0, sizeof(view));
+    rc = chunkStoreLoadRefsFromBlob(&view, pCur, nCur);
+    if( rc==SQLITE_OK ) rc = chunkStoreUpdateBranch(&view, "main", &absent);
+    if( rc==SQLITE_OK ) rc = chunkStoreSerializeRefsToBlob(&view, &pNext, &nNext);
+    chunkStoreClose(&view);
+    missing = 0;
+    rc = doltliteValidateRefsTargetGraph(cs, pNext, nNext, "main", &missing);
+    check("pvr_missing_commit_rejected", rc==SQLITE_CORRUPT && missing);
+  }
+
+  sqlite3_free(pCur);
+  sqlite3_free(pNext);
+  sqlite3_close(db);
+  removeDbFiles(dbpath);
+}
+
 static void run_fetch_window_gc_named_remote(void){
   sqlite3 *remoteDb = 0;
   sqlite3 *localDb = 0;
@@ -18338,6 +18405,7 @@ static const RegressionCase aCases[] = {
   { "refs_commit_conflicting_peer_ref_fails", "Refs Commit Conflicting Peer Ref Fails Test", run_refs_commit_conflicting_peer_ref_fails },
   { "remote_refs_corruption", "Remote Refs Corruption Test", run_remote_refs_corruption },
   { "fetch_ref_install_survives_window_gc", "Fetch Ref Install Survives Window GC Test", run_fetch_ref_install_survives_window_gc },
+  { "push_validation_reads_new_chunks", "Push Validation Reads New Chunks Test", run_push_validation_reads_new_chunks },
   { "fetch_window_gc_named_remote", "Fetch Window GC Named Remote Test", run_fetch_window_gc_named_remote },
   { "clone_ref_install_survives_window_gc", "Clone Ref Install Survives Window GC Test", run_clone_ref_install_survives_window_gc },
   { "clone_deleted_branch_installs_nothing", "Clone Deleted Branch Installs Nothing Test", run_clone_deleted_branch_installs_nothing },

@@ -160,6 +160,7 @@ static int remoteValidateGraphEx(
   ChunkStore *pStore,
   const ProllyHash *aRoots,
   int nRoots,
+  ProllyHashSet *pTrusted,
   int *pbMissing
 ){
   SyncQueue queue;
@@ -185,6 +186,7 @@ static int remoteValidateGraphEx(
   while( rc==SQLITE_OK && syncQueuePop(&queue, &hash) ){
     u8 *pData = 0;
     int nData = 0;
+    if( pTrusted && prollyHashSetContains(pTrusted, &hash) ) continue;
     rc = chunkStoreGet(pStore, &hash, &pData, &nData);
     if( rc==SQLITE_NOTFOUND ){
       if( pbMissing ) *pbMissing = 1;
@@ -205,7 +207,117 @@ static int remoteValidateGraph(
   const ProllyHash *aRoots,
   int nRoots
 ){
-  return remoteValidateGraphEx(pStore, aRoots, nRoots, 0);
+  return remoteValidateGraphEx(pStore, aRoots, nRoots, 0, 0);
+}
+
+/* Hashes whose closure the store already holds complete: every chunk under
+** the anchors' trees, without their commit history. Every installed ref was
+** validated or built locally, and gc keeps what refs reach, so a pushed
+** graph only needs reading where it differs. Leaves are named by their
+** level-1 parents, so the build reads about one chunk in a node's fanout. */
+static int remoteBuildTrustedSet(
+  ChunkStore *pStore,
+  const ProllyHash *aAnchors,
+  int nAnchors,
+  ProllyHashSet *pTrusted
+){
+  SyncQueue queue;
+  ProllyHash hash;
+  int rc;
+  int i;
+
+  rc = syncQueueInit(&queue);
+  if( rc!=SQLITE_OK ) return rc;
+  for(i=0; i<nAnchors && rc==SQLITE_OK; i++){
+    if( !prollyHashIsEmpty(&aAnchors[i])
+     && !prollyHashSetContains(pTrusted, &aAnchors[i]) ){
+      rc = prollyHashSetAdd(pTrusted, &aAnchors[i]);
+      if( rc==SQLITE_OK ) rc = syncQueuePush(&queue, &aAnchors[i]);
+    }
+  }
+  while( rc==SQLITE_OK && syncQueuePop(&queue, &hash) ){
+    u8 *pData = 0;
+    int nData = 0;
+    rc = chunkStoreGet(pStore, &hash, &pData, &nData);
+    if( rc!=SQLITE_OK ) break;
+    switch( doltliteClassifyChunk(pData, nData) ){
+      case CHUNK_PROLLY_NODE: {
+        ProllyNode node;
+        int j;
+        rc = prollyNodeParse(&node, pData, nData);
+        for(j=0; rc==SQLITE_OK && node.level>0 && j<(int)node.nItems; j++){
+          ProllyHash child;
+          prollyNodeChildHash(&node, j, &child);
+          if( prollyHashSetContains(pTrusted, &child) ) continue;
+          rc = prollyHashSetAdd(pTrusted, &child);
+          if( rc==SQLITE_OK && node.level>1 ) rc = syncQueuePush(&queue, &child);
+        }
+        break;
+      }
+      case CHUNK_COMMIT: {
+        DoltliteCommit commit;
+        memset(&commit, 0, sizeof(commit));
+        rc = doltliteCommitDeserialize(pData, nData, &commit);
+        if( rc==SQLITE_OK
+         && !prollyHashIsEmpty(&commit.catalogHash)
+         && !prollyHashSetContains(pTrusted, &commit.catalogHash) ){
+          rc = prollyHashSetAdd(pTrusted, &commit.catalogHash);
+          if( rc==SQLITE_OK ) rc = syncQueuePush(&queue, &commit.catalogHash);
+        }
+        doltliteCommitClear(&commit);
+        break;
+      }
+      default:
+        rc = syncEnqueueChildren(pData, nData, &queue, pTrusted);
+        break;
+    }
+    sqlite3_free(pData);
+  }
+  syncQueueFree(&queue);
+  return rc;
+}
+
+static int remoteValidateGraphTrusted(
+  ChunkStore *pStore,
+  const ProllyHash *aRoots,
+  int nRoots,
+  const char *zBranch,
+  int *pbMissing
+){
+  ProllyHash aAnchors[4];
+  ProllyHashSet trusted;
+  const char *zDefault = chunkStoreGetDefaultBranch(pStore);
+  int nAnchors = 0;
+  int bTrusted = 0;
+  int rc;
+
+  memset(aAnchors, 0, sizeof(aAnchors));
+  if( zBranch
+   && chunkStoreFindBranch(pStore, zBranch, &aAnchors[nAnchors])==SQLITE_OK ){
+    nAnchors++;
+    if( chunkStoreGetBranchWorkingSet(pStore, zBranch,
+                                      &aAnchors[nAnchors])==SQLITE_OK ){
+      nAnchors++;
+    }
+  }
+  if( zDefault
+   && chunkStoreFindBranch(pStore, zDefault, &aAnchors[nAnchors])==SQLITE_OK ){
+    nAnchors++;
+  }
+  rc = prollyHashSetInit(&trusted, 1024);
+  if( rc!=SQLITE_OK ) return rc;
+  if( nAnchors>0 ){
+    rc = remoteBuildTrustedSet(pStore, aAnchors, nAnchors, &trusted);
+    /* An anchor that cannot be read proves nothing; walk everything. */
+    if( rc==SQLITE_OK ) bTrusted = 1;
+    else if( rc!=SQLITE_NOMEM ) rc = SQLITE_OK;
+  }
+  if( rc==SQLITE_OK ){
+    rc = remoteValidateGraphEx(pStore, aRoots, nRoots,
+                               bTrusted ? &trusted : 0, pbMissing);
+  }
+  prollyHashSetFree(&trusted);
+  return rc;
 }
 
 /* *pbMissing: the graph is incomplete rather than unreadable, as when a
@@ -238,7 +350,8 @@ int doltliteValidateRefsTargetGraph(
     rc = SQLITE_NOTFOUND;
     for(i=0; i<nTag; i++){
       if( strcmp(aTag[i].zName, zTag)==0 ){
-        rc = remoteValidateGraphEx(pStore, &aTag[i].commitHash, 1, pbMissing);
+        rc = remoteValidateGraphTrusted(pStore, &aTag[i].commitHash, 1, 0,
+                                        pbMissing);
         break;
       }
     }
@@ -251,7 +364,7 @@ int doltliteValidateRefsTargetGraph(
     if( strcmp(aBranch[i].zName, zRef)==0 ){
       aRoots[0] = aBranch[i].commitHash;
       aRoots[1] = aBranch[i].workingSetHash;
-      rc = remoteValidateGraphEx(pStore, aRoots, 2, pbMissing);
+      rc = remoteValidateGraphTrusted(pStore, aRoots, 2, zRef, pbMissing);
       break;
     }
   }
