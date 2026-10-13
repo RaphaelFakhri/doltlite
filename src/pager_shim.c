@@ -4,6 +4,7 @@
 #include "pager_shim.h"
 #include "sqliteInt.h"
 #include "chunk_store.h"
+#include "chunk_store_int.h"
 #include "prolly_cache.h"
 
 int sqlite3_pager_writej_count = 0;
