@@ -2073,12 +2073,83 @@ static void test_reader_waits_for_publishing_writer(void){
   remove(path);
 }
 
+/* A process holding SHARED on the file, as a reader does while it opens,
+** keeps a publish from taking EXCLUSIVE. Ref commands must wait for it in
+** the busy handler like INSERT and dolt_commit do. */
+static void test_ref_commands_wait_for_reader_lock(void){
+  static const char *azSql[] = {
+    "SELECT dolt_branch('b2')",
+    "SELECT dolt_tag('v1')",
+    "SELECT dolt_checkout('-b','b3')",
+    "SELECT dolt_checkout('feat')",
+    "SELECT dolt_remote('remove','origin')",
+    "SELECT dolt_reset('--soft','HEAD')",
+    "INSERT INTO t VALUES(3,'x')",
+  };
+  char path[256];
+  int i;
+
+  printf("--- Test: ref commands wait out a reader's file lock ---\n");
+  snprintf(path, sizeof(path), DOLTLITE_TEST_TMPDIR "/mp_ref_reader_lock_%d.db",
+           (int)getpid());
+  for(i=0; i<(int)(sizeof(azSql)/sizeof(azSql[0])); i++){
+    sqlite3 *db = 0;
+    int ready[2];
+    char ch, zName[96];
+    pid_t pid;
+    int rc;
+    remove(path);
+    sqlite3_open(path, &db);
+    execSql(db, "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);"
+                "INSERT INTO t VALUES(1,'a');"
+                "SELECT dolt_commit('-Am','base'); SELECT dolt_branch('feat');"
+                "SELECT dolt_remote('add','origin','file:///nonexistent-mp');"
+                "INSERT INTO t VALUES(2,'dirty')");
+    sqlite3_close(db);
+    db = 0;
+    mpPipe(ready);
+    pid = fork();
+    if( pid==0 ){
+      sqlite3_vfs *pVfs = sqlite3_vfs_find(0);
+      sqlite3_file *pFile = (sqlite3_file*)malloc(pVfs->szOsFile);
+      char zOpen[260];
+      int outFlags = 0;
+      close(ready[0]);
+      /* xOpen expects the main-db name double-nul terminated. */
+      memset(zOpen, 0, sizeof(zOpen));
+      snprintf(zOpen, sizeof(zOpen)-2, "%s", path);
+      if( !pFile || pVfs->xOpen(pVfs, zOpen, pFile,
+            SQLITE_OPEN_MAIN_DB|SQLITE_OPEN_READWRITE, &outFlags) ) _exit(1);
+      if( pFile->pMethods->xLock(pFile, SQLITE_LOCK_SHARED) ) _exit(2);
+      mpWrite(ready[1], "L");
+      sqlite3_sleep(1000);
+      pFile->pMethods->xUnlock(pFile, SQLITE_LOCK_NONE);
+      pFile->pMethods->xClose(pFile);
+      _exit(0);
+    }
+    if( pid<0 ){ perror("fork"); _exit(1); }
+    close(ready[1]);
+    mpRead(ready[0], &ch);
+    sqlite3_open(path, &db);
+    sqlite3_busy_timeout(db, 10000);
+    rc = execSql(db, azSql[i]);
+    if( rc!=SQLITE_OK ) fprintf(stderr, "  %s: %s\n", azSql[i], sqlite3_errmsg(db));
+    snprintf(zName, sizeof(zName), "mp_ref_reader_lock_waits_%d", i);
+    check(zName, rc==SQLITE_OK);
+    waitpid(pid, 0, 0);
+    close(ready[0]);
+    sqlite3_close(db);
+  }
+  remove(path);
+}
+
 int main(){
   printf("=== Multi-Process Concurrency Tests ===\n\n");
 
   test_publication_busy_commit();
   test_clean_reset_peer_process();
   test_ref_commands_busy_handler();
+  test_ref_commands_wait_for_reader_lock();
   test_two_writers();
   test_reader_during_write();
   test_reader_after_peer_restore();

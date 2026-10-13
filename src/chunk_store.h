@@ -282,6 +282,10 @@ struct ChunkStore {
   ** uses it for state the store cannot see, such as PRAGMA query_only. */
   int (*xWriteGate)(void*);
   void *pWriteGateArg;
+  /* Busy handler of the connection that owns this store; a publish with no
+  ** handler of its own waits through it instead of a fixed spin. */
+  int (*xDefaultBusy)(void*);
+  void *pDefaultBusyArg;
 
   /* One-shot: adopt the path on next refresh. Only the installer may set
   ** this (backup dest is replaced on purpose). */

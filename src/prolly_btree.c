@@ -1017,6 +1017,8 @@ static int prollyBtreeOpenImpl(
   pBt->db = db;
   pBt->store.xWriteGate = prollyBtreeQueryOnlyWriteGate;
   pBt->store.pWriteGateArg = p;
+  pBt->store.xDefaultBusy = prollyInvokeBusyHandler;
+  pBt->store.pDefaultBusyArg = pBt;
   pBt->pageSize = PROLLY_DEFAULT_PAGE_SIZE;
   pBt->cacheSize = DOLTLITE_DEFAULT_CACHE_SIZE;
   pBt->indexBudgetActive = pBt->store.index.lazy.active;
