@@ -1719,12 +1719,16 @@ static void test_publication_busy_commit(void){
     if( pid==0 ){
       sqlite3_vfs *vfs = sqlite3_vfs_find(0);
       sqlite3_file *file = malloc(vfs->szOsFile);
+      char zOpen[260];
       int flags = 0;
       close(ready[0]);
       close(release[1]);
       if( !file ) _exit(1);
       memset(file, 0, vfs->szOsFile);
-      if( vfs->xOpen(vfs, path, file,
+      /* xOpen expects the main-db name double-nul terminated. */
+      memset(zOpen, 0, sizeof(zOpen));
+      snprintf(zOpen, sizeof(zOpen)-2, "%s", path);
+      if( vfs->xOpen(vfs, zOpen, file,
           SQLITE_OPEN_MAIN_DB|SQLITE_OPEN_READWRITE, &flags)!=SQLITE_OK ){
         _exit(2);
       }
