@@ -933,6 +933,12 @@ static void doltliteCommitFuncImpl(
     return;
   }
 
+  if( cs->refs.nBranches>0
+   && chunkStoreFindBranch(cs, doltliteGetSessionBranch(db), 0)==SQLITE_NOTFOUND ){
+    doltliteCmdResultWriteTxnError(context, db, SQLITE_BUSY);
+    return;
+  }
+
   if( amend ){
     u8 isMerging = 0;
     u8 isRebasing = 0;

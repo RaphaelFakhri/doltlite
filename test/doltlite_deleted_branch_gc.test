@@ -1,0 +1,125 @@
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+
+set executable [file normalize [info nameofexecutable]]
+while {[file type $executable] eq "link"} {
+  set executable [file normalize [file join [file dirname $executable] \
+      [file readlink $executable]]]
+}
+set engine [file join [file dirname $executable] doltlite]
+if {$tcl_platform(platform) eq "windows"} {append engine .exe}
+
+foreach gc {0 1} {
+  foreach dirty {0 1} {
+    foreach boundary {autocommit begin savepoint nested} {
+      set prefix deleted-branch-$gc.$dirty.$boundary
+      reset_db
+      db eval {
+        CREATE TABLE t(id INTEGER PRIMARY KEY,v TEXT);
+        CREATE INDEX tv ON t(v);
+        INSERT INTO t VALUES(1,'main');
+        SELECT dolt_commit('-Am','main commit');
+        SELECT dolt_checkout('-b','feat');
+        CREATE TABLE feat_only(id INTEGER PRIMARY KEY);
+        INSERT INTO t VALUES(2,'feat');
+        SELECT dolt_commit('-am','feat commit');
+      }
+      if {$dirty} {db eval {INSERT INTO t VALUES(3,'dirty')}}
+      set head [db one {SELECT dolt_hashof('HEAD')}]
+      switch $boundary {
+        begin {db eval BEGIN}
+        savepoint {db eval {SAVEPOINT caller}}
+        nested {db eval {BEGIN; SAVEPOINT caller}}
+      }
+      if {$boundary ne "autocommit"} {db eval {SELECT * FROM t}}
+      set peerSql {SELECT dolt_branch('-D','feat');}
+      if {$gc} {append peerSql {SELECT dolt_gc();}}
+      do_test $prefix.peer {
+        set output [exec $engine -bail [file normalize test.db] $peerSql]
+        expr {$gc ? [regexp {^0\n[1-9][0-9]* chunks removed, [0-9]+ chunks kept$} $output]
+                  : $output eq "0"}
+      } 1
+      db eval {PRAGMA shrink_memory}
+      do_test $prefix.status {
+        set caught [catch {db eval {SELECT count(*) FROM dolt_status}} message]
+        expr {!$caught || ([db errorcode]&255)==5}
+      } 1
+      foreach {name op} {
+        commit {SELECT dolt_commit('-a','--allow-empty','-m','rejected')}
+        amend-all {SELECT dolt_commit('-A','--amend','-m','rejected')}
+        amend {SELECT dolt_commit('--amend','-m','rejected')}
+        hard-reset {SELECT dolt_reset('--hard')}
+        soft-reset {SELECT dolt_reset('--soft','HEAD')}
+      } {
+        do_test $prefix.$name {
+          list [catch {db eval $op} message] [expr {[db errorcode]&255}]
+        } {1 5}
+      }
+      do_test $prefix.invalid-checkout {
+        list [catch {db eval {SELECT dolt_checkout('nosuch')}} message] \
+          [db one {SELECT dolt_hashof('HEAD')}]
+      } [list 1 $head]
+      db eval {PRAGMA shrink_memory}
+      do_test $prefix.checkout {
+        set caught [catch {db eval {SELECT dolt_checkout('main')}} message]
+        if {$caught && ([db errorcode]&255)==5 && ![sqlite3_get_autocommit db]} {
+          db eval ROLLBACK
+          set caught [catch {db eval {SELECT dolt_checkout('main')}} message]
+        }
+        list $caught $message
+      } {0 0}
+      if {![sqlite3_get_autocommit db]} {db eval COMMIT}
+      do_execsql_test $prefix.target {
+        SELECT dolt_checkout('main');
+        SELECT id FROM t INDEXED BY tv ORDER BY id;
+        SELECT count(*) FROM dolt_branches WHERE name='feat';
+        SELECT count(*) FROM dolt_status;
+      } {0 1 0 0}
+      do_execsql_test $prefix.write {
+        INSERT INTO t VALUES(4,'recovered');
+        SELECT length(dolt_commit('-am','recovered'));
+      } 40
+      do_test $prefix.reopen {
+        db close
+        sqlite3 db test.db
+        db eval {
+          SELECT id FROM dolt_at_t('main') ORDER BY id;
+          SELECT count(*) FROM dolt_branches WHERE name='feat';
+          PRAGMA integrity_check;
+        }
+      } {1 4 0 ok}
+    }
+  }
+}
+
+foreach gc {0 1} {
+  foreach flag {-b -B} {
+    set prefix deleted-branch-recreate-$gc.$flag
+    reset_db
+    db eval {
+      CREATE TABLE t(id INTEGER PRIMARY KEY);
+      INSERT INTO t VALUES(1);
+      SELECT dolt_commit('-Am','main');
+      SELECT dolt_checkout('-b','feat');
+      CREATE TABLE feat_only(id INTEGER PRIMARY KEY);
+      SELECT dolt_commit('-Am','feat');
+    }
+    set peerSql {SELECT dolt_branch('-D','feat');}
+    if {$gc} {append peerSql {SELECT dolt_gc();}}
+    exec $engine -bail [file normalize test.db] $peerSql
+    db eval {PRAGMA shrink_memory}
+    do_test $prefix.checkout {db eval "SELECT dolt_checkout('$flag','feat','main')"} 0
+    do_execsql_test $prefix.rows {
+      SELECT id FROM t;
+      SELECT count(*) FROM sqlite_schema WHERE name='feat_only';
+      SELECT count(*) FROM dolt_branches WHERE name='feat';
+    } {1 0 1}
+    do_execsql_test $prefix.write {
+      INSERT INTO t VALUES(2);
+      SELECT length(dolt_commit('-am','recreated'));
+      PRAGMA integrity_check;
+    } {40 ok}
+  }
+}
+
+finish_test

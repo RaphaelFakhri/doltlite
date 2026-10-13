@@ -1353,6 +1353,120 @@ static void gc_sweeps_vc_source_case(const char *zName, const char *zCmd,
   remove(ready);
 }
 
+static void test_deleted_branch_checkout_after_gc(void){
+  const char *azBegin[] = {
+    0, "BEGIN", "SAVEPOINT caller", "BEGIN; SAVEPOINT caller"
+  };
+  const char *azWrite[] = {
+    "SELECT dolt_commit('-a','--allow-empty','-m','rejected')",
+    "SELECT dolt_commit('-A','--amend','-m','rejected')",
+    "SELECT dolt_commit('--amend','-m','rejected')",
+    "SELECT dolt_reset('--hard')",
+    "SELECT dolt_reset('--soft','HEAD')"
+  };
+  char path[256], head[64], label[128];
+  int gc, dirty, boundary;
+
+  printf("--- Test: checkout escapes a peer-deleted branch after gc ---\n");
+  snprintf(path, sizeof(path), DOLTLITE_TEST_TMPDIR "/mp_gc_deleted_%d.db",
+           (int)getpid());
+  for(gc=0; gc<2; gc++){
+    for(dirty=0; dirty<2; dirty++){
+      for(boundary=0; boundary<4; boundary++){
+        sqlite3 *db = 0, *fresh = 0;
+        char *zErr = 0;
+        pid_t child;
+        int rc, status = 0, i;
+
+        setup_db_with_rows(path, 5);
+        check("gc_deleted_open", sqlite3_open(path, &db)==SQLITE_OK);
+        check("gc_deleted_feature", execSql(db,
+            "SELECT dolt_checkout('-b','feat');"
+            "CREATE TABLE feat_only(id INTEGER PRIMARY KEY);"
+            "INSERT INTO t VALUES(100,'feat');"
+            "SELECT dolt_commit('-am','feat commit')")==SQLITE_OK);
+        if( dirty ){
+          check("gc_deleted_dirty", execSql(db,
+              "INSERT INTO t VALUES(200,'dirty')")==SQLITE_OK);
+        }
+        snprintf(head, sizeof(head), "%s",
+                 queryScalarText(db, "SELECT dolt_hashof('HEAD')"));
+        if( azBegin[boundary] ){
+          check("gc_deleted_begin", execSql(db, azBegin[boundary])==SQLITE_OK);
+          check("gc_deleted_pin", countRowsDiag(db,
+              "SELECT count(*) FROM t")==6+dirty);
+        }
+        child = fork();
+        if( child<0 ){ perror("fork"); exit(1); }
+        if( child==0 ){
+          sqlite3 *peer = 0;
+          if( sqlite3_open(path, &peer)!=SQLITE_OK ) _exit(1);
+          rc = execSql(peer, "SELECT dolt_branch('-D','feat')");
+          if( rc==SQLITE_OK && gc ) rc = execSql(peer, "SELECT dolt_gc()");
+          sqlite3_close(peer);
+          _exit(rc==SQLITE_OK ? 0 : 2);
+        }
+        check("gc_deleted_wait", waitpid(child, &status, 0)==child);
+        check("gc_deleted_peer", WIFEXITED(status) && WEXITSTATUS(status)==0);
+        check("gc_deleted_release_cache", execSql(db, "PRAGMA shrink_memory")==SQLITE_OK);
+        rc = execSql(db, "SELECT count(*) FROM dolt_status");
+        check("gc_deleted_status_not_corrupt",
+              rc==SQLITE_OK || (rc&0xff)==SQLITE_BUSY);
+        if( gc && !boundary ) check("gc_deleted_status_busy", rc==SQLITE_BUSY);
+        for(i=0; i<(int)(sizeof(azWrite)/sizeof(azWrite[0])); i++){
+          rc = execSql(db, azWrite[i]);
+          snprintf(label, sizeof(label), "gc_deleted_%d_%d_%d_write_%d_busy",
+                   gc, dirty, boundary, i);
+          check(label, (rc&0xff)==SQLITE_BUSY);
+        }
+        rc = sqlite3_exec(db, "INSERT INTO t VALUES(300,'rejected')", 0, 0, &zErr);
+        check("gc_deleted_insert_busy", (rc&0xff)==SQLITE_BUSY);
+        check("gc_deleted_insert_names_branch",
+              zErr && (strstr(zErr, "branch 'feat' no longer exists")
+                       || (boundary && strstr(zErr, "database is locked"))));
+        sqlite3_free(zErr);
+        rc = execSql(db, "SELECT dolt_checkout('nosuch')");
+        check("gc_deleted_invalid_checkout_refused", rc!=SQLITE_OK);
+        check("gc_deleted_invalid_checkout_keeps_head", strcmp(queryScalarText(db,
+              "SELECT dolt_hashof('HEAD')"), head)==0);
+        check("gc_deleted_release_checkout_cache", execSql(db,
+              "PRAGMA shrink_memory")==SQLITE_OK);
+        rc = execSql(db, "SELECT dolt_checkout('main')");
+        if( (rc&0xff)==SQLITE_BUSY && !sqlite3_get_autocommit(db) ){
+          check("gc_deleted_stale_rollback", execSql(db, "ROLLBACK")==SQLITE_OK);
+          rc = execSql(db, "SELECT dolt_checkout('main')");
+        }
+        snprintf(label, sizeof(label), "gc_deleted_%d_%d_%d_checkout_recovers",
+                 gc, dirty, boundary);
+        check(label, rc==SQLITE_OK);
+        if( !sqlite3_get_autocommit(db) ){
+          check("gc_deleted_end_transaction", execSql(db, "COMMIT")==SQLITE_OK);
+        }
+        check("gc_deleted_repeat_checkout", execSql(db,
+              "SELECT dolt_checkout('main')")==SQLITE_OK);
+        check("gc_deleted_target_rows", countRowsDiag(db, "SELECT count(*) FROM t")==5);
+        check("gc_deleted_not_resurrected", countRowsDiag(db,
+              "SELECT count(*) FROM dolt_branches WHERE name='feat'")==0);
+        check("gc_deleted_target_status", countRowsDiag(db,
+              "SELECT count(*) FROM dolt_status")==0);
+        check("gc_deleted_recovered_write", execSql(db,
+              "INSERT INTO t VALUES(300,'recovered');"
+              "SELECT dolt_commit('-am','recovered')")==SQLITE_OK);
+        sqlite3_close(db);
+        check("gc_deleted_reopen", sqlite3_open(path, &fresh)==SQLITE_OK);
+        check("gc_deleted_durable_rows", countRowsDiag(fresh,
+              "SELECT count(*) FROM dolt_at_t('main')")==6);
+        check("gc_deleted_durable_no_branch", countRowsDiag(fresh,
+              "SELECT count(*) FROM dolt_branches WHERE name='feat'")==0);
+        check("gc_deleted_integrity", strcmp(queryScalarText(fresh,
+              "PRAGMA integrity_check"), "ok")==0);
+        sqlite3_close(fresh);
+      }
+    }
+  }
+  remove(path);
+}
+
 static void test_gc_sweeps_vc_source(void){
   gc_sweeps_vc_source_case("reset_soft", "SELECT dolt_reset('--soft','feat')", 0);
   gc_sweeps_vc_source_case("reset", "SELECT dolt_reset('feat')", 0);
@@ -1383,6 +1497,7 @@ int main(){
   test_gc_before_add_persist();
   test_own_gc_sees_peer_write();
   test_gc_sweeps_vc_source();
+  test_deleted_branch_checkout_after_gc();
 
   printf("\n=== Results: %d passed, %d failed out of %d tests ===\n",
     nPass, nFail, nPass+nFail);

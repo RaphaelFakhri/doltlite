@@ -2576,6 +2576,14 @@ int doltliteGetHeadCatalogHash(sqlite3 *db, ProllyHash *pCatHash){
   }
 
   rc = chunkStoreGet(cs, &headHash, &data, &nData);
+  if( rc==SQLITE_NOTFOUND && !db->aDb[0].pBt->isDetached ){
+    Btree *p = db->aDb[0].pBt;
+    rc = chunkStoreEnsureRefsFresh(cs);
+    if( rc!=SQLITE_OK ) return rc;
+    if( chunkStoreFindBranch(cs, p->zBranch ? p->zBranch : "main", 0)
+        ==SQLITE_NOTFOUND ) return SQLITE_BUSY;
+    return SQLITE_NOTFOUND;
+  }
   if( rc!=SQLITE_OK ) return rc;
 
   rc = doltliteCommitDeserialize(data, nData, &commit);
