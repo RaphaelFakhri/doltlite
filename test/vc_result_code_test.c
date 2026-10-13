@@ -122,6 +122,10 @@ static void test_busy_code(const char *zBase, const char *zWork){
       return;
     }
     if( sqlite3_open(zWork, &dbPeer)!=SQLITE_OK ) return;
+    if( strcmp(azBusy[i], "SELECT dolt_clean()")==0 ){
+      checkRc("busy: untracked clean table", exec(dbPeer,
+        "CREATE TABLE untracked(id INTEGER PRIMARY KEY)"), SQLITE_OK);
+    }
     if( exec(dbPeer, "BEGIN IMMEDIATE; INSERT INTO t VALUES(50,'peer')")
           !=SQLITE_OK ){
       check("busy: peer takes the write lock", 0);
@@ -138,6 +142,10 @@ static void test_busy_code(const char *zBase, const char *zWork){
     check("busy: message is not bogus",
           zErr!=0 && strcmp(zErr, "not an error")!=0);
     sqlite3_free(zErr);
+    if( strcmp(azBusy[i], "SELECT dolt_clean()")==0 ){
+      checkRc("busy: refused clean preserves untracked table",
+              exec(db, "SELECT * FROM untracked"), SQLITE_OK);
+    }
     sqlite3_close(db);
     sqlite3_close(dbPeer);
   }
@@ -406,27 +414,29 @@ static void test_ref_busy_handler(const char *zPath){
     const char *setup;
     const char *sql;
     const char *verify;
+    int noWait;
   } cases[] = {
     {"", "SELECT dolt_branch('new')",
-     "SELECT count(*) FROM dolt_branches WHERE name='new'"},
+     "SELECT count(*) FROM dolt_branches WHERE name='new'", 0},
     {"", "SELECT dolt_branch('-d','feature')",
-     "SELECT count(*)=0 FROM dolt_branches WHERE name='feature'"},
+     "SELECT count(*)=0 FROM dolt_branches WHERE name='feature'", 0},
     {"", "SELECT dolt_branch('-m','feature','renamed')",
-     "SELECT count(*) FROM dolt_branches WHERE name='renamed'"},
+     "SELECT count(*) FROM dolt_branches WHERE name='renamed'", 0},
     {"", "SELECT dolt_branch('-c','feature','copied')",
-     "SELECT count(*) FROM dolt_branches WHERE name='copied'"},
+     "SELECT count(*) FROM dolt_branches WHERE name='copied'", 0},
     {"", "SELECT dolt_tag('new')",
-     "SELECT count(*) FROM dolt_tags WHERE tag_name='new'"},
+     "SELECT count(*) FROM dolt_tags WHERE tag_name='new'", 0},
     {"", "SELECT dolt_tag('-d','v1')",
-     "SELECT count(*)=0 FROM dolt_tags WHERE tag_name='v1'"},
-    {"", "SELECT dolt_checkout('feature')", "SELECT active_branch()='feature'"},
-    {"", "SELECT dolt_checkout('-b','new')", "SELECT active_branch()='new'"},
+     "SELECT count(*)=0 FROM dolt_tags WHERE tag_name='v1'", 0},
+    {"", "SELECT dolt_checkout('feature')", "SELECT active_branch()='feature'", 0},
+    {"", "SELECT dolt_checkout('-b','new')", "SELECT active_branch()='new'", 0},
     {"UPDATE t SET v='dirty'", "SELECT dolt_reset('--hard')",
-     "SELECT v='a' FROM t WHERE k=1"},
-    {"", "SELECT dolt_clean()", "SELECT count(*) FROM t"},
+     "SELECT v='a' FROM t WHERE k=1", 0},
+    {"", "SELECT dolt_clean()", "SELECT count(*) FROM t", 1},
+    {"", "SELECT dolt_reset('t')", "SELECT count(*) FROM t", 1},
     {"CREATE TABLE untracked(id INTEGER PRIMARY KEY)", "SELECT dolt_clean()",
-     "SELECT count(*)=0 FROM sqlite_master WHERE name='untracked'"},
-    {"", "VACUUM", "SELECT count(*) FROM t"}
+     "SELECT count(*)=0 FROM sqlite_master WHERE name='untracked'", 0},
+    {"", "VACUUM", "SELECT count(*) FROM t", 0}
   };
   int i;
   for(i=0; i<(int)(sizeof(cases)/sizeof(cases[0])); i++){
@@ -453,18 +463,34 @@ static void test_ref_busy_handler(const char *zPath){
       check("ref_busy: automatic compaction does not wait", ctx.calls==0);
     }
     rc = exec(db, cases[i].sql);
-    checkRc(cases[i].sql, rc, SQLITE_BUSY);
-    if( ctx.calls==0 ) fprintf(stderr, "No busy callback: %s\n", cases[i].sql);
-    check("ref_busy: declining handler is called", ctx.calls>0);
-    check("ref_busy: decline preserves peer transaction", !sqlite3_get_autocommit(peer));
-    ctx.calls = 0;
-    ctx.release = 1;
-    sqlite3_busy_handler(db, refBusyHandler, &ctx);
-    rc = exec(db, cases[i].sql);
-    checkRc(cases[i].sql, rc, SQLITE_OK);
-    check("ref_busy: handler permits retry", ctx.calls>=3);
-    checkRc("ref_busy: peer rollback", ctx.releaseRc, SQLITE_OK);
-    check("ref_busy: peer released", sqlite3_get_autocommit(peer));
+    if( cases[i].noWait ){
+      checkRc(cases[i].sql, rc, SQLITE_OK);
+      check("ref_busy: noop does not wait", ctx.calls==0);
+      check("ref_busy: noop preserves peer transaction", !sqlite3_get_autocommit(peer));
+      check("ref_busy: noop preserves peer pending row", rowCount(peer)==2);
+      ctx.release = 1;
+      checkRc("ref_busy: repeated noop", exec(db, cases[i].sql), SQLITE_OK);
+      check("ref_busy: repeated noop does not wait", ctx.calls==0);
+      check("ref_busy: repeated noop preserves peer transaction", !sqlite3_get_autocommit(peer));
+      checkRc("ref_busy: noop peer rollback", exec(peer, "ROLLBACK"), SQLITE_OK);
+    }else{
+      checkRc(cases[i].sql, rc, SQLITE_BUSY);
+      if( ctx.calls==0 ) fprintf(stderr, "No busy callback: %s\n", cases[i].sql);
+      check("ref_busy: declining handler is called", ctx.calls>0);
+      check("ref_busy: decline preserves peer transaction", !sqlite3_get_autocommit(peer));
+      if( strcmp(cases[i].sql, "SELECT dolt_clean()")==0 ){
+        checkRc("ref_busy: refused clean preserves untracked table",
+                exec(db, "SELECT * FROM untracked"), SQLITE_OK);
+      }
+      ctx.calls = 0;
+      ctx.release = 1;
+      sqlite3_busy_handler(db, refBusyHandler, &ctx);
+      rc = exec(db, cases[i].sql);
+      checkRc(cases[i].sql, rc, SQLITE_OK);
+      check("ref_busy: handler permits retry", ctx.calls>=3);
+      checkRc("ref_busy: peer rollback", ctx.releaseRc, SQLITE_OK);
+      check("ref_busy: peer released", sqlite3_get_autocommit(peer));
+    }
     sqlite3_busy_handler(db, 0, 0);
     check("ref_busy: operation took effect", scalarInt(db, cases[i].verify)==1);
     check("ref_busy: peer uncommitted row absent", rowCount(db)==1);
