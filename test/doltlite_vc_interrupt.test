@@ -81,4 +81,128 @@ do_test vc-interrupt.rows-cancel {sqlite3_step $stmt} SQLITE_INTERRUPT
 db progress 0 {}
 sqlite3_finalize $stmt
 
+proc clean_interrupt_snapshot {} {
+  db eval {
+    SELECT dolt_hashof('HEAD');
+    SELECT name,type,tbl_name,sql FROM main.sqlite_schema ORDER BY name;
+    SELECT table_name,staged,status FROM dolt_status ORDER BY table_name,staged;
+    SELECT id,v FROM t ORDER BY id;
+    SELECT id,v FROM u1 INDEXED BY u1v ORDER BY id;
+    SELECT * FROM u2;
+    SELECT * FROM u3;
+    SELECT seq FROM sqlite_sequence WHERE name='u1';
+    SELECT * FROM local_view ORDER BY id;
+    PRAGMA foreign_keys;
+  }
+}
+
+proc clean_interrupt_progress {api tick} {
+  incr ::cleanTicks
+  if {$::cleanTicks==$tick} {
+    set ::cleanFired 1
+    if {$api eq "interrupt"} {
+      db interrupt
+      return 0
+    }
+    return 1
+  }
+  return 0
+}
+
+foreach boundary {autocommit begin savepoint nested} {
+  foreach api {progress interrupt} {
+    set interrupted 0
+    for {set tick 1} {$tick<=1500} {incr tick} {
+      reset_db
+      db eval {
+        PRAGMA foreign_keys=ON;
+        CREATE TABLE t(id INTEGER PRIMARY KEY,v TEXT);
+        INSERT INTO t VALUES(1,'base');
+        SELECT dolt_commit('-Am','base');
+        INSERT INTO t VALUES(2,'staged');
+        SELECT dolt_add('t');
+        INSERT INTO t VALUES(3,'working');
+        CREATE TABLE u1(id INTEGER PRIMARY KEY AUTOINCREMENT,v TEXT);
+        CREATE INDEX u1v ON u1(v);
+        INSERT INTO u1(v) VALUES('one');
+        CREATE TABLE u2(id INT PRIMARY KEY,v TEXT);
+        INSERT INTO u2 VALUES(2,'two');
+        CREATE TABLE u3(id INT PRIMARY KEY,v TEXT);
+        INSERT INTO u3 VALUES(3,'three');
+        CREATE VIEW local_view AS SELECT * FROM t;
+        CREATE TRIGGER local_trigger AFTER INSERT ON u3 BEGIN SELECT 1; END;
+      }
+      switch $boundary {
+        begin {db eval BEGIN}
+        savepoint {db eval {SAVEPOINT caller}}
+        nested {db eval {BEGIN; SAVEPOINT caller}}
+      }
+      if {$boundary ne "autocommit"} {
+        db eval {INSERT INTO t VALUES(4,'caller'); UPDATE u3 SET v='caller'}
+      }
+      set before [clean_interrupt_snapshot]
+      set beforeAuto [sqlite3_get_autocommit db]
+      set ::cleanTicks 0
+      set ::cleanFired 0
+      db progress 1 [list clean_interrupt_progress $api $tick]
+      set failed [catch {db eval {SELECT dolt_clean()}} message]
+      set code [sqlite3_errcode db]
+      db progress 0 {}
+      set prefix clean-interrupt-$boundary-$api-$tick
+      if {$failed} {
+        incr interrupted
+        do_test $prefix.code {set code} SQLITE_INTERRUPT
+        do_test $prefix.transaction {sqlite3_get_autocommit db} $beforeAuto
+        do_test $prefix.live {clean_interrupt_snapshot} $before
+        if {$boundary eq "autocommit"} {
+          sqlite3 peer test.db
+          do_test $prefix.peer-write {peer eval {INSERT INTO t VALUES(50,'peer')}} {}
+          peer close
+          do_execsql_test $prefix.next-write {INSERT INTO t VALUES(51,'next')} {}
+        } elseif {$boundary eq "begin"} {
+          do_execsql_test $prefix.commit {COMMIT} {}
+        } else {
+          do_execsql_test $prefix.caller-savepoint {
+            ROLLBACK TO caller;
+            RELEASE caller;
+            SELECT count(*) FROM t WHERE id=4;
+          } {0}
+          if {$boundary eq "nested"} {db eval COMMIT}
+        }
+        do_test $prefix.durable {
+          db close
+          sqlite3 db test.db
+          db eval {
+            SELECT count(*) FROM main.sqlite_schema WHERE name IN ('u1','u2','u3');
+            SELECT v FROM u1 INDEXED BY u1v;
+            SELECT * FROM u2;
+            SELECT v FROM u3;
+            SELECT seq FROM sqlite_sequence WHERE name='u1';
+            SELECT count(*) FROM main.sqlite_schema
+              WHERE name IN ('local_view','local_trigger');
+            SELECT count(*) FROM dolt_status WHERE table_name='t' AND staged=1;
+            SELECT count(*) FROM t WHERE id=4;
+            SELECT count(*) FROM t WHERE id IN (50,51);
+            PRAGMA integrity_check;
+          }
+        } [list 3 one 2 two [expr {$boundary eq "begin" ? "caller" : "three"}] \
+             1 2 1 [expr {$boundary eq "begin" ? 1 : 0}] \
+             [expr {$boundary eq "autocommit" ? 2 : 0}] ok]
+      } else {
+        do_execsql_test $prefix.success {
+          SELECT count(*) FROM main.sqlite_schema
+            WHERE name IN ('u1','u2','u3','local_view','local_trigger');
+          SELECT count(*) FROM t;
+          SELECT count(*) FROM dolt_status WHERE table_name='t' AND staged=1;
+          PRAGMA foreign_keys;
+        } [list 0 [expr {$boundary eq "autocommit" ? 3 : 4}] 1 1]
+        if {![sqlite3_get_autocommit db]} {db eval COMMIT}
+      }
+      if {!$::cleanFired} break
+    }
+    do_test clean-interrupt-$boundary-$api.cancellable {expr {$interrupted>0}} 1
+    do_test clean-interrupt-$boundary-$api.terminates {expr {$tick<=1500}} 1
+  }
+}
+
 finish_test

@@ -230,6 +230,8 @@ static void doltliteCleanFunc(
   int i;
   int rc;
   int bBegan = 0;
+  int haveSaved = 0;
+  DoltliteTxnState saved;
   ProllyHash wsBasis;
 
   if( doltliteCmdRejectInWriteStatement(context, "clean") ) return;
@@ -310,28 +312,48 @@ static void doltliteCleanFunc(
       /* Each nested DROP commits on its own in autocommit. One transaction
       ** keeps an earlier drop off disk when a later write fails. */
       rc = sqlite3_exec(db, "BEGIN", 0, 0, 0);
-      if( rc!=SQLITE_OK ) goto clean_error;
-      bBegan = 1;
+      bBegan = !db->autoCommit;
+      if( rc!=SQLITE_OK ) goto clean_rollback;
     }
     rc = doltliteEnsureWriteTxnAndSavepoints(db);
     if( rc==SQLITE_OK ) rc = doltliteConfirmWorkingSet(db, cs, &wsBasis);
     if( rc!=SQLITE_OK ) goto clean_rollback;
+    if( !bBegan ){
+      rc = doltliteSaveTxnState(db, &saved);
+      if( rc!=SQLITE_OK ) goto clean_rollback;
+      haveSaved = 1;
+    }
+    db->nVcStatementRestore++;
     rc = cleanDropTables(db, &untracked);
+    db->nVcStatementRestore--;
     if( rc!=SQLITE_OK ) goto clean_rollback;
     if( bBegan ){
       rc = sqlite3_exec(db, "COMMIT", 0, 0, 0);
       if( rc!=SQLITE_OK ) goto clean_rollback;
     }else{
       rc = doltlitePersistWorkingSet(db);
-      if( rc!=SQLITE_OK ) goto clean_error;
+      if( rc!=SQLITE_OK ) goto clean_rollback;
     }
   }
   sqlite3_result_int(context, 0);
   goto clean_done;
 
 clean_rollback:
+  if( haveSaved ){
+    rc = doltliteRestoreTxnStateOnFailure(db, &saved, rc);
+    haveSaved = 0;
+  }
   if( bBegan && !db->autoCommit ){
-    sqlite3_exec(db, "ROLLBACK", 0, 0, 0);
+    int rc2;
+    db->nVcInterruptMask++;
+    rc2 = sqlite3_exec(db, "ROLLBACK", 0, 0, 0);
+    if( rc2!=SQLITE_OK ){
+      sqlite3RollbackAll(db, SQLITE_OK);
+      sqlite3CloseSavepoints(db);
+      db->autoCommit = 1;
+      rc = rc2;
+    }
+    db->nVcInterruptMask--;
   }
 clean_error:
   /* A sub-call that fails without touching the connection leaves errmsg
@@ -341,6 +363,7 @@ clean_error:
       -1);
   sqlite3_result_error_code(context, rc);
 clean_done:
+  if( haveSaved ) doltliteTxnStateClear(&saved);
   doltliteFinishAutocommitWrite(db);
   cleanNamesClear(&untracked);
   cleanNamesClear(&selected);
