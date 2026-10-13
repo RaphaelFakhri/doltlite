@@ -895,14 +895,20 @@ struct MpRefBusyCtx {
   int calls;
 };
 
+/* Releases the peer on the first wait, then keeps retrying while the peer
+** finishes letting go of the file: its close appends a clean-close marker,
+** and a statement that starts meanwhile waits as in stock SQLite. */
 static int mpReleaseBusyPeer(void *arg, int attempt){
   MpRefBusyCtx *p = (MpRefBusyCtx*)arg;
   char ch;
-  (void)attempt;
-  if( p->calls++ ) return 0;
-  mpWrite(p->releaseFd, "G");
-  mpRead(p->readyFd, &ch);
-  return ch=='D';
+  if( p->calls++==0 ){
+    mpWrite(p->releaseFd, "G");
+    mpRead(p->readyFd, &ch);
+    return ch=='D';
+  }
+  if( attempt>2000 ) return 0;
+  sqlite3_sleep(5);
+  return 1;
 }
 
 static void test_ref_commands_busy_handler(void){
@@ -1207,21 +1213,6 @@ static void test_commit_does_not_erase_peer_write(void){
   remove(path);
 }
 
-/* Releases the peer on the first wait, then keeps retrying while the peer
-** finishes letting go of the lock. */
-static int mpReleaseBusyPeerThenRetry(void *arg, int attempt){
-  MpRefBusyCtx *p = (MpRefBusyCtx*)arg;
-  char ch;
-  if( p->calls++==0 ){
-    mpWrite(p->releaseFd, "G");
-    mpRead(p->readyFd, &ch);
-    return ch=='D';
-  }
-  if( attempt>2000 ) return 0;
-  sqlite3_sleep(5);
-  return 1;
-}
-
 static void test_ref_command_binds_post_wait_tip(void){
   static const char *azSql[] = {
     "SELECT dolt_branch('x')",
@@ -1271,7 +1262,7 @@ static void test_ref_command_binds_post_wait_tip(void){
     memset(&ctx, 0, sizeof(ctx));
     ctx.releaseFd = release[1];
     ctx.readyFd = ready[0];
-    sqlite3_busy_handler(db, mpReleaseBusyPeerThenRetry, &ctx);
+    sqlite3_busy_handler(db, mpReleaseBusyPeer, &ctx);
     rc = execSql(db, azSql[i]);
     if( rc!=SQLITE_OK ) fprintf(stderr, "%s: %s\n", azSql[i], sqlite3_errmsg(db));
     check("mp_ref_wait_command_ok", rc==SQLITE_OK && ctx.calls>0);
