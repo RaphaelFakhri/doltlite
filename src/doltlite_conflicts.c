@@ -1084,6 +1084,7 @@ static void conflictsResolveParsedFunc(
 
   int bBegan = 0;
   int bSp = 0;
+  const char *zError = 0;
 
   if(!cs){ sqlite3_result_error(ctx,"no database",-1); return; }
 
@@ -1114,45 +1115,28 @@ static void conflictsResolveParsedFunc(
     }
   }
 
+  db->nVcInterruptMask++;
   if( db->autoCommit ){
     rc = sqlite3_exec(db, "BEGIN", 0, 0, 0);
-    if( rc!=SQLITE_OK ){
-      sqlite3_result_error_code(ctx, rc);
-      return;
-    }
-    bBegan = 1;
+    bBegan = rc==SQLITE_OK;
   }else{
     rc = sqlite3_exec(db, "SAVEPOINT doltlite_conflicts_resolve", 0, 0, 0);
-    if( rc!=SQLITE_OK ){
-      sqlite3_result_error_code(ctx, rc);
-      return;
-    }
-    bSp = 1;
+    bSp = rc==SQLITE_OK;
+  }
+  db->nVcInterruptMask--;
+  if( rc!=SQLITE_OK ){
+    sqlite3_result_error(ctx, sqlite3_errstr(rc), -1);
+    sqlite3_result_error_code(ctx, rc);
+    return;
   }
 
   for(i=0; i<nTables; i++){
     if( useOurs ){
       rc = removeConflictTableFromCatalog(db, cs, azTables[i], &found);
-      if( rc!=SQLITE_OK ){
-        if( bBegan ) sqlite3_exec(db, "ROLLBACK", 0, 0, 0);
-        if( bSp ){
-          sqlite3_exec(db, "ROLLBACK TO doltlite_conflicts_resolve", 0, 0, 0);
-          sqlite3_exec(db, "RELEASE doltlite_conflicts_resolve", 0, 0, 0);
-        }
-        sqlite3_result_error_code(ctx, rc);
-        return;
-      }
+      if( rc!=SQLITE_OK ) goto resolve_error;
     }else{
       rc = loadConflictTable(db, cs, azTables[i], &table, &found);
-      if( rc!=SQLITE_OK ){
-        if( bBegan ) sqlite3_exec(db, "ROLLBACK", 0, 0, 0);
-        if( bSp ){
-          sqlite3_exec(db, "ROLLBACK TO doltlite_conflicts_resolve", 0, 0, 0);
-          sqlite3_exec(db, "RELEASE doltlite_conflicts_resolve", 0, 0, 0);
-        }
-        sqlite3_result_error_code(ctx, rc);
-        return;
-      }
+      if( rc!=SQLITE_OK ) goto resolve_error;
       if( found ){
         for(j=0; j<table.nConflicts; j++){
           DoltliteConflictRow *cr = &table.aRows[j];
@@ -1161,56 +1145,58 @@ static void conflictsResolveParsedFunc(
                                            cr->pTheirVal, cr->nTheirVal, 0, 0);
           if( rc!=SQLITE_OK ){
             freeConflictTable(&table);
-            if( bBegan ) sqlite3_exec(db, "ROLLBACK", 0, 0, 0);
-            if( bSp ){
-              sqlite3_exec(db, "ROLLBACK TO doltlite_conflicts_resolve", 0, 0, 0);
-              sqlite3_exec(db, "RELEASE doltlite_conflicts_resolve", 0, 0, 0);
-            }
-            sqlite3_result_error(ctx, "failed to apply theirs value", -1);
-            return;
+            zError = "failed to apply theirs value";
+            goto resolve_error;
           }
         }
         freeConflictTable(&table);
         rc = removeConflictTableFromCatalog(db, cs, azTables[i], &found);
-        if( rc!=SQLITE_OK ){
-          if( bBegan ) sqlite3_exec(db, "ROLLBACK", 0, 0, 0);
-          if( bSp ){
-            sqlite3_exec(db, "ROLLBACK TO doltlite_conflicts_resolve", 0, 0, 0);
-            sqlite3_exec(db, "RELEASE doltlite_conflicts_resolve", 0, 0, 0);
-          }
-          sqlite3_result_error_code(ctx, rc);
-          return;
-        }
+        if( rc!=SQLITE_OK ) goto resolve_error;
       }else{
         freeConflictTable(&table);
       }
     }
     if( !found ) needsSeal = 1;
   }
+  if( AtomicLoad(&db->u1.isInterrupted)
+   && !doltliteVcInterruptDeferred(db, 0) ){
+    rc = SQLITE_INTERRUPT;
+    goto resolve_error;
+  }
+  db->nVcInterruptMask++;
   if( bBegan ){
     rc = sqlite3_exec(db, "COMMIT", 0, 0, 0);
-    if( rc!=SQLITE_OK ){
-      sqlite3_exec(db, "ROLLBACK", 0, 0, 0);
-      sqlite3_result_error_code(ctx, rc);
-      return;
-    }
   }else if( bSp ){
     rc = sqlite3_exec(db, "RELEASE doltlite_conflicts_resolve", 0, 0, 0);
-    if( rc!=SQLITE_OK ){
-      sqlite3_exec(db, "ROLLBACK TO doltlite_conflicts_resolve", 0, 0, 0);
-      sqlite3_exec(db, "RELEASE doltlite_conflicts_resolve", 0, 0, 0);
-      sqlite3_result_error_code(ctx, rc);
-      return;
-    }
   }
+  db->nVcInterruptMask--;
+  if( rc!=SQLITE_OK ) goto resolve_error;
   if( needsSeal && !bBegan ){
+    db->nVcInterruptMask++;
     rc = conflictsResolveSealSuccessfulTopSavepoint(db);
+    db->nVcInterruptMask--;
     if( rc!=SQLITE_OK ){
       sqlite3_result_error_code(ctx, rc);
       return;
     }
   }
   sqlite3_result_int(ctx, 0);
+  return;
+
+resolve_error:
+  db->nVcInterruptMask++;
+  if( bBegan ){
+    int rc2 = sqlite3_exec(db, "ROLLBACK", 0, 0, 0);
+    if( rc2!=SQLITE_OK ) rc = rc2;
+  }else if( bSp ){
+    int rc2 = sqlite3_exec(db, "ROLLBACK TO doltlite_conflicts_resolve", 0, 0, 0);
+    int rc3 = sqlite3_exec(db, "RELEASE doltlite_conflicts_resolve", 0, 0, 0);
+    if( rc2!=SQLITE_OK ) rc = rc2;
+    else if( rc3!=SQLITE_OK ) rc = rc3;
+  }
+  db->nVcInterruptMask--;
+  sqlite3_result_error(ctx, zError ? zError : sqlite3_errstr(rc), -1);
+  sqlite3_result_error_code(ctx, rc);
 }
 
 static void conflictsResolveFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){

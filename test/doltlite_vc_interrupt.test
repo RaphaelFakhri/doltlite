@@ -205,4 +205,101 @@ foreach boundary {autocommit begin savepoint nested} {
   }
 }
 
+proc resolve_interrupt_snapshot {} {
+  db eval {
+    SELECT dolt_hashof('HEAD');
+    SELECT id,v FROM t ORDER BY id;
+    SELECT id,v FROM u ORDER BY id;
+    SELECT id,v FROM caller_rows ORDER BY id;
+    SELECT "table",num_conflicts FROM dolt_conflicts ORDER BY "table";
+    SELECT base_v,our_v,their_v FROM dolt_conflicts_t ORDER BY our_id;
+    SELECT base_v,our_v,their_v FROM dolt_conflicts_u ORDER BY our_id;
+    SELECT table_name,staged,status FROM dolt_status ORDER BY table_name,staged;
+  }
+}
+
+foreach boundary {begin nested collision} {
+  foreach mode {ours theirs} {
+    foreach tables {'t' 't','u'} {
+      foreach api {progress interrupt} {
+        set interrupted 0
+        for {set tick 1} {$tick<=200} {incr tick} {
+          reset_db
+          db eval {
+            CREATE TABLE t(id INTEGER PRIMARY KEY,v TEXT);
+            CREATE TABLE u(id INTEGER PRIMARY KEY,v TEXT);
+            CREATE TABLE caller_rows(id INTEGER PRIMARY KEY,v TEXT);
+            WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM s WHERE i<20)
+              INSERT INTO t SELECT i,'base' FROM s;
+            INSERT INTO u SELECT * FROM t;
+            SELECT dolt_commit('-Am','base');
+            SELECT dolt_branch('feat');
+            UPDATE t SET v='main'; UPDATE u SET v='main';
+            SELECT dolt_commit('-am','main');
+            SELECT dolt_checkout('feat');
+            UPDATE t SET v='feat'; UPDATE u SET v='feat';
+            SELECT dolt_commit('-am','feat');
+            SELECT dolt_checkout('main');
+            BEGIN;
+          }
+          catch {db eval {SELECT dolt_merge('feat')}}
+          if {$boundary ne "begin"} {
+            if {$boundary eq "collision"} {
+              db eval {SAVEPOINT doltlite_conflicts_resolve}
+            } else {
+              db eval {SAVEPOINT caller}
+            }
+          }
+          db eval {INSERT INTO caller_rows VALUES(1,'caller')}
+          set before [resolve_interrupt_snapshot]
+          set ::cleanTicks 0
+          set ::cleanFired 0
+          db progress 1 [list clean_interrupt_progress $api $tick]
+          set failed [catch {db eval "SELECT dolt_conflicts_resolve('--$mode',$tables)"} message]
+          set code [sqlite3_errcode db]
+          db progress 0 {}
+          set prefix resolve-interrupt-$boundary-$mode-$tables-$api-$tick
+          if {$failed} {
+            incr interrupted
+            do_test $prefix.code {set code} SQLITE_INTERRUPT
+            do_test $prefix.message {string match *interrupt* $message} 1
+            do_test $prefix.transaction {sqlite3_get_autocommit db} 0
+            do_test $prefix.live {resolve_interrupt_snapshot} $before
+          } else {
+            do_execsql_test $prefix.success {
+              SELECT count(*) FROM t WHERE v='main';
+              SELECT count(*) FROM u WHERE v='main';
+              SELECT count(*) FROM dolt_conflicts;
+              SELECT count(*) FROM caller_rows;
+            } [list [expr {$mode eq "ours" ? 20 : 0}] \
+                    [expr {$tables eq "'t'" || $mode eq "ours" ? 20 : 0}] \
+                    [expr {$tables eq "'t'" ? 1 : 0}] 1]
+          }
+          if {$boundary eq "collision"} {
+            do_execsql_test $prefix.caller-savepoint {
+              ROLLBACK TO doltlite_conflicts_resolve;
+              RELEASE doltlite_conflicts_resolve;
+              SELECT count(*) FROM caller_rows;
+              SELECT count(*) FROM dolt_conflicts;
+            } {0 2}
+          } elseif {$boundary ne "begin"} {
+            do_execsql_test $prefix.caller-savepoint {
+              ROLLBACK TO caller;
+              RELEASE caller;
+              SELECT count(*) FROM caller_rows;
+            } {0}
+          }
+          do_test $prefix.no-internal-savepoint {
+            catchsql {RELEASE doltlite_conflicts_resolve}
+          } {1 {no such savepoint: doltlite_conflicts_resolve}}
+          if {![sqlite3_get_autocommit db]} {db eval ROLLBACK}
+          if {!$::cleanFired} break
+        }
+        do_test resolve-interrupt-$boundary-$mode-$tables-$api.cancellable {expr {$interrupted>0}} 1
+        do_test resolve-interrupt-$boundary-$mode-$tables-$api.terminates {expr {$tick<=200}} 1
+      }
+    }
+  }
+}
+
 finish_test
