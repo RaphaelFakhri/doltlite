@@ -88,17 +88,18 @@ static int setupTwoTableConflicts(sqlite3 *db){
   return exec(db,
     "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);"
     "CREATE TABLE u(id INTEGER PRIMARY KEY, v TEXT);"
-    "INSERT INTO t VALUES(1,'base');"
-    "INSERT INTO u VALUES(1,'base');"
+    "WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM s WHERE i<20) "
+    "INSERT INTO t SELECT i,'base' FROM s;"
+    "INSERT INTO u SELECT * FROM t;"
     "SELECT dolt_commit('-Am','init');"
     "SELECT dolt_branch('feat');"
     "SELECT dolt_checkout('feat');"
-    "UPDATE t SET v='feat' WHERE id=1;"
-    "UPDATE u SET v='feat' WHERE id=1;"
+    "UPDATE t SET v='feat';"
+    "UPDATE u SET v='feat';"
     "SELECT dolt_commit('-Am','feat');"
     "SELECT dolt_checkout('main');"
-    "UPDATE t SET v='main' WHERE id=1;"
-    "UPDATE u SET v='main' WHERE id=1;"
+    "UPDATE t SET v='main';"
+    "UPDATE u SET v='main';"
     "SELECT dolt_commit('-Am','main');");
 }
 
@@ -219,6 +220,157 @@ static void test_conflicts_resolve_savepoint(void){
         && nU>0);
   sqlite3_free(zErr);
   sqlite3_exec(db, "ROLLBACK", 0, 0, 0);
+  closeRm(db, zPath);
+}
+
+typedef struct ResolveInterrupt ResolveInterrupt;
+struct ResolveInterrupt {
+  sqlite3 *db;
+  int tick;
+  int count;
+  int direct;
+};
+
+static int resolveProgress(void *pArg){
+  ResolveInterrupt *p = (ResolveInterrupt*)pArg;
+  if( ++p->count!=p->tick ) return 0;
+  if( p->direct ){
+    sqlite3_interrupt(p->db);
+    return 0;
+  }
+  return 1;
+}
+
+static void test_conflicts_resolve_interrupt(int nTables, int direct){
+  char zPath[256];
+  int tick;
+  int nInterrupted = 0;
+  snprintf(zPath, sizeof(zPath), DOLTLITE_TEST_TMPDIR "/resolve_interrupt_%d.db", (int)getpid());
+  for(tick=1; tick<=200; tick++){
+    sqlite3 *db = openDb(zPath);
+    ResolveInterrupt progress;
+    char *zErr = 0;
+    int rc, nRows = -1, nConflicts = -1;
+    check("resolve interrupt: open", db!=0);
+    if( !db ) break;
+    check("resolve interrupt: setup", setupTwoTableConflicts(db)==SQLITE_OK);
+    check("resolve interrupt: begin", exec(db, "BEGIN")==SQLITE_OK);
+    rc = execQuiet(db, "SELECT dolt_merge('feat')", &zErr);
+    check("resolve interrupt: merge conflicts", rc!=SQLITE_OK);
+    sqlite3_free(zErr);
+    zErr = 0;
+    progress.db = db;
+    progress.tick = tick;
+    progress.count = 0;
+    progress.direct = direct;
+    sqlite3_progress_handler(db, 1, resolveProgress, &progress);
+    rc = execQuiet(db, nTables==1
+        ? "SELECT dolt_conflicts_resolve('--theirs','t')"
+        : "SELECT dolt_conflicts_resolve('--theirs','t','u')", &zErr);
+    sqlite3_progress_handler(db, 0, 0, 0);
+    check("resolve interrupt: transaction retained", !sqlite3_get_autocommit(db));
+    check("resolve_interrupt_no_internal_savepoint", db->pSavepoint==0 && db->nSavepoint==0);
+    check("resolve interrupt: masks balanced", db->nVcInterruptMask==0);
+    if( rc!=SQLITE_OK ){
+      nInterrupted++;
+      check("resolve interrupt: precise code", rc==SQLITE_INTERRUPT);
+      check("resolve interrupt: message", zErr && strstr(zErr, "interrupt")!=0);
+      check("resolve_interrupt_rows_unchanged",
+        queryInt(db, "SELECT count(*) FROM t WHERE v='main'", &nRows)==SQLITE_OK && nRows==20);
+      check("resolve interrupt: other rows unchanged",
+        queryInt(db, "SELECT count(*) FROM u WHERE v='main'", &nRows)==SQLITE_OK && nRows==20);
+      check("resolve_interrupt_conflicts_unchanged",
+        queryInt(db, "SELECT count(*) FROM dolt_conflicts_t", &nConflicts)==SQLITE_OK && nConflicts==20);
+      check("resolve interrupt: other conflicts unchanged",
+        queryInt(db, "SELECT count(*) FROM dolt_conflicts_u", &nConflicts)==SQLITE_OK && nConflicts==20);
+      check("resolve interrupt: retry succeeds", exec(db,
+        "SELECT dolt_conflicts_resolve('--theirs','t','u');")==SQLITE_OK);
+    }else{
+      check("resolve interrupt: success applies all rows",
+        queryInt(db, "SELECT count(*) FROM t WHERE v='feat'", &nRows)==SQLITE_OK && nRows==20);
+      check("resolve interrupt: success clears selected conflicts",
+        queryInt(db, "SELECT count(*) FROM dolt_conflicts", &nConflicts)==SQLITE_OK
+        && nConflicts==2-nTables);
+    }
+    sqlite3_free(zErr);
+    check("resolve interrupt: rollback", exec(db, "ROLLBACK")==SQLITE_OK);
+    closeRm(db, zPath);
+    if( progress.count<tick ) break;
+  }
+  check("resolve interrupt: cancellable", nInterrupted>0);
+  check("resolve interrupt: sweep terminates", tick<=200);
+}
+
+typedef struct ResolveTrace ResolveTrace;
+struct ResolveTrace {
+  sqlite3 *db;
+  const char *zSql;
+  int fired;
+};
+
+static int resolveTrace(unsigned type, void *pArg, void *pStmt, void *unused){
+  ResolveTrace *p = (ResolveTrace*)pArg;
+  const char *zSql = sqlite3_sql((sqlite3_stmt*)pStmt);
+  (void)unused;
+  if( type==SQLITE_TRACE_PROFILE && !p->fired && zSql
+   && strcmp(zSql, p->zSql)==0 ){
+    p->fired = 1;
+    sqlite3_interrupt(p->db);
+  }
+  return 0;
+}
+
+static void test_conflicts_resolve_boundary_interrupt(int releasing){
+  char zPath[256];
+  sqlite3 *db;
+  Savepoint *pCaller;
+  ResolveTrace trace;
+  char *zErr = 0;
+  int rc, nRows = -1, nConflicts = -1;
+  snprintf(zPath, sizeof(zPath), DOLTLITE_TEST_TMPDIR "/resolve_boundary_%d.db", (int)getpid());
+  db = openDb(zPath);
+  check("resolve boundary: open", db!=0);
+  if( !db ) return;
+  check("resolve boundary: setup", setupTwoTableConflicts(db)==SQLITE_OK);
+  check("resolve boundary: begin", exec(db, "BEGIN")==SQLITE_OK);
+  rc = execQuiet(db, "SELECT dolt_merge('feat')", &zErr);
+  check("resolve boundary: merge conflicts", rc!=SQLITE_OK);
+  sqlite3_free(zErr);
+  zErr = 0;
+  check("resolve boundary: caller savepoint", exec(db,
+    "SAVEPOINT doltlite_conflicts_resolve; INSERT INTO t VALUES(100,'caller');")==SQLITE_OK);
+  pCaller = db->pSavepoint;
+  trace.db = db;
+  trace.fired = 0;
+  trace.zSql = releasing ? "RELEASE doltlite_conflicts_resolve"
+                        : "SAVEPOINT doltlite_conflicts_resolve";
+  sqlite3_trace_v2(db, SQLITE_TRACE_PROFILE, resolveTrace, &trace);
+  rc = execQuiet(db, "SELECT dolt_conflicts_resolve('--theirs','t')", &zErr);
+  sqlite3_trace_v2(db, 0, 0, 0);
+  check("resolve boundary: interrupt delivered", trace.fired);
+  check("resolve boundary: return matches outcome", rc==(releasing ? SQLITE_OK : SQLITE_INTERRUPT));
+  if( !releasing ){
+    check("resolve boundary: error message", zErr && strcmp(zErr, "not an error")!=0);
+  }
+  check("resolve_boundary_caller_savepoint_retained",
+        db->pSavepoint==pCaller && db->nSavepoint==1 && !sqlite3_get_autocommit(db));
+  check("resolve boundary: masks balanced", db->nVcInterruptMask==0);
+  check("resolve boundary: expected rows",
+    queryInt(db, releasing ? "SELECT count(*) FROM t WHERE v='feat'"
+                           : "SELECT count(*) FROM t WHERE v='main'", &nRows)==SQLITE_OK
+    && nRows==20);
+  check("resolve boundary: caller row retained",
+    queryInt(db, "SELECT count(*) FROM t WHERE id=100 AND v='caller'", &nRows)==SQLITE_OK
+    && nRows==1);
+  check("resolve boundary: expected conflicts",
+    queryInt(db, "SELECT count(*) FROM dolt_conflicts", &nConflicts)==SQLITE_OK
+    && nConflicts==(releasing ? 1 : 2));
+  sqlite3_free(zErr);
+  check("resolve boundary: caller rollback", exec(db,
+    "ROLLBACK TO doltlite_conflicts_resolve; RELEASE doltlite_conflicts_resolve;")==SQLITE_OK);
+  check("resolve boundary: restored conflicts",
+    queryInt(db, "SELECT count(*) FROM dolt_conflicts", &nConflicts)==SQLITE_OK && nConflicts==2);
+  check("resolve boundary: rollback", exec(db, "ROLLBACK")==SQLITE_OK);
   closeRm(db, zPath);
 }
 
@@ -355,6 +507,12 @@ int main(void){
   test_force_commit_keeps_cvs();
   test_merge_restore_not_voided();
   test_conflicts_resolve_savepoint();
+  test_conflicts_resolve_interrupt(1, 0);
+  test_conflicts_resolve_interrupt(1, 1);
+  test_conflicts_resolve_interrupt(2, 0);
+  test_conflicts_resolve_interrupt(2, 1);
+  test_conflicts_resolve_boundary_interrupt(0);
+  test_conflicts_resolve_boundary_interrupt(1);
   test_branch_move_ws_read_failure();
   test_merge_install_unlock_window();
   test_ff_interrupt_after_advance();
