@@ -5,6 +5,8 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+
+void doltliteTestPause(const char *zEnv);
 #ifdef SQLITE_TEST
 #ifdef _WIN32
 #include <process.h>
@@ -443,18 +445,41 @@ static int csCommitToFile(
       rc = sqlite3OsLock(cs->file.pFile, SQLITE_LOCK_RESERVED);
     }
     if( rc==SQLITE_OK ){
+      int haveReserved = 1;
       do {
-        rc = sqlite3OsLock(cs->file.pFile, SQLITE_LOCK_EXCLUSIVE);
-        if( rc!=SQLITE_BUSY ) break;
+        if( !haveReserved ){
+          rc = sqlite3OsLock(cs->file.pFile, SQLITE_LOCK_RESERVED);
+          if( rc==SQLITE_BUSY ){
+            /* Fall through and wait. Another publisher holds RESERVED. */
+          }else if( rc!=SQLITE_OK ){
+            break;
+          }else{
+            haveReserved = 1;
+          }
+        }
+        if( haveReserved ){
+          rc = sqlite3OsLock(cs->file.pFile, SQLITE_LOCK_EXCLUSIVE);
+          if( rc!=SQLITE_BUSY ) break;
+        }
         publicationRetries++;
-        if( publicationRetries<=8 ) continue;
+        /* A few tight spins keep PENDING. Sleeping with it held blocks a
+        ** new reader for the whole timeout, so drop to SHARED first. That
+        ** also releases RESERVED. Nothing has been written yet. A peer
+        ** that takes RESERVED just makes this attempt wait again. */
+        if( publicationRetries<=8 && haveReserved ) continue;
+        rc = sqlite3OsUnlock(cs->file.pFile, SQLITE_LOCK_SHARED);
+        if( rc!=SQLITE_OK ) break;
+        haveReserved = 0;
+        doltliteTestPause("DOLTLITE_PAUSE_DURING_PUBLISH");
         if( publicationRetries<=40 ){
           sqlite3OsSleep(chunkFileGetVfs(&cs->file), 1);
         }else if( publicationRetries<=140 ){
           sqlite3_sleep(1);
         }else if( !xBusy || !xBusy(pBusyArg) ){
+          rc = SQLITE_BUSY;
           break;
         }
+        rc = SQLITE_BUSY;
       }while( rc==SQLITE_BUSY );
     }
     if( rc!=SQLITE_OK ){
