@@ -86,6 +86,21 @@ int csFileSizeByName(sqlite3_vfs *pVfs, const char *zPath, i64 *pSize){
   return rc;
 }
 
+/* xAccess reports a 0-byte regular file as absent. Distinguish that from a
+** missing path without xOpen: a failed open is logged by the VFS, including
+** wrapper VFSes, even when this connection goes on to create the database. */
+static int csHostFileIsZero(const char *zPath){
+  FILE *p;
+  long sz;
+
+  p = fopen(zPath, "rb");
+  if( !p ) return 0;
+  sz = -1;
+  if( fseek(p, 0, SEEK_END)==0 ) sz = ftell(p);
+  fclose(p);
+  return sz==0;
+}
+
 int chunkStoreDupFilenameDoubleNul(const char *z, char **pzOut){
   int n = (int)strlen(z);
   char *p = (char*)sqlite3_malloc(n + 2);
@@ -511,20 +526,11 @@ static int csOpen(
       emptyFile = 1;
       if( (flags & SQLITE_OPEN_READONLY)!=0 ) cs->readOnly = 1;
     }
-  }else{
-    /* unix xAccess treats a 0-byte regular file as absent. It is still a
-    ** file, and stock opens it as an empty database. A missing path fails
-    ** the size probe and stays absent. */
-    i64 mainSize = 0;
-    int rcSize = csFileSizeByName(pVfs, cs->file.zFilename, &mainSize);
-    if( rcSize==SQLITE_NOMEM || rcSize==SQLITE_IOERR_NOMEM ){
-      chunkStoreClose(cs);
-      return rcSize;
-    }
-    if( rcSize==SQLITE_OK && mainSize==0 ){
-      emptyFile = 1;
-      if( (flags & SQLITE_OPEN_READONLY)!=0 ) cs->readOnly = 1;
-    }
+  }else if( csHostFileIsZero(cs->file.zFilename) ){
+    /* unix and win xAccess treat a 0-byte regular file as absent. Stock
+    ** opens that file as an empty database. A missing path stays absent. */
+    emptyFile = 1;
+    if( (flags & SQLITE_OPEN_READONLY)!=0 ) cs->readOnly = 1;
   }
 
   if( exists ){
