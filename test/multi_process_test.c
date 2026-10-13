@@ -1172,6 +1172,13 @@ static void test_commit_does_not_erase_peer_write(void){
   ctx.readyFd = ready[0];
   sqlite3_busy_handler(db, mpReleaseBusyPeer, &ctx);
   rc = execSql(db, "SELECT dolt_commit('-am','mine')");
+  if( isRetryable(rc) ){
+    check("mp_ws_clobber_busy_peer_write_kept",
+      strcmp(queryScalarText(db,
+        "SELECT group_concat(id) FROM (SELECT id FROM t ORDER BY id)"),
+        "1,2,20")==0);
+    rc = execSql(db, "SELECT dolt_commit('-am','mine')");
+  }
   check("mp_ws_clobber_commit_waited", rc==SQLITE_OK && ctx.calls>0);
   if( ctx.calls==0 ) mpWrite(release[1], "G");
   waitpid(pid, &status, 0);
@@ -1483,9 +1490,108 @@ static void test_op_keeps_peer_write_on_main(void){
   remove(DOLTLITE_TEST_TMPDIR "/mp_op_peer_ws_remote.db");
 }
 
+static void test_publication_busy_commit(void){
+  const char *azAction[] = {"commit", "prepared", "release", "rollback"};
+  char path[256];
+  int i;
+
+  printf("--- Publication BUSY preserves the transaction for retry ---\n");
+  snprintf(path, sizeof(path), DOLTLITE_TEST_TMPDIR "/mp_publication_busy_%d.db",
+           (int)getpid());
+  for(i=0; i<4; i++){
+    sqlite3 *db = 0, *peer = 0;
+    sqlite3_stmt *commit = 0;
+    int ready[2], release[2];
+    int rc, status;
+    pid_t pid;
+    char ch, zName[96];
+    const char *zFinish = i==2 ? "RELEASE outer" : "COMMIT";
+
+    setup_db(path);
+    mpPipe(ready);
+    mpPipe(release);
+    pid = fork();
+    if( pid<0 ){ perror("fork"); _exit(1); }
+    if( pid==0 ){
+      sqlite3_vfs *vfs = sqlite3_vfs_find(0);
+      sqlite3_file *file = malloc(vfs->szOsFile);
+      int flags = 0;
+      close(ready[0]);
+      close(release[1]);
+      if( !file ) _exit(1);
+      memset(file, 0, vfs->szOsFile);
+      if( vfs->xOpen(vfs, path, file,
+          SQLITE_OPEN_MAIN_DB|SQLITE_OPEN_READWRITE, &flags)!=SQLITE_OK ){
+        _exit(2);
+      }
+      if( file->pMethods->xLock(file, SQLITE_LOCK_SHARED)!=SQLITE_OK ) _exit(3);
+      mpWrite(ready[1], "r");
+      mpRead(release[0], &ch);
+      if( file->pMethods->xUnlock(file, SQLITE_LOCK_NONE)!=SQLITE_OK ) _exit(4);
+      if( file->pMethods->xClose(file)!=SQLITE_OK ) _exit(5);
+      free(file);
+      _exit(0);
+    }
+    close(ready[1]);
+    close(release[0]);
+    mpRead(ready[0], &ch);
+    check("mp_publication_busy_open", sqlite3_open(path, &db)==SQLITE_OK);
+    sqlite3_busy_timeout(db, 10);
+    check("mp_publication_busy_begin", execSql(db,
+          i==2 ? "SAVEPOINT outer" : "BEGIN")==SQLITE_OK);
+    check("mp_publication_busy_insert",
+          execSql(db, "INSERT INTO t VALUES(2,'pending')")==SQLITE_OK);
+    if( i==1 ){
+      check("mp_publication_busy_prepare",
+            sqlite3_prepare_v2(db, zFinish, -1, &commit, 0)==SQLITE_OK);
+    }
+    rc = commit ? sqlite3_step(commit) : execSql(db, zFinish);
+    snprintf(zName, sizeof(zName), "mp_publication_busy_%s_refused", azAction[i]);
+    check(zName, rc==SQLITE_BUSY);
+    check("mp_publication_busy_transaction_open", !sqlite3_get_autocommit(db));
+    snprintf(zName, sizeof(zName), "mp_publication_busy_%s_rows_kept", azAction[i]);
+    check(zName, strcmp(queryScalarText(db,
+          "SELECT group_concat(id) FROM (SELECT id FROM t ORDER BY id)"), "1,2")==0);
+    check("mp_publication_busy_peer_open", sqlite3_open(path, &peer)==SQLITE_OK);
+    check("mp_publication_busy_graph_lock_kept",
+          execSql(peer, "BEGIN IMMEDIATE")==SQLITE_BUSY);
+    execSql(peer, "ROLLBACK");
+    check("mp_publication_busy_unpublished", strcmp(queryScalarText(peer,
+          "SELECT group_concat(id) FROM (SELECT id FROM t ORDER BY id)"), "1")==0);
+    sqlite3_close(peer);
+    rc = commit ? sqlite3_step(commit) : execSql(db, zFinish);
+    check("mp_publication_busy_repeated_refusal", rc==SQLITE_BUSY);
+    if( i==3 ){
+      check("mp_publication_busy_rollback", execSql(db, "ROLLBACK")==SQLITE_OK);
+    }
+    mpWrite(release[1], "g");
+    close(ready[0]);
+    close(release[1]);
+    check("mp_publication_busy_child_wait", waitpid(pid, &status, 0)==pid);
+    check("mp_publication_busy_child_exit", WIFEXITED(status) && WEXITSTATUS(status)==0);
+    if( i!=3 ){
+      rc = commit ? sqlite3_step(commit) : execSql(db, zFinish);
+      check("mp_publication_busy_retry", rc==(commit ? SQLITE_DONE : SQLITE_OK));
+    }
+    sqlite3_finalize(commit);
+    check("mp_publication_busy_transaction_ended", sqlite3_get_autocommit(db));
+    sqlite3_close(db);
+    check("mp_publication_busy_reopen", sqlite3_open(path, &db)==SQLITE_OK);
+    snprintf(zName, sizeof(zName), "mp_publication_busy_%s_durable", azAction[i]);
+    check(zName, strcmp(queryScalarText(db,
+          "SELECT group_concat(id) FROM (SELECT id FROM t ORDER BY id)"),
+          i==3 ? "1" : "1,2")==0);
+    check("mp_publication_busy_integrity",
+          strcmp(queryScalarText(db, "PRAGMA integrity_check"), "ok")==0);
+    sqlite3_close(db);
+  }
+  remove(path);
+}
+
 int main(){
   printf("=== Multi-Process Concurrency Tests ===\n\n");
 
+  test_publication_busy_commit();
   test_ref_commands_busy_handler();
   test_two_writers();
   test_reader_during_write();

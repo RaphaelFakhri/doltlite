@@ -100,5 +100,121 @@ foreach branch {main dev} {
 
 db close
 tvfs delete
+
+testvfs busyvfs
+busyvfs filter xLock
+proc publication_busy_lock {method file level} {
+  if {$::publicationBusy && [string match *test.db $file] && $level==4} {
+    return SQLITE_BUSY
+  }
+  return SQLITE_OK
+}
+busyvfs script publication_busy_lock
+set publicationBusy 0
+set hadDrainLimit [info exists env(DOLTLITE_CHUNK_PENDING_DRAIN_LIMIT)]
+if {$hadDrainLimit} {set savedDrainLimit $env(DOLTLITE_CHUNK_PENDING_DRAIN_LIMIT)}
+foreach action {commit release rollback savepoint schema spill} {
+  forcedelete test.db
+  sqlite3 db test.db -vfs busyvfs
+  execsql {
+    CREATE TABLE t(id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT, payload BLOB);
+    CREATE INDEX tv ON t(v);
+    INSERT INTO t(id,v) VALUES(1,'base');
+    SELECT dolt_commit('-Am','base');
+  }
+  if {$action eq "release"} {
+    execsql {SAVEPOINT outer}
+    set finish {RELEASE outer}
+  } else {
+    execsql {BEGIN}
+    set finish {COMMIT}
+  }
+  if {$action eq "spill"} {set env(DOLTLITE_CHUNK_PENDING_DRAIN_LIMIT) 32768}
+  execsql {INSERT INTO t(v) VALUES('pending')}
+  if {$action eq "spill"} {
+    execsql {UPDATE t SET payload=randomblob(1000000) WHERE id=2}
+  }
+  if {$action eq "savepoint"} {
+    execsql {SAVEPOINT inner; INSERT INTO t(v) VALUES('discarded')}
+  }
+  if {$action eq "schema"} {
+    execsql {
+      CREATE TABLE extra(id INTEGER PRIMARY KEY, v TEXT);
+      CREATE INDEX ev ON extra(v);
+      INSERT INTO extra VALUES(9,'pending');
+    }
+  }
+  set publicationBusy 1
+  set prefix publication-busy-$action
+  do_test $prefix.refused {
+    set rc [catch {execsql $finish} msg]
+    list $rc [db errorcode]
+  } {1 5}
+  do_test $prefix.transaction-open {sqlite3_get_autocommit db} 0
+  set expected {1 base 2 pending}
+  if {$action eq "savepoint"} {lappend expected 3 discarded}
+  do_execsql_test $prefix.rows {
+    SELECT id,v FROM t INDEXED BY tv ORDER BY id;
+  } $expected
+  do_test $prefix.refused-again {
+    set rc [catch {execsql $finish} msg]
+    list $rc [db errorcode]
+  } {1 5}
+  do_execsql_test $prefix.still-kept {SELECT id,v FROM t ORDER BY id} $expected
+  if {$action eq "spill"} {
+    do_execsql_test $prefix.spill-kept {
+      SELECT length(payload) FROM t WHERE id=2;
+    } 1000000
+  }
+  if {$action eq "rollback"} {
+    do_execsql_test $prefix.rollback {ROLLBACK; SELECT id,v FROM t} {1 base}
+  } else {
+    if {$action eq "savepoint"} {
+      do_execsql_test $prefix.rollback-to {
+        ROLLBACK TO inner;
+        SELECT id,v FROM t ORDER BY id;
+      } {1 base 2 pending}
+      execsql {RELEASE inner}
+    }
+    if {$action eq "schema"} {
+      do_execsql_test $prefix.schema-kept {
+        SELECT id,v FROM extra INDEXED BY ev;
+      } {9 pending}
+    }
+    do_execsql_test $prefix.next-write {
+      INSERT INTO t(v) VALUES('later');
+      SELECT id,v FROM t ORDER BY id;
+    } {1 base 2 pending 3 later}
+    set expected {1 base 2 pending 3 later}
+    set publicationBusy 0
+    do_execsql_test $prefix.retry $finish {}
+  }
+  set publicationBusy 0
+  do_test $prefix.transaction-ended {sqlite3_get_autocommit db} 1
+  db close
+  sqlite3 db test.db
+  if {$action eq "rollback"} {set expected {1 base}}
+  do_execsql_test $prefix.reopen {
+    SELECT id,v FROM t INDEXED BY tv ORDER BY id;
+  } $expected
+  do_execsql_test $prefix.integrity {PRAGMA integrity_check} ok
+  if {$action eq "schema"} {
+    do_execsql_test $prefix.schema-reopen {
+      SELECT id,v FROM extra INDEXED BY ev;
+    } {9 pending}
+  }
+  if {$action eq "spill"} {
+    do_execsql_test $prefix.spill-reopen {
+      SELECT length(payload) FROM t WHERE id=2;
+    } 1000000
+  }
+  db close
+}
+if {$hadDrainLimit} {
+  set env(DOLTLITE_CHUNK_PENDING_DRAIN_LIMIT) $savedDrainLimit
+} else {
+  unset env(DOLTLITE_CHUNK_PENDING_DRAIN_LIMIT)
+}
+busyvfs delete
 sqlite3 db test.db
 finish_test

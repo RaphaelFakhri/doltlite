@@ -486,6 +486,8 @@ int chunkStorePutSparse(ChunkStore *cs, const u8 *pPrefix, int nPrefix,
 int chunkStoreCommit(ChunkStore *cs);
 int chunkStoreCommitWithBusyHandler(ChunkStore *cs, int (*xBusy)(void*),
                                     void *pBusyArg);
+int chunkStoreCommitRetryable(ChunkStore *cs, int (*xBusy)(void*),
+                              void *pBusyArg);
 int chunkStoreWriteRefused(ChunkStore *cs);
 void chunkStoreClearStoredHits(ChunkStore *cs);
 void chunkStoreNoteSourceCommit(ChunkStore *cs, const ProllyHash *h);

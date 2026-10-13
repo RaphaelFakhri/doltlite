@@ -476,11 +476,18 @@ static int tvfsFileSize(sqlite3_file *pFile, sqlite_int64 *pSize){
 static int tvfsLock(sqlite3_file *pFile, int eLock){
   TestvfsFd *pFd = tvfsGetFd(pFile);
   Testvfs *p = (Testvfs *)pFd->pVfs->pAppData;
+#ifdef DOLTLITE_PROLLY
+  int rc = SQLITE_OK;
+#endif
   if( p->pScript && p->mask&TESTVFS_LOCK_MASK ){
     char zLock[30];
     sqlite3_snprintf(sizeof(zLock),zLock,"%d",eLock);
     tvfsExecTcl(p, "xLock", Tcl_NewStringObj(pFd->zFilename, -1), 
                    Tcl_NewStringObj(zLock, -1), 0, 0);
+#ifdef DOLTLITE_PROLLY
+    tvfsResultCode(p, &rc);
+    if( rc==SQLITE_BUSY ) return rc;
+#endif
   }
   if( p->mask&TESTVFS_LOCK_MASK && tvfsInjectIoerr(p) ){
     return SQLITE_IOERR_LOCK;

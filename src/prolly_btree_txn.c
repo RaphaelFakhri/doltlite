@@ -885,7 +885,8 @@ static void commitPhaseTwoAbort(
   BtShared *pBt,
   u8 **ppCatData,
   Btree *pReload,
-  int *pbHaveReload
+  int *pbHaveReload,
+  int commitRc
 ){
   if( pbHaveReload && *pbHaveReload && pReload ){
     catFree(&pReload->cat);
@@ -895,6 +896,7 @@ static void commitPhaseTwoAbort(
     sqlite3_free(*ppCatData);
     *ppCatData = 0;
   }
+  if( commitRc==SQLITE_BUSY ) return;
   chunkStoreRollback(&pBt->store);
   commitPhaseTwoReleaseGraph(pBt);
   pBt->bCommitAbortedUnlocked = 1;
@@ -1081,6 +1083,7 @@ static int commitPhaseTwoFailRestore(
   }
   sqlite3_free(*ppCatData);
   *ppCatData = 0;
+  if( commitRc==SQLITE_BUSY ) return commitRc;
   /* Null map aliases before restoreFromCommitted frees them (UAF). */
   {
     BtCursor *pC;
@@ -1118,11 +1121,15 @@ static int commitPhaseTwoFailRestore(
 /* Publish staged chunks. The connection busy handler covers the
 ** publication lock, so a reader still holding the shared lock waits
 ** out inside the busy timeout. Sequences end with the batch. */
-static int commitChunkStore(BtShared *pBt){
+static int commitChunkStore(BtShared *pBt, int retryBusy){
   int rc;
-  rc = chunkStoreCommitWithBusyHandler(
-      &pBt->store, prollyInvokeBusyHandler, pBt);
-  csDropTxnSequences(&pBt->store);
+  if( retryBusy ){
+    rc = chunkStoreCommitRetryable(&pBt->store, prollyInvokeBusyHandler, pBt);
+  }else{
+    rc = chunkStoreCommitWithBusyHandler(
+        &pBt->store, prollyInvokeBusyHandler, pBt);
+  }
+  if( !retryBusy || rc!=SQLITE_BUSY ) csDropTxnSequences(&pBt->store);
   return rc;
 }
 
@@ -1143,19 +1150,19 @@ static SQLITE_NOINLINE int commitPhaseTwoWrite(Btree *p, BtShared *pBt){
   if( pBt->store.bRefsStale ){
     rc = chunkStoreEnsureRefsFresh(&pBt->store);
     if( rc!=SQLITE_OK ){
-      commitPhaseTwoAbort(pBt, 0, 0, 0);
+      commitPhaseTwoAbort(pBt, 0, 0, 0, rc);
       return rc;
     }
   }
   rc = flushAllPending(p, pBt, 0);
   if( rc!=SQLITE_OK ){
-    commitPhaseTwoAbort(pBt, 0, 0, 0);
+    commitPhaseTwoAbort(pBt, 0, 0, 0, rc);
     return rc;
   }
 
   rc = commitPhaseTwoStageCatalog(p, pBt, &catData, &nCatData, &catHash);
   if( rc!=SQLITE_OK ){
-    commitPhaseTwoAbort(pBt, &catData, 0, 0);
+    commitPhaseTwoAbort(pBt, &catData, 0, 0, rc);
     return rc;
   }
 
@@ -1165,7 +1172,7 @@ static SQLITE_NOINLINE int commitPhaseTwoWrite(Btree *p, BtShared *pBt){
     rc = commitPhaseTwoPrepSchemaReload(
         p, pBt, catData, nCatData, &reloadBtree, &nativeSchemaCookie);
     if( rc!=SQLITE_OK ){
-      commitPhaseTwoAbort(pBt, &catData, 0, 0);
+      commitPhaseTwoAbort(pBt, &catData, 0, 0, rc);
       return rc;
     }
     bHaveReloadCatalog = 1;
@@ -1183,7 +1190,7 @@ static SQLITE_NOINLINE int commitPhaseTwoWrite(Btree *p, BtShared *pBt){
     return SQLITE_OK;
   }
 
-  rc = commitChunkStore(pBt);
+  rc = commitChunkStore(pBt, 1);
   if( rc!=SQLITE_OK ){
     return commitPhaseTwoFailRestore(
         p, pBt, rc, &catData, &reloadBtree, &bHaveReloadCatalog);
@@ -1519,7 +1526,7 @@ int prollyBtreeRollback(Btree *p, int tripCode, int writeOnly){
           rc = chunkStoreSerializeRefs(&pBt->store);
         }
         if( rc==SQLITE_OK ){
-          rc = commitChunkStore(pBt);
+          rc = commitChunkStore(pBt, 0);
         }
       }
       sqlite3_free(catData);
@@ -1641,7 +1648,7 @@ static int persistRolledBackSessionState(Btree *p, BtShared *pBt){
   if( rc!=SQLITE_OK ) return rc;
   rc = chunkStoreSerializeRefs(&pBt->store);
   if( rc!=SQLITE_OK ) return rc;
-  return commitChunkStore(pBt);
+  return commitChunkStore(pBt, 0);
 }
 
 static void btreeDiscardAllSavepoints(Btree *p){
