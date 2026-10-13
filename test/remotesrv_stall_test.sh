@@ -510,6 +510,62 @@ print("  PASS: eight idle partial headers leave clone and GET immediate")
 PY
 stop_server_with_stalled_clients "$PORT"
 
+echo "=== stalled request bodies do not hold the worker pool ==="
+rm -rf "$TMP/srv"
+start_server "$TMP/body.log" 30000
+"$DOLTLITE" "$TMP/srv/repo.db" <<SQL >/dev/null
+CREATE TABLE t(x INT PRIMARY KEY);
+INSERT INTO t VALUES (1);
+SELECT dolt_commit('-A','-m','b');
+SQL
+python3 - "$PORT" "$DOLTLITE" "$TMP/body-clone.db" <<'PY'
+import socket
+import subprocess
+import sys
+import time
+
+port = int(sys.argv[1])
+doltlite = sys.argv[2]
+clone_db = sys.argv[3]
+url = "http://127.0.0.1:%d/repo.db" % port
+payload = (
+    b"POST /repo.db/chunks HTTP/1.1\r\n"
+    b"Host: x\r\nContent-Length: 1000\r\n\r\n"
+    b"0123456789"
+)
+
+stalls = []
+for _ in range(4):
+    stalled = socket.create_connection(("127.0.0.1", port), timeout=2)
+    stalled.sendall(payload)
+    stalls.append(stalled)
+time.sleep(0.5)
+
+start = time.monotonic()
+try:
+    result = subprocess.run(
+        [doltlite, clone_db, "SELECT dolt_clone('%s');" % url],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=15,
+    )
+except subprocess.TimeoutExpired as exc:
+    raise AssertionError("clone waited out the stalled bodies") from exc
+elapsed = time.monotonic() - start
+assert result.returncode == 0, result.stdout
+assert elapsed < 8.0, elapsed
+
+deadline = time.monotonic() + 6
+for stalled in stalls:
+    stalled.settimeout(6)
+    while stalled.recv(4096):
+        if time.monotonic() > deadline:
+            raise AssertionError("stalled body was not closed within the short budget")
+    stalled.close()
+print("  PASS: four stalled bodies leave clone immediate (%.2fs)" % elapsed)
+PY
+stop_server_with_stalled_clients "$PORT"
+
 if ! command -v openssl >/dev/null 2>&1; then
   echo "SKIP: openssl not available; TLS stall checks skipped"
   exit 0
