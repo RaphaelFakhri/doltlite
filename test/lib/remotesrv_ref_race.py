@@ -59,6 +59,7 @@ def main():
                 self.wfile.write(data)
             except Exception as error:
                 state["errors"].append(str(error))
+                print("proxy failure: %s" % error, file=sys.stderr, flush=True)
                 self.send_error(500)
             finally:
                 conn.close()
