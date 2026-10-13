@@ -22,6 +22,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include "sqlite3.h"
 #include "lib/test_tmpdir.h"
 
@@ -423,6 +424,94 @@ static void runTxn(const Op *p, Tally *t){
            committed ? peerRowKept(p->zName, "txn", PEER_WRITE, 0) : 1);
 }
 
+/* An autocommit VC operation in this process races a peer process's
+** autocommit insert. In-process peers share the store's lock state and miss
+** this, so the peer forks and fires from the operation's progress handler.
+** A follow-up clean then persists whatever working set this connection
+** holds; the peer's acknowledged row must survive both. */
+typedef struct ProcPeer ProcPeer;
+struct ProcPeer {
+  int toPeer[2];
+  int fromPeer[2];
+  int fireAt;
+  int nCalls;
+  int fired;
+};
+
+static int fireProcPeer(void *arg){
+  ProcPeer *pp = (ProcPeer*)arg;
+  char ch = 'g';
+  if( ++pp->nCalls==pp->fireAt && !pp->fired ){
+    pp->fired = 1;
+    if( write(pp->toPeer[1], &ch, 1)!=1 || read(pp->fromPeer[0], &ch, 1)!=1 ){
+      pp->fired = -1;
+    }
+  }
+  return 0;
+}
+
+static int runProcPeer(const char *zSql, int k, int *pLost){
+  char zPath[300];
+  sqlite3 *db = 0;
+  ProcPeer pp;
+  pid_t pid;
+  char ch = 'q';
+  int status = 0;
+  snprintf(zPath, sizeof(zPath), "%s/proc.db", zDir);
+  remove(zPath);
+  sqlite3_open(zPath, &db);
+  execSql(db, "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);"
+              "CREATE TABLE u(x INTEGER PRIMARY KEY);"
+              "SELECT dolt_commit('-Am','init')");
+  memset(&pp, 0, sizeof(pp));
+  pp.fireAt = k;
+  if( pipe(pp.toPeer) || pipe(pp.fromPeer) ){ perror("pipe"); exit(1); }
+  pid = fork();
+  if( pid==0 ){
+    sqlite3 *peer = 0;
+    int ok;
+    sqlite3_open(zPath, &peer);
+    sqlite3_busy_timeout(peer, 5000);
+    if( read(pp.toPeer[0], &ch, 1)!=1 || ch!='g' ) _exit(0);
+    ok = execSql(peer, "INSERT INTO u VALUES(1)")==SQLITE_OK;
+    sqlite3_close(peer);
+    ch = ok ? 'a' : 'n';
+    if( write(pp.fromPeer[1], &ch, 1)!=1 ) _exit(1);
+    _exit(0);
+  }
+  if( pid<0 ){ perror("fork"); exit(1); }
+  sqlite3_busy_timeout(db, 5000);
+  execSql(db, "INSERT INTO t VALUES(3,'dirty')");
+  sqlite3_progress_handler(db, 1, fireProcPeer, &pp);
+  execSql(db, zSql);
+  sqlite3_progress_handler(db, 0, 0, 0);
+  if( !pp.fired && write(pp.toPeer[1], &ch, 1)!=1 ){ perror("write"); exit(1); }
+  execSql(db, "SELECT dolt_clean()");
+  waitpid(pid, &status, 0);
+  sqlite3_close(db);
+  close(pp.toPeer[0]); close(pp.toPeer[1]);
+  close(pp.fromPeer[0]); close(pp.fromPeer[1]);
+  if( pp.fired==1 ){
+    sqlite3_open(zPath, &db);
+    if( strcmp(queryText(db, "SELECT count(*) FROM u"), "1")!=0 ){
+      fprintf(stderr, "  %s step %d: peer row lost\n", zSql, k);
+      (*pLost)++;
+    }
+    sqlite3_close(db);
+  }
+  remove(zPath);
+  return pp.fired!=0;
+}
+
+static void test_process_peer_write_kept(const char *zName, const char *zSql){
+  char zCheck[96];
+  int k, nLost = 0;
+  for(k=1; k<5000 && runProcPeer(zSql, k, &nLost); k++){}
+  printf("  process peer %-12s steps=%d lost=%d\n", zName, k-1, nLost);
+  snprintf(zCheck, sizeof(zCheck), "process_peer_write_kept_%s", zName);
+  check(zCheck, k>1 && nLost==0);
+}
+
 int main(void){
   int i;
   setvbuf(stdout, 0, _IOLBF, 0);
@@ -469,6 +558,9 @@ int main(void){
     check(zName, aT[MODE_MIDOP][PEER_WRITE].nOpOk>0
               || aT[MODE_MIDOP][PEER_COMMIT].nOpOk>0);
   }
+
+  test_process_peer_write_kept("reset_table", "SELECT dolt_reset('t')");
+  test_process_peer_write_kept("clean", "SELECT dolt_clean()");
 
   remove(zDb); remove(zInto); remove(zRemote); remove(zTemplate);
   remove(zTemplateRemote);

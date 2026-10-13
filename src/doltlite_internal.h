@@ -1354,6 +1354,7 @@ int doltliteCmdParseAuthor(
   char **pzName, char **pzEmail
 );
 void doltliteCmdResultPeerBranchBusy(sqlite3_context *ctx, const char *zOp);
+void doltliteCmdResultWriteTxnError(sqlite3_context *ctx, sqlite3 *db, int rc);
 int doltliteCmdSourceResultError(
   sqlite3_context *ctx, ChunkStore *cs, int *pRc
 );
@@ -1526,6 +1527,7 @@ int doltliteRestoreTxnStateOnFailure(
 );
 int doltlitePrimeSchemaCache(sqlite3 *db);
 int doltliteSavepointIsTopLevelTxn(sqlite3 *db);
+void doltliteFinishAutocommitWrite(sqlite3 *db);
 int doltliteVcSealTopLevelSavepointTxn(sqlite3 *db);
 
 typedef DoltliteNameIndex AddNameIndex;

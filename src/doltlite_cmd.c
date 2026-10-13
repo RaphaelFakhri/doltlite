@@ -694,6 +694,23 @@ int doltliteCmdParseAuthor(
   return SQLITE_ERROR;
 }
 
+void doltliteCmdResultWriteTxnError(sqlite3_context *ctx, sqlite3 *db, int rc){
+  const char *zBranch = doltliteBtreeMissingWriteBranch(db->aDb[0].pBt);
+  if( zBranch ){
+    char *zErr = sqlite3_mprintf(
+        "cannot write: branch '%s' no longer exists", zBranch);
+    if( !zErr ){
+      sqlite3_result_error_nomem(ctx);
+      return;
+    }
+    sqlite3_result_error(ctx, zErr, -1);
+    sqlite3_free(zErr);
+  }else{
+    sqlite3_result_error(ctx, sqlite3_errstr(rc), -1);
+  }
+  sqlite3_result_error_code(ctx, rc);
+}
+
 void doltliteCmdResultPeerBranchBusy(sqlite3_context *ctx, const char *zOp){
   char *zErr = sqlite3_mprintf(
     "%s conflict: another connection committed to this branch. "

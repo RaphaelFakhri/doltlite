@@ -1397,6 +1397,22 @@ int doltliteSavepointIsTopLevelTxn(sqlite3 *db){
 
 /* A top-level SAVEPOINT is the txn boundary; seal it like autocommit so
 ** later ROLLBACK TO cannot undo the VC op. */
+/* Halt will not end a write started from a read-only SELECT. RollbackAll
+** restores the txn snapshot and persists it, which wipes whatever the
+** command already published. Commit the write so txn_state is NONE and the
+** graph lock drops. An explicit BEGIN keeps the caller's txn. */
+void doltliteFinishAutocommitWrite(sqlite3 *db){
+  if( db->autoCommit && db->nDb>0 && db->aDb[0].pBt
+   && sqlite3BtreeTxnState(db->aDb[0].pBt)==SQLITE_TXN_WRITE ){
+    /* A commit that fails leaves the write transaction open; the next
+    ** statement would commit it without the graph lock. */
+    if( sqlite3BtreeCommit(db->aDb[0].pBt)!=SQLITE_OK ){
+      sqlite3BtreeRollback(db->aDb[0].pBt, SQLITE_OK, 0);
+    }
+    sqlite3CloseSavepoints(db);
+  }
+}
+
 int doltliteVcSealTopLevelSavepointTxn(sqlite3 *db){
   if( doltliteSavepointIsTopLevelTxn(db) ){
     return sqlite3_exec(db, "COMMIT", 0, 0, 0);
