@@ -34,8 +34,10 @@ struct RebaseCreateRefsCtx {
   const ProllyHash *pHead;
   const ProllyHash *pCatalog;
   const char *zOrigBranch;
+  const char *zReturnBranch;
   const ProllyHash *pOrigHead;
   const ProllyHash *pOrigCatalog;
+  u8 flags;
 };
 
 typedef struct RebaseAbortRefsCtx RebaseAbortRefsCtx;
@@ -80,9 +82,29 @@ static int rebaseCreateWorkingBranchRefs(
   rc = doltliteWriteBranchCleanWorkingState(
       db, p->zWorkingBranch, p->pCatalog, p->pHead);
   if( rc!=SQLITE_OK ) return rc;
+  rc = doltliteWriteBranchRebaseMetadata(
+      db, p->zWorkingBranch, p->flags,
+      p->pOrigCatalog, p->pOrigHead, p->zOrigBranch, p->zReturnBranch);
+  if( rc!=SQLITE_OK ) return rc;
+  if( (p->flags & WS_REBASE_FLAG_META_MIRROR)==0
+   || sqlite3_stricmp(p->zReturnBranch, p->zWorkingBranch)==0 ){
+    return SQLITE_OK;
+  }
   return doltliteWriteBranchRebaseMetadata(
-      db, p->zWorkingBranch, WS_REBASE_FLAG_ACTIVE,
-      p->pOrigCatalog, p->pOrigHead, p->zOrigBranch, p->zOrigBranch);
+      db, p->zReturnBranch,
+      (u8)(WS_REBASE_FLAG_ACTIVE | WS_REBASE_FLAG_META_MIRROR),
+      p->pOrigCatalog, p->pOrigHead, p->zOrigBranch, p->zReturnBranch);
+}
+
+static char *rebaseWorkingBranchExistsMsg(sqlite3 *db, const char *zWorking){
+  int active = 0;
+  if( doltliteBranchWorkingSetIsRebasing(db, zWorking, &active)==SQLITE_OK
+   && active ){
+    return sqlite3_mprintf("rebase working branch already exists: %s; a rebase "
+        "is in progress there, run dolt_rebase('--abort') to discard it",
+        zWorking);
+  }
+  return sqlite3_mprintf("rebase working branch already exists: %s", zWorking);
 }
 
 static int rebaseAbortLinearRefs(
@@ -696,8 +718,10 @@ static int doltliteRebaseLinearReplay(
   createCtx.pHead = &upstreamHash;
   createCtx.pCatalog = &upstreamCommit.catalogHash;
   createCtx.zOrigBranch = zOrig;
+  createCtx.zReturnBranch = zOrig;
   createCtx.pOrigHead = &headHash;
   createCtx.pOrigCatalog = &origCat;
+  createCtx.flags = WS_REBASE_FLAG_ACTIVE;
   {
     ProllyHash probe;
     rc = chunkStoreFindBranch(cs, zWorking, &probe);
@@ -891,7 +915,7 @@ rollback:
           "rebase recovery failed; pre-rebase state may not have been fully restored");
       rc = restoreRc;
     }else if( workingExists ){
-      zErr = sqlite3_mprintf("rebase working branch already exists: %s", zWorking);
+      zErr = rebaseWorkingBranchExistsMsg(db, zWorking);
     }else if( finalized ){
       zErr = sqlite3_mprintf("rebase completed; session restoration encountered an error");
     }else if( !workingCreated ){
@@ -2056,6 +2080,7 @@ static void doltliteRebaseInteractiveStart(
   ProllyHash upstreamHash, headHash;
   ProllyHash preRebaseCat;
   ProllyHash *aReplay = 0;
+  DoltliteCommit upstreamCommit;
   int nReplay = 0;
   int rc;
   int dirty = 0;
@@ -2066,6 +2091,7 @@ static void doltliteRebaseInteractiveStart(
   const char *zFailMsg = 0;
 
   memset(&preRebaseCat, 0, sizeof(preRebaseCat));
+  memset(&upstreamCommit, 0, sizeof(upstreamCommit));
 
   doltliteGetSessionRebaseState(db, &curIsRebasing, 0, 0, 0, 0);
   if( curIsRebasing ){
@@ -2141,12 +2167,17 @@ static void doltliteRebaseInteractiveStart(
   {
     ProllyHash probe;
     if( chunkStoreFindBranch(cs, zWorking, &probe)==SQLITE_OK ){
+      char *zMsg = rebaseWorkingBranchExistsMsg(db, zWorking);
       sqlite3_free(zOrig);
       sqlite3_free(zReturnBranch);
       sqlite3_free(zWorking);
       sqlite3_free(aReplay);
-      sqlite3_result_error(context,
-        "rebase working branch already exists", -1);
+      if( zMsg ){
+        sqlite3_result_error(context, zMsg, -1);
+        sqlite3_free(zMsg);
+      }else{
+        sqlite3_result_error_nomem(context);
+      }
       return;
     }
   }
@@ -2165,16 +2196,33 @@ static void doltliteRebaseInteractiveStart(
   rc = doltliteFlushCatalogToHash(db, &preRebaseCat);
   if( rc!=SQLITE_OK ) goto fail;
 
-  rc = chunkStoreAddBranch(cs, zWorking, &upstreamHash);
-  if( rc!=SQLITE_OK ){
+  rc = doltliteLoadCommit(db, &upstreamHash, &upstreamCommit);
+  if( rc!=SQLITE_OK ) goto fail;
+  /* The branch is durable with its rebase metadata in one write, so a crash
+  ** before the session state is persisted leaves a rebase --abort finds. */
+  {
+    RebaseCreateRefsCtx createCtx;
+    DoltliteBranchExpectation expected;
+    memset(&createCtx, 0, sizeof(createCtx));
+    createCtx.zWorkingBranch = zWorking;
+    createCtx.pHead = &upstreamHash;
+    createCtx.pCatalog = &upstreamCommit.catalogHash;
+    createCtx.zOrigBranch = zOrig;
+    createCtx.zReturnBranch = zReturnBranch;
+    createCtx.pOrigHead = &headHash;
+    createCtx.pOrigCatalog = &preRebaseCat;
+    createCtx.flags = rebaseFlags;
+    expected.zBranch = zWorking;
+    expected.pTip = 0;
+    rc = doltliteMutateRefsExpected(
+        db, &expected, 1, rebaseCreateWorkingBranchRefs, &createCtx);
+  }
+  doltliteCommitClear(&upstreamCommit);
+  if( rc==SQLITE_CONSTRAINT ){
     zFailMsg = "rebase working branch already exists";
     goto fail;
   }
-  bWorkingBranchCreated = 1;
-  /* Persist the working branch now. Checkout/plan reload persisted refs
-  ** under lock and would drop this still-in-memory branch. */
-  rc = chunkStoreSerializeRefs(cs);
-  if( rc==SQLITE_OK ) rc = chunkStoreCommit(cs);
+  if( rc==SQLITE_OK ) bWorkingBranchCreated = 1;
   if( rc==SQLITE_OK && sqlite3FaultSim(960) ) rc = SQLITE_BUSY;
   if( rc!=SQLITE_OK ) goto fail;
   rc = doltliteCheckoutBranchForRebase(db, zWorking);
@@ -2987,6 +3035,7 @@ static void doltliteRebaseInteractiveContinue(
   RebaseFinalizeRefsCtx refsCtx;
   char *zPlanErr = 0;
   char *zReplayErr = 0;
+  char *zPrevBranch = 0;
 
   if( rebaseSessionIsPaused(db) ){
     doltliteRebasePausedContinue(context, db);
@@ -2998,18 +3047,26 @@ static void doltliteRebaseInteractiveContinue(
   memset(&expectedOrigHead, 0, sizeof(expectedOrigHead));
   memset(&preRebaseCat, 0, sizeof(preRebaseCat));
 
+  zPrevBranch = sqlite3_mprintf("%s", doltliteGetSessionBranch(db));
+  if( !zPrevBranch ){
+    sqlite3_result_error_nomem(context);
+    return;
+  }
   rc = rebaseAdoptPersistedRebase(db);
   if( rc==SQLITE_DONE ){
+    sqlite3_free(zPrevBranch);
     sqlite3_result_error(context, "no rebase in progress", -1);
     return;
   }
   if( rc!=SQLITE_OK ){
+    sqlite3_free(zPrevBranch);
     sqlite3_result_error_code(context, rc);
     return;
   }
   doltliteGetSessionRebaseState(db, &isRebasing, &preRebaseCat, &expectedOrigHead,
                                 &zOrigBranchConst, &zReturnBranchConst);
   if( !isRebasing || !zOrigBranchConst || !zReturnBranchConst ){
+    sqlite3_free(zPrevBranch);
     sqlite3_result_error(context, "no rebase in progress", -1);
     return;
   }
@@ -3022,6 +3079,23 @@ static void doltliteRebaseInteractiveContinue(
   (void)sqlite3_exec(db, "SELECT 1 FROM main.dolt_rebase LIMIT 0", 0, 0, 0);
 
   rc = doltliteValidateRebasePlanTable(db, &zPlanErr);
+  if( rc==SQLITE_NOTFOUND ){
+    /* A rebase without a plan (an interrupted start or a non-interactive
+    ** leftover) can only be aborted; leave the session where it was. */
+    char *zMsg = sqlite3_mprintf("rebase on %s has no plan to continue; "
+        "run dolt_rebase('--abort') to discard it", zWorking);
+    if( sqlite3_stricmp(zPrevBranch, doltliteGetSessionBranch(db))!=0 ){
+      (void)doltliteCheckoutBranchForRebase(db, zPrevBranch);
+    }
+    if( zMsg ){
+      sqlite3_result_error(context, zMsg, -1);
+      sqlite3_free(zMsg);
+    }else{
+      sqlite3_result_error_nomem(context);
+    }
+    sqlite3_free(zPlanErr);
+    goto abort_err_silent;
+  }
   if( rc!=SQLITE_OK ){
     if( zPlanErr ){
       sqlite3_result_error(context, zPlanErr, -1);
@@ -3031,6 +3105,8 @@ static void doltliteRebaseInteractiveContinue(
     sqlite3_free(zPlanErr);
     goto abort_err_silent;
   }
+  sqlite3_free(zPrevBranch);
+  zPrevBranch = 0;
 
   rc = rebaseReadPlan(db, &aPlan, &nPlan);
   if( rc==SQLITE_CONSTRAINT_NOTNULL ){
@@ -3341,6 +3417,7 @@ abort_err_cas:
   return;
 
 abort_err:
+  sqlite3_free(zPrevBranch);
   rebaseFreePlan(aPlan, nPlan);
   if( !bPlanDropped ){
     stateRc = zWorking ?
@@ -3387,6 +3464,7 @@ abort_err:
   return;
 
 abort_err_silent:
+  sqlite3_free(zPrevBranch);
   rebaseFreePlan(aPlan, nPlan);
   sqlite3_free(zReplayErr);
   sqlite3_free(zOrigBranch);
