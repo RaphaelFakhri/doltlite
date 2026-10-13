@@ -228,6 +228,28 @@ static void test_push_tracking_preconditions(void){
   rc = branchCount(zRemote, "other", &n);
   check("untracked delete removed other", rc==SQLITE_OK && n==0);
 
+  zErr = 0;
+  rc = execErr(dbLocal, "SELECT dolt_push('origin',':other');", &zErr);
+  check("push_delete_missing_error", rc==SQLITE_ERROR && zErr
+      && strstr(zErr, "'refs/heads/other'") && strstr(zErr, "branch not found"));
+  sqlite3_free(zErr);
+  rc = readLog(zRemote, "main", zMsg, sizeof(zMsg));
+  check("missing delete preserves remote main", rc==SQLITE_OK
+      && strcmp(zMsg, "c2")==0);
+
+  check("remote stale branch", execSql(dbRemote,
+      "SELECT dolt_branch('stale');")==SQLITE_OK);
+  check("track stale branch", execSql(dbLocal,
+      "SELECT dolt_fetch('origin','stale');")==SQLITE_OK);
+  check("peer deletes stale branch", execSql(dbRemote,
+      "SELECT dolt_branch('-D','stale');")==SQLITE_OK);
+  rc = execSql(dbLocal, "SELECT dolt_push('origin',':refs/heads/stale');");
+  check("push_delete_stale_tracking_ok", rc==SQLITE_OK);
+  rc = queryInt(dbLocal,
+      "SELECT count(*) FROM dolt_remote_branches "
+      "WHERE name='remotes/origin/stale';", &n);
+  check("stale tracking removed", rc==SQLITE_OK && n==0);
+
   sqlite3_close(dbQo);
   sqlite3_close(dbRo);
   sqlite3_close(dbPeer);

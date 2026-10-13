@@ -653,6 +653,7 @@ static int doltPushParsedFunc(
   const char *zRef = zRefSpec;
   const char *zColon = zRefSpec ? strchr(zRefSpec, ':') : 0;
   char *zSrc = 0;
+  char *zDelete = 0;
   ProllyHash srcCommit;
   PushTrackingMutation mutation;
   int bBranch = 0;
@@ -665,19 +666,18 @@ static int doltPushParsedFunc(
   if( !cs ){ doltliteVcResultError(ctx, db, "no database"); return SQLITE_ERROR; }
   memset(&srcCommit, 0, sizeof(srcCommit));
 
+  if( zColon
+   && strncmp(zColon+1, REMOTE_TAGS_PREFIX, strlen(REMOTE_TAGS_PREFIX))==0 ){
+    char *zMsg = sqlite3_mprintf("unsupported mapping: '%s'", zRefSpec);
+    if( !zMsg ){ sqlite3_result_error_nomem(ctx); return SQLITE_NOMEM; }
+    doltliteVcResultError(ctx, db, zMsg);
+    sqlite3_free(zMsg);
+    return SQLITE_ERROR;
+  }
   if( zColon && zColon>zRefSpec ){
     const char *zDst = zColon + 1;
     zSrc = sqlite3_mprintf("%.*s", (int)(zColon - zRefSpec), zRefSpec);
     if( !zSrc ){ sqlite3_result_error_nomem(ctx); return SQLITE_NOMEM; }
-    /* src:refs/tags/... is not a tag push. A bare refs/tags/ name is. */
-    if( strncmp(zDst, REMOTE_TAGS_PREFIX, strlen(REMOTE_TAGS_PREFIX))==0 ){
-      char *zMsg = sqlite3_mprintf("unsupported mapping: '%s'", zRefSpec);
-      sqlite3_free(zSrc);
-      if( !zMsg ){ sqlite3_result_error_nomem(ctx); return SQLITE_NOMEM; }
-      doltliteVcResultError(ctx, db, zMsg);
-      sqlite3_free(zMsg);
-      return SQLITE_ERROR;
-    }
     zRef = remoteSqlStripPrefix(zDst, REMOTE_HEADS_PREFIX);
     /* Destination uses the same rules as dolt_branch. */
     if( !doltliteUserRefNameIsValid(zRef) ){
@@ -716,7 +716,14 @@ static int doltPushParsedFunc(
       }
     }
   }else if( zRef ){
-    if( strncmp(zRef, REMOTE_TAGS_PREFIX, strlen(REMOTE_TAGS_PREFIX))==0 ){
+    if( zRef[0]==':' ){
+      const char *zBranch = remoteSqlStripPrefix(zRef+1, REMOTE_HEADS_PREFIX);
+      if( zBranch!=zRef+1 ){
+        zDelete = sqlite3_mprintf(":%s", zBranch);
+        if( !zDelete ){ sqlite3_result_error_nomem(ctx); return SQLITE_NOMEM; }
+        zRef = zDelete;
+      }
+    }else if( strncmp(zRef, REMOTE_TAGS_PREFIX, strlen(REMOTE_TAGS_PREFIX))==0 ){
       bTagRef = 1;
       zRef += strlen(REMOTE_TAGS_PREFIX);
     }else{
@@ -727,6 +734,7 @@ static int doltPushParsedFunc(
   rc = remoteSqlOpenNamedRemote(db, cs, zRemoteName, 1, &zUrl, &pRemote);
   if( remoteSqlReportOpenError(ctx, db, rc, 0) ){
     sqlite3_free(zSrc);
+    sqlite3_free(zDelete);
     return rc ? rc : SQLITE_ERROR;
   }
 
@@ -774,9 +782,14 @@ static int doltPushParsedFunc(
   if( bPrecondition ){
     pRemote->xClose(pRemote);
     sqlite3_free(zSrc);
+    sqlite3_free(zDelete);
     (void)doltliteVcSealSavepointError(db);
     remoteSqlResultError(ctx, rc, 0);
     return rc;
+  }
+  if( bBranch && mutation.bDelete && rc==SQLITE_NOTFOUND
+   && chunkStoreFindTracking(cs, zRemoteName, mutation.zBranch, 0)==SQLITE_OK ){
+    rc = SQLITE_OK;
   }
   if( rc!=SQLITE_OK ){
     const char *zMsg = remoteSqlRemoteMsg(pRemote, rc);
@@ -793,10 +806,18 @@ static int doltPushParsedFunc(
     }else if( !zMsg && rc==SQLITE_NOTFOUND ){
       zMsg = "push failed: branch or tag not found";
     }
-    zOwned = zMsg && !bRejected ? sqlite3_mprintf("%s", zMsg) : 0;
+    if( bBranch && mutation.bDelete && rc==SQLITE_NOTFOUND ){
+      zOwned = sqlite3_mprintf(
+          "failed to delete remote; 'refs/heads/%s' from remote '%s'; "
+          "branch not found", mutation.zBranch, zRemoteName);
+      if( !zOwned ) rc = SQLITE_NOMEM;
+    }else{
+      zOwned = zMsg && !bRejected ? sqlite3_mprintf("%s", zMsg) : 0;
+    }
     if( bLocalLock ) chunkStoreUnlock(cs);
     pRemote->xClose(pRemote);
     sqlite3_free(zSrc);
+    sqlite3_free(zDelete);
     if( bRejected ){
       *pbRejected = 1;
       return rc;
@@ -817,6 +838,7 @@ static int doltPushParsedFunc(
     }
   }
   sqlite3_free(zSrc);
+  sqlite3_free(zDelete);
   if( bLocalLock ) chunkStoreUnlock(cs);
   if( rc!=SQLITE_OK ){
     remoteSqlResultError(ctx, rc, 0);

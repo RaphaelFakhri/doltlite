@@ -32,8 +32,10 @@ do_test push-delete-empty {
   list $rc [db errorcode] $msg
 } {1 21 {push failed: branch name required after ':'}}
 foreach target {feature missing} {
-  do_execsql_test push-delete-missing-$target \
-    "SELECT dolt_push('origin',':$target')" {0}
+  do_test push-delete-missing-$target {
+    set rc [catch {execsql "SELECT dolt_push('origin',':$target')"} msg]
+    list $rc [db errorcode] $msg
+  } [list 1 1 "failed to delete remote; 'refs/heads/$target' from remote 'origin'; branch not found"]
 }
 do_execsql_test push-delete-invalid-keeps-tracking {
   SELECT name FROM dolt_remote_branches ORDER BY name;

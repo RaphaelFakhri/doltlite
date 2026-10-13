@@ -297,6 +297,42 @@ remote_tag_flow "forced_tag_push_is_idempotent" "$BASE_SEED" \
 
 echo "--- failure recovery ---"
 
+DELETE_SEED="$BASE_SEED
+SELECT dolt_push('origin','v1');
+SELECT dolt_branch('keep');
+SELECT dolt_push('origin','keep');
+"
+DELETE_STATE_DL="
+SELECT 'R|tracking|'||name FROM dolt_remote_branches;
+SELECT 'R|tag|'||tag_name||'|'||message FROM dolt_tags;
+SELECT 'R|row|'||id||'|'||v FROM t;
+"
+DELETE_STATE_DT="
+SELECT CONCAT('R|tracking|',name) FROM dolt_remote_branches;
+SELECT CONCAT('R|tag|',tag_name,'|',message) FROM dolt_tags;
+SELECT CONCAT('R|row|',id,'|',v) FROM t;
+"
+for mode in normal force; do
+  flag=""
+  [ "$mode" != force ] || flag=",'--force'"
+  for target in nosuch refs/heads/nosuch refs/tags/v1 refs/tags/nosuch; do
+    remote_tag_error_flow "push_delete_${mode}_${target//\//_}" "src" "$DELETE_SEED" \
+      "SELECT dolt_push('origin',':$target'$flag);" \
+      "SELECT dolt_fetch('origin');" \
+      "$DELETE_STATE_DL" "$DELETE_STATE_DT"
+  done
+done
+for target in keep refs/heads/keep; do
+  remote_tag_flow "push_delete_${target//\//_}" "$DELETE_SEED" \
+    "SELECT dolt_push('origin',':$target');" \
+    "SELECT dolt_fetch('--prune','origin');" \
+    "$DELETE_STATE_DL" "$DELETE_STATE_DT"
+  remote_tag_flow "push_delete_stale_${target//\//_}" "$DELETE_SEED" \
+    "SELECT dolt_push('origin',':keep');" \
+    "SELECT dolt_push('origin',':$target');" \
+    "$DELETE_STATE_DL" "$DELETE_STATE_DT"
+done
+
 remote_tag_error_flow "push_missing_ref_preserves_remote" "src" "$BASE_SEED" \
   "SELECT dolt_push('origin','missing-tag');" \
   "SELECT dolt_fetch('origin','main');" \

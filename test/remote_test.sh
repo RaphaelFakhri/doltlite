@@ -543,6 +543,64 @@ result=$("$DB" "$TMPDIR/no_tag_src.db" \
   "SELECT dolt_push('origin','--tags');")
 check "--tags with no local tags is a no-op" "0" "$result"
 
+echo "=== Delete pushes validate the remote target ==="
+PD="$TMPDIR/push_delete"
+mkdir -p "$PD"
+"$DB" "$PD/src.db" "
+  CREATE TABLE t(id INT PRIMARY KEY,v TEXT);
+  INSERT INTO t VALUES(1,'base');
+  SELECT dolt_commit('-Am','base');
+  SELECT dolt_branch('topic');
+  SELECT dolt_branch('keep');
+  SELECT dolt_remote('add','origin','file://$PD/remote.db');
+  SELECT dolt_push('origin','main','topic','keep');
+  SELECT dolt_tag('v1');
+  SELECT dolt_push('origin','v1');
+  UPDATE t SET v='staged';
+  SELECT dolt_add('t');
+  UPDATE t SET v='working';
+" >/dev/null
+delete_local_state="
+SELECT dolt_hashof('HEAD'),dolt_hashof_db('STAGED'),dolt_hashof_db('WORKING');
+SELECT name,latest_commit_message FROM dolt_remote_branches ORDER BY name;
+"
+delete_remote_state="
+SELECT name FROM dolt_branches ORDER BY name;
+SELECT tag_name FROM dolt_tags ORDER BY tag_name;
+SELECT dolt_hashof('HEAD');
+SELECT id,v FROM t;
+"
+local_before=$("$DB" "$PD/src.db" "$delete_local_state")
+remote_before=$("$DB" "$PD/remote.db" "$delete_remote_state")
+for mode in normal force; do
+  flag=""
+  [ "$mode" != force ] || flag=",'--force'"
+  for target in nosuch refs/heads/nosuch refs/tags/v1 refs/tags/nosuch; do
+    result=$("$DB" "$PD/src.db" "SELECT dolt_push('origin',':$target'$flag);" 2>&1)
+    case "$target" in
+      refs/tags/*) pattern="unsupported mapping: ':$target'" ;;
+      *) pattern="failed to delete remote; 'refs/heads/nosuch' from remote 'origin'; branch not found" ;;
+    esac
+    check_match "$mode deletion of $target reports the target error" "$pattern" "$result"
+    result=$("$DB" "$PD/src.db" "$delete_local_state")
+    check "$mode deletion of $target preserves local roots and tracking refs" "$local_before" "$result"
+    result=$("$DB" "$PD/remote.db" "$delete_remote_state")
+    check "$mode deletion of $target preserves remote refs, tags and rows" "$remote_before" "$result"
+  done
+done
+for target in topic refs/heads/keep; do
+  result=$("$DB" "$PD/src.db" "SELECT dolt_push('origin',':$target');" 2>&1)
+  check "deletion of $target succeeds" "0" "$result"
+done
+result=$("$DB" "$PD/remote.db" "SELECT name FROM dolt_branches; SELECT tag_name FROM dolt_tags; SELECT id,v FROM t;")
+check "valid deletions preserve the remote main branch and tag" "main
+v1
+1|base" "$result"
+result=$("$DB" "$PD/src.db" "SELECT name FROM dolt_remote_branches; SELECT v FROM t; SELECT v FROM dolt_at_t('STAGED');")
+check "valid deletions remove only the target tracking refs and preserve edits" "remotes/origin/main
+working
+staged" "$result"
+
 echo "=== 16. Error cases ==="
 result=$("$DB" "$TMPDIR/src.db" "SELECT dolt_push('nonexistent','main');" 2>&1)
 check "push to unknown remote errors" "1" "$(echo "$result" | grep -c 'remote not found')"
