@@ -1328,7 +1328,10 @@ int sqlite3_backup_step(sqlite3_backup *pBackup, int nPage){
   }
 
   {
-    char *zTmpRaw = sqlite3_mprintf("%s-backup-%p", zDestFile, (void*)p);
+    /* A fixed name under the destination's graph lock: two backups into
+    ** one destination never stage at once, and the next backup finds what
+    ** a crashed one left behind. */
+    char *zTmpRaw = sqlite3_mprintf("%s-backup-tmp", zDestFile);
     if( !zTmpRaw ){
       rc = SQLITE_NOMEM;
       goto backup_step_done;
@@ -1339,6 +1342,7 @@ int sqlite3_backup_step(sqlite3_backup *pBackup, int nPage){
   }
   rc = sqlite3OsDelete(pDestVfs, zTmpFile, 0);
   if( rc==SQLITE_IOERR_DELETE_NOENT ) rc = SQLITE_OK;
+  if( rc==SQLITE_OK ) rc = csLockSidecarDelete(pDestVfs, zTmpFile);
   if( rc!=SQLITE_OK ) goto backup_step_done;
 
   openFlags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
@@ -1366,9 +1370,9 @@ int sqlite3_backup_step(sqlite3_backup *pBackup, int nPage){
     rc = chunkStoreReplaceLockedFile(destCs, zTmpFile, &retainTmp);
     if( rc==SQLITE_OK ){
       /* The temporary store is gone under its own name; its graph-lock
-      ** sidecar would otherwise outlive it forever (#3961). A delete that
-      ** fails here (an injected OOM among them) fails the backup, exactly
-      ** like the pre-replace delete of the same name above. */
+      ** sidecar would otherwise outlive it. A delete that fails here (an
+      ** injected OOM among them) fails the backup, exactly like the
+      ** pre-replace delete of the same name above. */
       rc = csLockSidecarDelete(pDestVfs, zTmpFile);
       if( rc==SQLITE_OK ){
         doltliteBtreeInstallBackupBranch(pDestBt, zPreparedBranch);
