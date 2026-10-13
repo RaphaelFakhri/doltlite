@@ -61,15 +61,27 @@ cp "$private_jwk" "$TMP/private_authkeys/"
   --auth-keys "$TMP/private_authkeys" --audience localhost \
   -p 0 --bind 127.0.0.1 "$TMP/srv" >"$TMP/private.log" 2>&1 &
 PRIVATE_PID=$!
-sleep 0.5
+# A loaded runner can take a while to reach the check; wait for the refusal
+# rather than assuming it lands within a fixed delay.
+for _ in $(seq 1 100); do
+  kill -0 "$PRIVATE_PID" 2>/dev/null || break
+  sleep 0.1
+done
 if kill -0 "$PRIVATE_PID" 2>/dev/null; then
   kill "$PRIVATE_PID" 2>/dev/null || true
   wait "$PRIVATE_PID" 2>/dev/null || true
   echo "FAIL: server accepted a private credential in --auth-keys"
   exit 1
 fi
-wait "$PRIVATE_PID" 2>/dev/null || true
+private_rc=0
+wait "$PRIVATE_PID" 2>/dev/null || private_rc=$?
 PRIVATE_PID=""
+if [ "$private_rc" -eq 0 ] \
+   || ! grep -q "must contain only public JWK" "$TMP/private.log"; then
+  echo "FAIL: server did not refuse the private credential in --auth-keys"
+  cat "$TMP/private.log"
+  exit 1
+fi
 DOLTLITE_CREDS_DIR="$TMP/cc" "$DOLTLITE" :memory: \
   "SELECT dolt_creds('export','$kid','$TMP/authkeys');" >/dev/null 2>&1 || {
   echo "FAIL: public credential export failed"; exit 1;
