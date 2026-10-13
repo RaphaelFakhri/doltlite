@@ -865,6 +865,8 @@ static void doltliteCommitFuncImpl(
   ProllyHash sessionHeadBeforeLock;
   char hexBuf[PROLLY_HASH_SIZE*2+1];
   int sealTopLevel = doltliteSavepointIsTopLevelTxn(db);
+  int pinnedRead = !db->autoCommit
+                && sqlite3_txn_state(db, "main")==SQLITE_TXN_READ;
   int rc;
 
   memset(&mutationState, 0, sizeof(mutationState));
@@ -879,6 +881,18 @@ static void doltliteCommitFuncImpl(
   if( !cs ){
     sqlite3_result_error(context, doltliteVcUnavailableMessage(db), -1);
     return;
+  }
+
+  if( pinnedRead ){
+    doltliteGetSessionHead(db, &sessionHeadBeforeLock);
+    rc = doltliteRefreshAndConfirmHead(db, cs, &sessionHeadBeforeLock);
+    if( rc!=SQLITE_OK ){
+      if( rc==SQLITE_BUSY ) doltliteCmdResultPeerBranchBusy(context, "commit");
+      sqlite3_result_error_code(context, rc);
+      return;
+    }
+    chunkStoreUnlock(cs);
+    doltliteInvalidateSessionWorkingState(db);
   }
 
   /* Seal top-level SAVEPOINT before option validation: Dolt keeps that
@@ -1143,7 +1157,7 @@ static void doltliteCommitFuncImpl(
     return;
   }
 
-  doltliteGetSessionHead(db, &sessionHeadBeforeLock);
+  if( !pinnedRead ) doltliteGetSessionHead(db, &sessionHeadBeforeLock);
   rc = doltliteSaveTxnState(db, &mutationState);
   if( rc!=SQLITE_OK ){
     sqlite3_result_error_code(context, rc);

@@ -769,6 +769,210 @@ static void test_cross_process_commit_conflict(void){
   remove(freshPath);
 }
 
+static void test_stale_commit_variants(void){
+  static const char *azOp[] = {
+    "SELECT dolt_commit('--amend','-m','caller')",
+    "SELECT dolt_commit('-a','--amend','-m','caller')",
+    "SELECT dolt_commit('-A','--amend','-m','caller')",
+    "SELECT dolt_commit('--allow-empty','-m','caller')",
+    "SELECT dolt_commit('-a','--allow-empty','-m','caller')",
+    "SELECT dolt_commit('-A','--allow-empty','-m','caller')",
+    "SELECT dolt_commit('-a','-m','caller')",
+    "SELECT dolt_commit('-A','-m','caller')",
+    "SELECT dolt_commit('-a','--skip-empty','-m','caller')",
+    "SELECT dolt_commit('-A','--skip-empty','-m','caller')"
+  };
+  static const char *azBegin[] = {
+    "BEGIN", "SAVEPOINT caller", "BEGIN; SAVEPOINT caller"
+  };
+  char path[256];
+  int boundary, op;
+
+  printf("--- Stale commit variants preserve a peer process's commit ---\n");
+  snprintf(path, sizeof(path), DOLTLITE_TEST_TMPDIR "/mp_stale_commit_%d.db",
+           (int)getpid());
+  for(boundary=0; boundary<3; boundary++){
+    for(op=0; op<(int)(sizeof(azOp)/sizeof(azOp[0])); op++){
+      sqlite3 *db = 0, *fresh = 0;
+      char head[64], staged[64], peerHead[64], label[128];
+      int rc, status;
+      pid_t child;
+
+      setup_db(path);
+      check("mp_stale_commit_open", sqlite3_open(path, &db)==SQLITE_OK);
+      check("mp_stale_commit_seed", execSql(db,
+          "INSERT INTO t VALUES(2,'two'); SELECT dolt_commit('-am','c2')")
+          ==SQLITE_OK);
+      snprintf(head, sizeof(head), "%s",
+               queryScalarText(db, "SELECT dolt_hashof('HEAD')"));
+      check("mp_stale_commit_begin", execSql(db, azBegin[boundary])==SQLITE_OK);
+      check("mp_stale_commit_pin", strcmp(queryScalarText(db,
+            "SELECT message FROM dolt_log LIMIT 1"), "c2")==0);
+      check("mp_stale_commit_read", strcmp(queryScalarText(db,
+            "SELECT count(*) FROM t"), "2")==0);
+      snprintf(staged, sizeof(staged), "%s",
+               queryScalarText(db, "SELECT count(*) FROM dolt_status WHERE staged"));
+      check("mp_stale_commit_staging_valid", strcmp(staged, "0")==0);
+      child = fork();
+      if( child<0 ){ perror("fork"); exit(1); }
+      if( child==0 ){
+        sqlite3 *peer = 0;
+        if( sqlite3_open(path, &peer)!=SQLITE_OK ) _exit(1);
+        sqlite3_busy_timeout(peer, 5000);
+        rc = execSql(peer, "INSERT INTO t VALUES(900,'peer');"
+                           "SELECT dolt_commit('-am','peer commit')");
+        sqlite3_close(peer);
+        _exit(rc==SQLITE_OK ? 0 : 2);
+      }
+      check("mp_stale_commit_peer_wait", waitpid(child, &status, 0)==child);
+      check("mp_stale_commit_peer_exit", WIFEXITED(status) && WEXITSTATUS(status)==0);
+      check("mp_stale_commit_observer", sqlite3_open(path, &fresh)==SQLITE_OK);
+      snprintf(peerHead, sizeof(peerHead), "%s",
+               queryScalarText(fresh, "SELECT dolt_hashof('HEAD')"));
+      check("mp_stale_commit_peer_advanced", strcmp(peerHead, head)!=0);
+      rc = execSql(db, azOp[op]);
+      snprintf(label, sizeof(label), "mp_stale_commit_%d_%d_busy", boundary, op);
+      check(label, (rc&0xff)==SQLITE_BUSY);
+      check("mp_stale_commit_caller_transaction", !sqlite3_get_autocommit(db));
+      check("mp_stale_commit_snapshot_head", strcmp(queryScalarText(db,
+            "SELECT dolt_hashof('HEAD')"), head)==0);
+      check("mp_stale_commit_staging_unchanged", strcmp(queryScalarText(db,
+            "SELECT count(*) FROM dolt_status WHERE staged"), staged)==0);
+      snprintf(label, sizeof(label), "mp_stale_commit_%d_%d_peer_hash", boundary, op);
+      check(label, strcmp(queryScalarText(fresh,
+            "SELECT dolt_hashof('HEAD')"), peerHead)==0);
+      check("mp_stale_commit_peer_message", strcmp(queryScalarText(fresh,
+            "SELECT message FROM dolt_log LIMIT 1"), "peer commit")==0);
+      check("mp_stale_commit_no_caller_commit", strcmp(queryScalarText(fresh,
+            "SELECT count(*) FROM dolt_log WHERE message='caller'"), "0")==0);
+      check("mp_stale_commit_rollback", execSql(db, "ROLLBACK")==SQLITE_OK);
+      sqlite3_close(db);
+      sqlite3_close(fresh);
+      check("mp_stale_commit_reopen", sqlite3_open(path, &fresh)==SQLITE_OK);
+      check("mp_stale_commit_durable_hash", strcmp(queryScalarText(fresh,
+            "SELECT dolt_hashof('HEAD')"), peerHead)==0);
+      check("mp_stale_commit_durable_rows", strcmp(queryScalarText(fresh,
+            "SELECT group_concat(id) FROM (SELECT id FROM t ORDER BY id)"),
+            "1,2,900")==0);
+      check("mp_stale_commit_committed_rows", strcmp(queryScalarText(fresh,
+            "SELECT group_concat(id) FROM (SELECT id FROM dolt_at_t('main') ORDER BY id)"),
+            "1,2,900")==0);
+      check("mp_stale_commit_integrity", strcmp(queryScalarText(fresh,
+            "PRAGMA integrity_check"), "ok")==0);
+      sqlite3_close(fresh);
+    }
+  }
+  remove(path);
+}
+
+typedef struct StaleCommitPeer StaleCommitPeer;
+struct StaleCommitPeer {
+  int toPeer;
+  int fromPeer;
+  int target;
+  int tick;
+  int fired;
+  char result;
+};
+
+static int staleCommitProgress(void *pArg){
+  StaleCommitPeer *p = (StaleCommitPeer*)pArg;
+  if( ++p->tick==p->target && !p->fired ){
+    p->fired = 1;
+    mpWrite(p->toPeer, "w");
+    mpRead(p->fromPeer, &p->result);
+  }
+  return 0;
+}
+
+static void test_stale_commit_stage_race(void){
+  const char *azOp[] = {
+    "SELECT dolt_commit('-a','--amend','-m','caller')",
+    "SELECT dolt_commit('-A','--amend','-m','caller')"
+  };
+  char path[256];
+  int op;
+  printf("--- Amend keeps its pinned HEAD while automatic staging races ---\n");
+  snprintf(path, sizeof(path), DOLTLITE_TEST_TMPDIR "/mp_stale_stage_%d.db",
+           (int)getpid());
+  for(op=0; op<2; op++){
+    int target, nAcked = 0, nBad = 0;
+    for(target=1; target<=1000; target++){
+      sqlite3 *db = 0, *fresh = 0;
+      StaleCommitPeer p;
+      int toPeer[2], fromPeer[2], rc, status;
+      pid_t child;
+      char ch;
+      setup_db(path);
+      check("mp_stale_stage_setup_open", sqlite3_open(path, &db)==SQLITE_OK);
+      check("mp_stale_stage_setup", execSql(db,
+          "INSERT INTO t VALUES(2,'two'); SELECT dolt_commit('-am','c2')")
+          ==SQLITE_OK);
+      sqlite3_close(db);
+      mpPipe(toPeer);
+      mpPipe(fromPeer);
+      child = fork();
+      if( child<0 ){ perror("fork"); exit(1); }
+      if( child==0 ){
+        sqlite3 *peer = 0;
+        close(toPeer[1]);
+        close(fromPeer[0]);
+        if( sqlite3_open(path, &peer)!=SQLITE_OK ) _exit(1);
+        mpWrite(fromPeer[1], "r");
+        mpRead(toPeer[0], &ch);
+        if( ch=='w' ){
+          rc = execSql(peer, "INSERT INTO t VALUES(900,'peer');"
+                            "SELECT dolt_commit('-am','peer commit')");
+          mpWrite(fromPeer[1], rc==SQLITE_OK ? "o" : isRetryable(rc) ? "b" : "e");
+        }
+        sqlite3_close(peer);
+        _exit(0);
+      }
+      close(toPeer[0]);
+      close(fromPeer[1]);
+      mpRead(fromPeer[0], &ch);
+      check("mp_stale_stage_open", sqlite3_open(path, &db)==SQLITE_OK);
+      check("mp_stale_stage_begin", execSql(db, "BEGIN")==SQLITE_OK);
+      check("mp_stale_stage_pin", strcmp(queryScalarText(db,
+            "SELECT count(*) FROM t"), "2")==0);
+      memset(&p, 0, sizeof(p));
+      p.toPeer = toPeer[1];
+      p.fromPeer = fromPeer[0];
+      p.target = target;
+      sqlite3_progress_handler(db, 1, staleCommitProgress, &p);
+      rc = execSql(db, azOp[op]);
+      sqlite3_progress_handler(db, 0, 0, 0);
+      if( !p.fired ) mpWrite(toPeer[1], "q");
+      close(toPeer[1]);
+      close(fromPeer[0]);
+      waitpid(child, &status, 0);
+      if( !WIFEXITED(status) || WEXITSTATUS(status)!=0 || p.result=='e'
+       || (rc!=SQLITE_OK && !isRetryable(rc)) ) nBad++;
+      if( p.result=='o' ){
+        nAcked++;
+        if( (rc&0xff)!=SQLITE_BUSY ) nBad++;
+        sqlite3_open(path, &fresh);
+        if( strcmp(queryScalarText(fresh,
+              "SELECT message FROM dolt_log LIMIT 1"), "peer commit") ) nBad++;
+        if( strcmp(queryScalarText(fresh,
+              "SELECT count(*) FROM dolt_log WHERE message='caller'"), "0") ) nBad++;
+        if( strcmp(queryScalarText(fresh, "SELECT group_concat(id) FROM "
+              "(SELECT id FROM dolt_at_t('main') ORDER BY id)"), "1,2,900") ) nBad++;
+        sqlite3_close(fresh);
+      }
+      execSql(db, "ROLLBACK");
+      sqlite3_close(db);
+      if( !p.fired ) break;
+    }
+    printf("  amend %s: peer commits=%d violations=%d\n", op ? "-A" : "-a",
+           nAcked, nBad);
+    check("mp_stale_stage_peer_exercised", nAcked>0);
+    check("mp_stale_stage_peer_commit_kept", nBad==0);
+    check("mp_stale_stage_terminated", target<=1000);
+  }
+  remove(path);
+}
+
 static int commit_worker(const char *path, int worker, int nOps, int fdReady, int fdGo){
   sqlite3 *db = 0;
   char ch = 0;
@@ -1884,6 +2088,8 @@ int main(){
   test_gc_during_read();
   test_gc_blocked_by_writer();
   test_cross_process_commit_conflict();
+  test_stale_commit_variants();
+  test_stale_commit_stage_race();
   test_write_after_lost_commit_race();
   test_commit_does_not_erase_peer_write();
   test_commit_keeps_peer_insert_during_publish();

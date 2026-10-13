@@ -134,10 +134,11 @@ static void test_pinned_session_commit_rejected(void){
   res = queryScalarText(db1, "SELECT dolt_commit('-A', '-m', 'add one')");
   check("pin_peer_commit", strlen(res)==40);
 
-  execSql(db2, "INSERT INTO vals VALUES (2, 2)");
-  res = queryScalarText(db2, "SELECT dolt_commit('-A', '-m', 'add two')");
-  check("pin_commit_rejected",
-    strstr(res, "ERROR") != 0 || strstr(res, "conflict") != 0);
+  rc = execSql(db2, "INSERT INTO vals VALUES (2, 2)");
+  check("pin_write_rejected", (rc&0xff)==SQLITE_BUSY);
+  rc = execSql(db2, "SELECT dolt_commit('-A', '-m', 'add two')");
+  check("pin_commit_rejected", (rc&0xff)==SQLITE_BUSY);
+  check("pin_transaction_preserved", !sqlite3_get_autocommit(db2));
   execSql(db2, "ROLLBACK");
 
   sqlite3_close(db1);
