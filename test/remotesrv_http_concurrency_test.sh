@@ -253,6 +253,14 @@ else
   check "conditional installs preserve peer writes without global retries" 0 1
 fi
 
+echo "=== remote branch deletion during fetch and pull ==="
+if python3 "$(dirname "$0")/lib/remotesrv_fetch_race.py" "$DOLTLITE" \
+    "http://127.0.0.1:$PORT/fetch_race.db" "$TMP/srv/fetch_race.db" "$TMP"; then
+  check "fetch and pull tolerate unrelated remote branch deletion" 0 0
+else
+  check "fetch and pull tolerate unrelated remote branch deletion" 0 1
+fi
+
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*) ;;
   *)
