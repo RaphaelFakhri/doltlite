@@ -34,9 +34,13 @@ static int scalar(sqlite3 *db, const char *zSql){
 ** graph lock. It used to, to refresh an idle connection's view, which starved
 ** a concurrent writer: every insert came back SQLITE_BUSY and every commit
 ** claimed a peer had committed to the branch. */
-static void test_readonly_status_does_not_starve_a_writer(const char *zPath){
+static void test_readonly_status_does_not_starve_a_writer(
+  const char *zPath,
+  int nReader
+){
   const int nRound = 150;
-  pid_t pid;
+  pid_t aPid[8];
+  int k;
   sqlite3 *db = 0;
   int status = 0;
   int i;
@@ -50,24 +54,29 @@ static void test_readonly_status_does_not_starve_a_writer(const char *zPath){
       "SELECT dolt_commit('-Am','init');", 0, 0, 0)==SQLITE_OK);
   sqlite3_close(db);
 
-  pid = fork();
-  if( pid==0 ){
-    /* Reader: a fresh read-only connection per round, like a status poller. */
-    for(;;){
-      sqlite3 *ro = 0;
-      if( sqlite3_open_v2(zPath, &ro, SQLITE_OPEN_READONLY, 0)==SQLITE_OK ){
-        (void)scalar(ro, "SELECT count(*) FROM dolt_status");
+  for(k=0; k<nReader; k++){
+    aPid[k] = fork();
+    if( aPid[k]==0 ){
+      /* Reader: a fresh read-only connection per round, like a status
+      ** poller. Several overlap so a shared lock is almost always held. */
+      for(;;){
+        sqlite3 *ro = 0;
+        if( sqlite3_open_v2(zPath, &ro, SQLITE_OPEN_READONLY, 0)==SQLITE_OK ){
+          (void)scalar(ro, "SELECT count(*) FROM dolt_status");
+        }
+        sqlite3_close(ro);
       }
-      sqlite3_close(ro);
+      _exit(0);
     }
-    _exit(0);
+    check("ro_starve: fork", aPid[k]>0);
+    if( aPid[k]<=0 ){
+      while( k-->0 ){ kill(aPid[k], SIGKILL); waitpid(aPid[k], &status, 0); }
+      return;
+    }
   }
-  check("ro_starve: fork", pid>0);
-  if( pid<=0 ) return;
 
   if( sqlite3_open(zPath, &db)!=SQLITE_OK ){
-    kill(pid, SIGKILL);
-    waitpid(pid, &status, 0);
+    for(k=0; k<nReader; k++){ kill(aPid[k], SIGKILL); waitpid(aPid[k], &status, 0); }
     check("ro_starve: writer open", 0);
     return;
   }
@@ -85,8 +94,10 @@ static void test_readonly_status_does_not_starve_a_writer(const char *zPath){
         scalar(db, "SELECT count(*) FROM e")==nRound);
   sqlite3_close(db);
 
-  kill(pid, SIGKILL);
-  waitpid(pid, &status, 0);
+  for(k=0; k<nReader; k++){
+    kill(aPid[k], SIGKILL);
+    waitpid(aPid[k], &status, 0);
+  }
 
   /* And the rows are durable, not just visible to the writer. */
   check("ro_starve: reopen", sqlite3_open(zPath, &db)==SQLITE_OK);
@@ -229,7 +240,8 @@ int main(void){
   char zPath[256];
   snprintf(zPath, sizeof(zPath), DOLTLITE_TEST_TMPDIR "/dolt_ro_reader_%d.db", (int)getpid());
 
-  test_readonly_status_does_not_starve_a_writer(zPath);
+  test_readonly_status_does_not_starve_a_writer(zPath, 1);
+  test_readonly_status_does_not_starve_a_writer(zPath, 4);
   test_readonly_still_sees_peer_changes(zPath);
   test_readonly_reset_does_not_unlock_writers(zPath);
 

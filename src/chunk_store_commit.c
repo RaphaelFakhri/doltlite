@@ -462,15 +462,20 @@ static int csCommitToFile(
           if( rc!=SQLITE_BUSY ) break;
         }
         publicationRetries++;
-        /* A few tight spins keep PENDING. Sleeping with it held blocks a
-        ** new reader for the whole timeout, so drop to SHARED first. That
-        ** also releases RESERVED. Nothing has been written yet. A peer
-        ** that takes RESERVED just makes this attempt wait again. */
+        /* A few tight spins keep PENDING. For the short sleeps after them,
+        ** drop to SHARED so a reader arriving mid-wait reads the pre-commit
+        ** snapshot instead of waiting; that also releases RESERVED, and a
+        ** peer that takes it just makes this attempt wait again. A longer
+        ** wait keeps PENDING, as stock SQLite does: readers that open one
+        ** after another would otherwise hold SHARED forever and starve the
+        ** writer. */
         if( publicationRetries<=8 && haveReserved ) continue;
-        rc = sqlite3OsUnlock(cs->file.pFile, SQLITE_LOCK_SHARED);
-        if( rc!=SQLITE_OK ) break;
-        haveReserved = 0;
-        doltliteTestPause("DOLTLITE_PAUSE_DURING_PUBLISH");
+        if( publicationRetries<=40 ){
+          rc = sqlite3OsUnlock(cs->file.pFile, SQLITE_LOCK_SHARED);
+          if( rc!=SQLITE_OK ) break;
+          haveReserved = 0;
+          doltliteTestPause("DOLTLITE_PAUSE_DURING_PUBLISH");
+        }
         if( publicationRetries<=40 ){
           sqlite3OsSleep(chunkFileGetVfs(&cs->file), 1);
         }else if( publicationRetries<=140 ){
