@@ -193,8 +193,9 @@ struct CheckoutMutationCtx {
   ProllyHash targetCatHash;
   u8 savedIsMerging;
   u8 savedIsRebasing;
-  const char *zSavedRebaseOrigBranch;
-  const char *zSavedRebaseReturnBranch;
+  char *zSavedRebaseOrigBranch;
+  char *zSavedRebaseReturnBranch;
+  u8 savedRebaseOom;
   u8 savedWasDetached;
   u8 requireActiveRebase;
   u8 targetRebaseInactive;
@@ -236,6 +237,8 @@ static int checkoutCaptureOldCatalog(sqlite3 *db, ChunkStore *cs,
 }
 
 static void checkoutSaveSession(sqlite3 *db, CheckoutMutationCtx *p){
+  const char *zOrig = 0;
+  const char *zReturn = 0;
   p->savedWasDetached = doltliteIsDetached(db);
   doltliteGetSessionHead(db, &p->savedSessionHead);
   doltliteGetSessionStaged(db, &p->savedSessionStaged);
@@ -246,12 +249,24 @@ static void checkoutSaveSession(sqlite3 *db, CheckoutMutationCtx *p){
   doltliteGetSessionRebaseState(db, 0,
                                 &p->savedPreRebaseCat,
                                 &p->savedRebaseOnto,
-                                &p->zSavedRebaseOrigBranch,
-                                &p->zSavedRebaseReturnBranch);
+                                &zOrig, &zReturn);
+  /* Copies: reloading the session frees the strings it handed out. */
+  p->zSavedRebaseOrigBranch = zOrig ? sqlite3_mprintf("%s", zOrig) : 0;
+  p->zSavedRebaseReturnBranch = zReturn ? sqlite3_mprintf("%s", zReturn) : 0;
+  p->savedRebaseOom = (zOrig && !p->zSavedRebaseOrigBranch)
+                   || (zReturn && !p->zSavedRebaseReturnBranch);
+}
+
+static void checkoutFreeSavedSession(CheckoutMutationCtx *p){
+  sqlite3_free(p->zSavedRebaseOrigBranch);
+  sqlite3_free(p->zSavedRebaseReturnBranch);
+  p->zSavedRebaseOrigBranch = 0;
+  p->zSavedRebaseReturnBranch = 0;
 }
 
 static int checkoutRestoreSession(sqlite3 *db, CheckoutMutationCtx *p){
   int rc;
+  if( p->savedRebaseOom ) return SQLITE_NOMEM;
   doltliteSetSessionDetached(db, 0);
   rc = doltliteSetSessionBranch(db, p->zCurrentBranch);
   if( rc==SQLITE_OK ){
@@ -511,6 +526,7 @@ void doltConnectBranchFunc(
   checkoutSaveSession(db, &m);
   rc = checkoutCaptureOldCatalog(db, cs, &m.oldCatHash, &m.oldWorkingSet);
   if( rc!=SQLITE_OK ){
+    checkoutFreeSavedSession(&m);
     sqlite3_free(zCurrentBranch);
     sqlite3_result_error_code(ctx, rc);
     return;
@@ -518,6 +534,7 @@ void doltConnectBranchFunc(
 
   rc = checkoutLoadAndApply(db, cs, zBranch, &targetCommit, &targetCatHash);
   if( rc!=SQLITE_OK ){
+    checkoutFreeSavedSession(&m);
     sqlite3_free(zCurrentBranch);
     sqlite3_result_error_code(ctx, rc);
     return;
@@ -531,6 +548,7 @@ void doltConnectBranchFunc(
   if( rc!=SQLITE_OK ){
     int restoreRc = checkoutRestoreSession(db, &m);
     if( restoreRc!=SQLITE_OK ) rc = restoreRc;
+    checkoutFreeSavedSession(&m);
     sqlite3_free(zCurrentBranch);
     sqlite3_result_error_code(ctx, rc);
     return;
@@ -539,10 +557,12 @@ void doltConnectBranchFunc(
   if( rc!=SQLITE_OK ){
     int restoreRc = checkoutRestoreSession(db, &m);
     if( restoreRc!=SQLITE_OK ) rc = restoreRc;
+    checkoutFreeSavedSession(&m);
     sqlite3_free(zCurrentBranch);
     sqlite3_result_error_code(ctx, rc);
     return;
   }
+  checkoutFreeSavedSession(&m);
   sqlite3_free(zCurrentBranch);
   sqlite3_result_int(ctx, 0);
 }
@@ -586,6 +606,7 @@ static int checkoutBranchForRebase(
 
   rc = checkoutApplyRefs(db, &m);
   if( rc!=SQLITE_OK ) rc = checkoutRestoreOnFailure(db, &m, rc);
+  checkoutFreeSavedSession(&m);
   sqlite3_free(zCurrentBranch);
   return rc;
 }
@@ -1459,6 +1480,7 @@ static void doltCheckoutParsedFunc(
   doltliteSetSessionDetached(db, 0);
   rc = checkoutApplyRefs(db, &m);
   if( rc!=SQLITE_OK ) rc = checkoutRestoreOnFailure(db, &m, rc);
+  checkoutFreeSavedSession(&m);
   sqlite3_free(zCurrentBranch);
   zCurrentBranch = 0;
   if( m.createRc!=SQLITE_OK ){
@@ -1492,6 +1514,7 @@ static void doltCheckoutParsedFunc(
       doltliteSetSessionDetached(db, 0);
       rc = checkoutApplyRefs(db, &m);
       if( rc!=SQLITE_OK ) rc = checkoutRestoreOnFailure(db, &m, rc);
+      checkoutFreeSavedSession(&m);
       sqlite3_free(zCurrentBranch);
       zCurrentBranch = 0;
       goto checkout_done;
