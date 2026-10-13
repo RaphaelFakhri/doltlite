@@ -883,17 +883,19 @@ static int cmdRollbackAutocommitToSaved(
   int rc = doltliteLockForRestore(db, &pSaved->sessionHead, &pSaved->wsBasis,
                                   pSaved->nWsForeignAdopt,
                                   &bLocked, &bPeerWrote);
-  /* doltliteHardReset writes the working set itself, so a peer's write is
-  ** kept by restoring in memory only; the saved refs also drop the local
-  ** working-set ref a later refresh would otherwise keep over the peer's. */
+  /* A peer's write is kept by restoring in memory only; the saved refs also
+  ** drop the local working-set ref a later refresh would otherwise keep over
+  ** the peer's. */
   if( rc==SQLITE_OK && bPeerWrote ){
     rc = doltliteRestoreTxnState(db, pSaved);
     doltliteInvalidateSessionWorkingState(db);
     doltliteTxnStateClear(pSaved);
     return rc;
   }
+  /* One durable write: persisting the catalog before the merge and
+  ** violation state are restored would leave them paired on a crash. */
   if( rc==SQLITE_OK ){
-    rc = doltliteHardReset(db, &pSaved->sessionCatalogHash);
+    rc = doltliteApplyHardReset(db, &pSaved->sessionCatalogHash);
   }
   if( rc==SQLITE_OK ){
     rc = doltliteSetSessionBranch(db, pSaved->zSessionBranch);

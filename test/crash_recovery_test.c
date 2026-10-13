@@ -2019,6 +2019,76 @@ static void test_32_merge_abort_atomic_sync(void){
   }
 }
 
+/* An autocommit merge that would add constraint violations is rolled back.
+** A sync crash anywhere in that rollback must leave the pre-merge state,
+** not the pre-merge rows with the merge's violations still recorded. */
+static void test_33_cv_rollback_atomic_sync(void){
+  int before;
+
+  printf("--- Test 33: constraint-violation rollback survives sync crashes ---\n");
+  check("test_33: tracking vfs registered", duraRegister()==SQLITE_OK);
+  for(before=0; before<2; before++){
+    int at;
+    for(at=1; at<=8; at++){
+      const char *dbpath = fresh_db();
+      sqlite3 *db = 0;
+      pid_t pid;
+      int status = 0, crashed;
+      char label[64], desc[160];
+      snprintf(label, sizeof(label), "cv_rollback_%s_sync_%d",
+               before ? "before" : "after", at);
+      check("test_33: setup open", sqlite3_open(dbpath, &db)==SQLITE_OK);
+      check("test_33: setup", execSql(db,
+        "CREATE TABLE p(id INT PRIMARY KEY);"
+        "CREATE TABLE c(id INT PRIMARY KEY, pid INT REFERENCES p(id));"
+        "INSERT INTO p VALUES(1),(2); INSERT INTO c VALUES(10,1);"
+        "SELECT dolt_commit('-Am','base'); SELECT dolt_branch('feat');"
+        "DELETE FROM p WHERE id=2; SELECT dolt_commit('-am','main deletes p 2');"
+        "SELECT dolt_checkout('feat');"
+        "INSERT INTO c VALUES(11,2); SELECT dolt_commit('-am','feat uses p 2');"
+        "SELECT dolt_checkout('main');")==SQLITE_OK);
+      sqlite3_close(db);
+      db = 0;
+
+      pid = fork();
+      if( pid<0 ){ perror("fork"); exit(1); }
+      if( pid==0 ){
+        int rc;
+        if( sqlite3_open_v2(dbpath, &db,
+              SQLITE_OPEN_READWRITE, "dura-track")!=SQLITE_OK ) _exit(10);
+        if( execSql(db, "PRAGMA foreign_keys=ON")!=SQLITE_OK ) _exit(11);
+        gDuraCrashAt = at;
+        gDuraSyncCount = 0;
+        gDuraCrashBefore = before;
+        rc = execSql(db, "SELECT dolt_merge('feat')");
+        gDuraCrashAt = 0;
+        _exit(rc==SQLITE_OK ? 12 : 0);
+      }
+      check("test_33: child waited", waitpid(pid, &status, 0)==pid);
+      crashed = WIFEXITED(status) && WEXITSTATUS(status)==99;
+      snprintf(desc, sizeof(desc), "%s: crashed or rolled back", label);
+      check(desc, crashed || (WIFEXITED(status) && WEXITSTATUS(status)==0));
+      if( at==1 ){
+        snprintf(desc, sizeof(desc), "%s: sync crash exercised", label);
+        check(desc, crashed);
+      }
+      check("test_33: recovery open", sqlite3_open(dbpath, &db)==SQLITE_OK);
+      execSql(db, "SELECT dolt_checkout('feat'); SELECT dolt_checkout('main')");
+      snprintf(desc, sizeof(desc), "%s: pre-merge rows", label);
+      check(desc, strcmp(queryScalarText(db,
+            "SELECT group_concat(id) FROM c"), "10")==0);
+      snprintf(desc, sizeof(desc), "%s: no constraint violations", label);
+      check(desc, queryScalarInt(db,
+            "SELECT count(*) FROM dolt_constraint_violations", -1)==0);
+      snprintf(desc, sizeof(desc), "%s: next commit succeeds", label);
+      check(desc, execSql(db,
+            "SELECT dolt_commit('--allow-empty','-m','next')")==SQLITE_OK);
+      sqlite3_close(db);
+      removeDbFiles(dbpath);
+    }
+  }
+}
+
 int main(void){
   printf("=== DoltLite Crash Recovery Tests ===\n\n");
 
@@ -2058,6 +2128,7 @@ int main(void){
   test_30_crash_on_open();
   test_31_drain_durability_watermark();
   test_32_merge_abort_atomic_sync();
+  test_33_cv_rollback_atomic_sync();
 
   printf("\n=== Results: %d passed, %d failed out of %d tests ===\n",
          nPass, nFail, nPass+nFail);
