@@ -92,10 +92,12 @@ int doltliteFetchInto(ChunkStore *pLocal, DoltliteRemote *pRemote,
 ** in either case. */
 int doltliteClone(ChunkStore *pLocal, DoltliteRemote *pRemote,
                   const char *zUrl, const char *zKeepBranch,
+                  const char *zRemoteName, int bSingleBranch,
                   int *pbMissingBranch, int *pbOccupied);
 
 int doltliteCloneLazy(ChunkStore *pLocal, DoltliteRemote *pRemote,
                       const char *zUrl, const char *zKeepBranch,
+                      const char *zRemoteName, int bSingleBranch,
                       int *pbOccupied);
 
 DoltliteRemote *doltliteFsRemoteOpen(sqlite3_vfs *pVfs, const char *zPath);

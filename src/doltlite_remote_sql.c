@@ -857,20 +857,97 @@ static int doltPushParsedFunc(
   return SQLITE_OK;
 }
 
+/* Push every local branch. A non-fast-forward among several branches is
+** reported with the others that were rejected, matching a multi-ref push. */
+static int pushEveryLocalBranch(
+  sqlite3_context *ctx,
+  const char *zRemoteName,
+  int bForce
+){
+  sqlite3 *db = sqlite3_context_db_handle(ctx);
+  ChunkStore *cs = doltliteGetChunkStore(db);
+  const BranchRef *aBr = 0;
+  char **azBranch = 0;
+  char *zRejected = 0;
+  int nBr = 0;
+  int i;
+  int rc = SQLITE_OK;
+
+  if( !cs ){
+    doltliteVcResultError(ctx, db, "no database");
+    return SQLITE_ERROR;
+  }
+  refsTableGetBranches(&cs->refs, &nBr, &aBr);
+  if( nBr<=0 ){
+    doltliteVcResultError(ctx, db, "push failed: branch or tag not found");
+    return SQLITE_NOTFOUND;
+  }
+  azBranch = sqlite3_malloc(nBr * (int)sizeof(char*));
+  if( !azBranch ){
+    sqlite3_result_error_nomem(ctx);
+    return SQLITE_NOMEM;
+  }
+  memset(azBranch, 0, nBr * sizeof(char*));
+  for(i=0; i<nBr; i++){
+    azBranch[i] = sqlite3_mprintf("%s", aBr[i].zName);
+    if( !azBranch[i] ){
+      doltliteFreeStringArray(azBranch, nBr);
+      sqlite3_result_error_nomem(ctx);
+      return SQLITE_NOMEM;
+    }
+  }
+  for(i=0; i<nBr; i++){
+    int bRejected = 0;
+    int pushRc = doltPushParsedFunc(
+        ctx, zRemoteName, azBranch[i], bForce, 0,
+        nBr>1 ? &bRejected : 0);
+    if( pushRc==SQLITE_OK ) continue;
+    if( !bRejected ){
+      rc = pushRc;
+      break;
+    }
+    zRejected = sqlite3_mprintf("%z%s%s", zRejected,
+        zRejected ? ", " : "", azBranch[i]);
+    if( !zRejected ){
+      rc = SQLITE_NOMEM;
+      sqlite3_result_error_nomem(ctx);
+      break;
+    }
+  }
+  if( rc==SQLITE_OK && zRejected ){
+    const char *zUrl = 0;
+    char *zErr;
+    chunkStoreFindRemote(cs, zRemoteName, &zUrl);
+    zErr = sqlite3_mprintf(
+        "error: failed to push some refs to '%s' (rejected: %s)",
+        zUrl ? zUrl : zRemoteName, zRejected);
+    (void)doltliteVcSealSavepointError(db);
+    rc = zErr ? SQLITE_CONSTRAINT : SQLITE_NOMEM;
+    remoteSqlResultError(ctx, rc, zErr);
+    sqlite3_free(zErr);
+  }
+  sqlite3_free(zRejected);
+  doltliteFreeStringArray(azBranch, nBr);
+  return rc;
+}
+
 static void doltPushFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
   sqlite3 *db = sqlite3_context_db_handle(ctx);
   DoltliteCmdArgs args;
   int bForce = 0;
   int bTags = 0;
+  int bAll = 0;
   DoltliteCmdOption aOption[] = {
     { "force", 0, DOLTLITE_CMD_OPTION_FLAG, &bForce, 0 },
-    { "tags", 0, DOLTLITE_CMD_OPTION_FLAG, &bTags, 0 }
+    { "tags", 0, DOLTLITE_CMD_OPTION_FLAG, &bTags, 0 },
+    { "all", 0, DOLTLITE_CMD_OPTION_FLAG, &bAll, 0 }
   };
   int rc;
 
-  if( argc<2 ){
+  if( argc<1 ){
     doltliteVcResultError(ctx, db,
         "usage: dolt_push(remote, branch [, '--force']) or "
+        "dolt_push('--all', remote) or "
         "dolt_push(remote, '--tags')");
     return;
   }
@@ -880,7 +957,23 @@ static void doltPushFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
     (void)doltliteVcSealSavepointError(db);
     return;
   }
-  if( args.nPositional<(bTags ? 1 : 2) ){
+  if( bAll && bTags ){
+    doltliteCmdArgsClear(&args);
+    doltliteVcResultError(ctx, db, "--all cannot be combined with --tags");
+    return;
+  }
+  if( bAll && args.nPositional>1 ){
+    doltliteCmdArgsClear(&args);
+    doltliteVcResultError(ctx, db,
+        "fatal: --all can't be combined with refspecs");
+    return;
+  }
+  if( bAll && args.nPositional<1 ){
+    doltliteCmdArgsClear(&args);
+    doltliteVcResultError(ctx, db, "remote required");
+    return;
+  }
+  if( !bAll && args.nPositional<(bTags ? 1 : 2) ){
     doltliteCmdArgsClear(&args);
     doltliteVcResultError(ctx, db,
         bTags ? "remote required" : "remote and branch required");
@@ -891,7 +984,9 @@ static void doltPushFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
     doltliteVcResultError(ctx, db, "--tags cannot be combined with a branch");
     return;
   }
-  if( bTags ){
+  if( bAll ){
+    rc = pushEveryLocalBranch(ctx, args.azPositional[0], bForce);
+  }else if( bTags ){
     rc = doltPushParsedFunc(ctx, args.azPositional[0], 0, bForce, bTags, 0);
   }else{
     char *zRejected = 0;
@@ -1444,7 +1539,8 @@ static void doltPullParsed(
   int bFfOnly,
   int bNoFf,
   int bSquash,
-  int bFetchAll
+  int bFetchAll,
+  int bPrune
 ){
   sqlite3 *db = sqlite3_context_db_handle(ctx);
   ChunkStore *cs = doltliteGetChunkStore(db);
@@ -1454,6 +1550,8 @@ static void doltPullParsed(
   ProllyHash trackingCommit, localCommit;
   ProllyHash cleanWorkingSet, ignoredCat;
   DoltliteTxnState savedState;
+  char **azKeep = 0;
+  int nKeep = 0;
   int dirty = 0;
   int rc;
 
@@ -1472,13 +1570,11 @@ static void doltPullParsed(
 
   /* No branch argument fetches every remote branch, as dolt_fetch does,
   ** then merges this branch's upstream. An explicit branch fetches only
-  ** that one. Tags ride along with the commits those fetches install. */
-  if( bFetchAll ){
-    char **azNames = 0;
-    char *zUrlOwned = 0;
-    int nNames = 0;
-    int i;
-    rc = parseRemoteBranchNames(pRemote, &azNames, &nNames);
+  ** that one. Tags ride along with the commits those fetches install.
+  ** --prune needs the remote's branch list either way, and unlike fetch
+  ** it is allowed together with a branch. */
+  if( bFetchAll || bPrune ){
+    rc = parseRemoteBranchNames(pRemote, &azKeep, &nKeep);
     if( rc!=SQLITE_OK ){
       const char *zMsg = remoteSqlRemoteMsg(pRemote, rc);
       char *zOwned = zMsg ? sqlite3_mprintf("%s", zMsg) : 0;
@@ -1490,23 +1586,30 @@ static void doltPullParsed(
       sqlite3_free(zOwned);
       return;
     }
+  }
+  if( bFetchAll ){
+    char *zUrlOwned = 0;
+    int i;
     /* zUrl points into cs->refs.aRemotes, which a fetch may reallocate. */
     zUrlOwned = sqlite3_mprintf("%s", zUrl);
     if( !zUrlOwned ){
       pRemote->xClose(pRemote);
-      doltliteFreeStringArray(azNames, nNames);
+      doltliteFreeStringArray(azKeep, nKeep);
       remoteSqlRestoreAndReport(ctx, db, cs, &savedState, SQLITE_NOMEM, 0);
       return;
     }
     pRemote->xClose(pRemote);
     pRemote = 0;
-    for(i=0; i<nNames && rc==SQLITE_OK; i++){
+    for(i=0; i<nKeep && rc==SQLITE_OK; i++){
       char *zFetchErr = 0;
       int missing = 0;
+      if( !azKeep[i] ) continue;
       rc = remoteSqlFetchBranch(db, cs, zUrlOwned, zRemoteName,
-                                azNames[i], azNames[i], &missing, &zFetchErr);
-      if( missing && strcmp(azNames[i], zRemoteBranch)!=0 ){
+                                azKeep[i], azKeep[i], &missing, &zFetchErr);
+      if( missing && strcmp(azKeep[i], zRemoteBranch)!=0 ){
         sqlite3_free(zFetchErr);
+        sqlite3_free(azKeep[i]);
+        azKeep[i] = 0;
         rc = SQLITE_OK;
         continue;
       }
@@ -1517,12 +1620,11 @@ static void doltPullParsed(
                ? "fetch failed: branch not found on remote" : "fetch failed"));
         sqlite3_free(zFetchErr);
         sqlite3_free(zUrlOwned);
-        doltliteFreeStringArray(azNames, nNames);
+        doltliteFreeStringArray(azKeep, nKeep);
         return;
       }
     }
     sqlite3_free(zUrlOwned);
-    doltliteFreeStringArray(azNames, nNames);
   }else{
     rc = doltliteFetch(cs, pRemote, zRemoteName, zRemoteBranch);
     if( rc!=SQLITE_OK ){
@@ -1530,6 +1632,7 @@ static void doltPullParsed(
       const char *zMsg = remoteSqlFetchMsg(pRemote, rc);
       char *zOwned = zMsg ? sqlite3_mprintf("%s", zMsg) : 0;
       pRemote->xClose(pRemote);
+      doltliteFreeStringArray(azKeep, nKeep);
       remoteSqlRestoreAndReport(ctx, db, cs, &savedState, rc,
         zOwned ? zOwned
         : (rc==SQLITE_NOTFOUND ? "fetch failed: branch not found on remote" : 0));
@@ -1538,6 +1641,20 @@ static void doltPullParsed(
     }
     pRemote->xClose(pRemote);
   }
+  if( rc==SQLITE_OK && bPrune ){
+    PruneTrackingCtx prune;
+    prune.zRemote = zRemoteName;
+    prune.azKeep = azKeep;
+    prune.nKeep = nKeep;
+    rc = doltliteMutateRefs(db, mutatePruneTracking, &prune);
+    if( rc!=SQLITE_OK ){
+      doltliteFreeStringArray(azKeep, nKeep);
+      remoteSqlRestoreAndReport(ctx, db, cs, &savedState, rc, 0);
+      return;
+    }
+  }
+  doltliteFreeStringArray(azKeep, nKeep);
+  azKeep = 0;
 
   rc = chunkStoreFindTracking(
       cs, zRemoteName, zRemoteBranch, &trackingCommit);
@@ -1634,10 +1751,17 @@ static void doltPullParsed(
       doltliteTxnStateClear(&savedState);
       /* Fetch already stored this commit on the tracking ref. Merging the
       ** "<remote>/<branch>" name would prefer a local branch of that name
-      ** and leave the fetched commit out. */
-      doltliteHashToHex(&trackingCommit, zTrackingHash);
-      zMergeMsg = sqlite3_mprintf("Merge branch '%s/%s' into %s",
-                                  zRemoteName, zRemoteBranch, zLocalBranch);
+      ** and leave the fetched commit out. The message names the remote
+      ** branch and the remote URL, not the tracking ref. */
+      {
+        const char *zMergeUrl = 0;
+        chunkStoreFindRemote(cs, zRemoteName, &zMergeUrl);
+        doltliteHashToHex(&trackingCommit, zTrackingHash);
+        zMergeMsg = sqlite3_mprintf("Merge branch '%s' of %s into %s",
+                                    zRemoteBranch,
+                                    zMergeUrl ? zMergeUrl : zRemoteName,
+                                    zLocalBranch);
+      }
       if( !zMergeMsg ){
         sqlite3_result_error_nomem(ctx);
         return;
@@ -1732,11 +1856,12 @@ static void doltPullParsed(
 static void doltPullFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
   sqlite3 *db = sqlite3_context_db_handle(ctx);
   DoltliteCmdArgs args;
-  int bFfOnly = 0, bNoFf = 0, bSquash = 0;
+  int bFfOnly = 0, bNoFf = 0, bSquash = 0, bPrune = 0;
   DoltliteCmdOption aOption[] = {
     { "ff-only", 0, DOLTLITE_CMD_OPTION_FLAG, &bFfOnly, 0 },
     { "no-ff", 0, DOLTLITE_CMD_OPTION_FLAG, &bNoFf, 0 },
-    { "squash", 0, DOLTLITE_CMD_OPTION_FLAG, &bSquash, 0 }
+    { "squash", 0, DOLTLITE_CMD_OPTION_FLAG, &bSquash, 0 },
+    { "prune", 'p', DOLTLITE_CMD_OPTION_FLAG, &bPrune, 0 }
   };
   const char *zBranch;
   int rc;
@@ -1776,7 +1901,8 @@ static void doltPullFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
     return;
   }
   doltPullParsed(ctx, args.nPositional>0 ? args.azPositional[0] : "origin",
-                 zBranch, bFfOnly, bNoFf, bSquash, args.nPositional<=1);
+                 zBranch, bFfOnly, bNoFf, bSquash, args.nPositional<=1,
+                 bPrune);
   doltliteCmdArgsClear(&args);
 }
 
@@ -1788,14 +1914,20 @@ static void doltCloneFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
   DoltliteCmdOption aOption[] = {
     { "lazy", 0, DOLTLITE_CMD_OPTION_FLAG, 0, 0 },
     { "revision", 0, DOLTLITE_CMD_OPTION_VALUE, 0, 0 },
-    { "branch", 'b', DOLTLITE_CMD_OPTION_VALUE, 0, 0 }
+    { "branch", 'b', DOLTLITE_CMD_OPTION_VALUE, 0, 0 },
+    { "remote", 0, DOLTLITE_CMD_OPTION_VALUE, 0, 0 },
+    { "single-branch", 0, DOLTLITE_CMD_OPTION_FLAG, 0, 0 }
   };
   const char *zUrl;
   char *zUrlOwned = 0;
   const char *zRevision = 0;
   const char *zBranchOpt = 0;
+  const char *zRemoteOpt = 0;
+  const char *zRemoteName = "origin";
+  char *zRemoteOwned = 0;
   DoltliteTxnState savedState;
   int bLazy = 0;
+  int bSingle = 0;
   int dirty = 0;
   int branchMissing = 0;
   int occupied = 0;
@@ -1804,13 +1936,16 @@ static void doltCloneFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
   if( !cs ){ doltliteVcResultError(ctx, db, "no database"); return; }
   if( argc<1 ){
     doltliteVcResultError(ctx, db,
-      "usage: dolt_clone(['--lazy'] ['--revision' rev] ['--branch' name], url)");
+      "usage: dolt_clone(['--lazy'] ['--revision' rev] ['--branch' name] "
+      "['--remote' name] ['--single-branch'], url)");
     return;
   }
 
   aOption[0].pSeen = &bLazy;
   aOption[1].pzValue = &zRevision;
   aOption[2].pzValue = &zBranchOpt;
+  aOption[3].pzValue = &zRemoteOpt;
+  aOption[4].pSeen = &bSingle;
   rc = doltliteCmdParseArgs(ctx, argc, argv, aOption, ArraySize(aOption),
                             0, &args);
   if( rc!=SQLITE_OK ){
@@ -1840,16 +1975,31 @@ static void doltCloneFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
     doltliteVcResultError(ctx, db, "--revision requires --lazy");
     return;
   }
+  if( zRemoteOpt ){
+    zRemoteName = remoteSqlNormalizeName(ctx, zRemoteOpt, &zRemoteOwned);
+    if( !zRemoteName ){
+      doltliteCmdArgsClear(&args);
+      return;
+    }
+    if( !zRemoteName[0] || !remoteSqlNameIsValid(zRemoteName) ){
+      sqlite3_free(zRemoteOwned);
+      doltliteCmdArgsClear(&args);
+      doltliteVcResultError(ctx, db, "remote name invalid");
+      return;
+    }
+  }
   zUrl = args.azPositional[0];
   doltliteCmdArgsClear(&args);
   memset(&savedState, 0, sizeof(savedState));
 
   rc = doltliteHasUncommittedChanges(db, &dirty);
   if( rc!=SQLITE_OK ){
+    sqlite3_free(zRemoteOwned);
     sqlite3_result_error_code(ctx, rc);
     return;
   }
   if( dirty ){
+    sqlite3_free(zRemoteOwned);
     doltliteVcResultError(ctx, db,
       "database has uncommitted changes — clone into a fresh database");
     return;
@@ -1870,6 +2020,7 @@ static void doltCloneFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
       doltliteCommitClear(&c);
     }
     if( !virgin ){
+      sqlite3_free(zRemoteOwned);
       doltliteVcResultError(ctx, db, "database is not empty — clone into a fresh database");
       return;
     }
@@ -1877,6 +2028,7 @@ static void doltCloneFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
 
   rc = doltliteSaveTxnState(db, &savedState);
   if( rc!=SQLITE_OK ){
+    sqlite3_free(zRemoteOwned);
     (void)doltliteVcSealSavepointError(db);
     sqlite3_result_error_code(ctx, rc);
     return;
@@ -1889,6 +2041,7 @@ static void doltCloneFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
   if( zUrl && strncmp(zUrl, "file://", 7)==0 ){
     zUrlOwned = remoteSqlAbsoluteFileUrl(chunkFileGetVfs(&cs->file), zUrl);
     if( !zUrlOwned ){
+      sqlite3_free(zRemoteOwned);
       remoteSqlRestoreAndReport(ctx, db, cs, &savedState, SQLITE_CANTOPEN,
                                 "failed to resolve remote URL");
       return;
@@ -1901,6 +2054,7 @@ static void doltCloneFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
     int openRc = remoteSqlOpenErrorCode(zUrl);
     const char *zMsg = openRc==SQLITE_CANTOPEN ? "failed to open remote"
       : "failed to open remote (URL must start with file:// or http://)";
+    sqlite3_free(zRemoteOwned);
     sqlite3_free(zUrlOwned);
     remoteSqlRestoreAndReport(ctx, db, cs, &savedState, openRc, zMsg);
     return;
@@ -1917,6 +2071,7 @@ static void doltCloneFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
     doltliteFreeStringArray(azNames, nNames);
     if( rc!=SQLITE_OK || !found ){
       pRemote->xClose(pRemote);
+      sqlite3_free(zRemoteOwned);
       sqlite3_free(zUrlOwned);
       remoteSqlRestoreAndReport(ctx, db, cs, &savedState,
           rc!=SQLITE_OK ? rc : SQLITE_ERROR,
@@ -1929,6 +2084,7 @@ static void doltCloneFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
     rc = doltliteOriginSourceEnable(cs, db, 0);
     if( rc!=SQLITE_OK ){
       pRemote->xClose(pRemote);
+      sqlite3_free(zRemoteOwned);
       sqlite3_free(zUrlOwned);
       remoteSqlRestoreAndReport(ctx, db, cs, &savedState, rc,
                                 "failed to initialize lazy clone");
@@ -1937,9 +2093,13 @@ static void doltCloneFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
   }
   branchMissing = 0;
   occupied = 0;
-  rc = bLazy ? doltliteCloneLazy(cs, pRemote, zUrl, zRevision, &occupied)
+  rc = bLazy ? doltliteCloneLazy(cs, pRemote, zUrl, zRevision,
+                                 zRemoteName, bSingle, &occupied)
              : doltliteClone(cs, pRemote, zUrl, zBranchOpt,
+                             zRemoteName, bSingle,
                              &branchMissing, &occupied);
+  /* The clone copied the name into the remote row. */
+  sqlite3_free(zRemoteOwned);
   if( rc!=SQLITE_OK ){
     const char *zMsg = remoteSqlRemoteMsg(pRemote, rc);
     char *zOwned = 0;
