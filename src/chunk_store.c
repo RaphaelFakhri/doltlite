@@ -439,6 +439,7 @@ static int csOpen(
 ){
   int rc;
   int exists = 0;
+  int emptyFile = 0;
 
   memset(cs, 0, sizeof(*cs));
   csIndexCacheSetBudget(cs, 200*1024);
@@ -504,8 +505,25 @@ static int csOpen(
       chunkStoreClose(cs);
       return rc;
     }
+    /* Some VFSes report a 0-byte file as present. Stock opens it empty. */
     if( mainSize==0 ){
       exists = 0;
+      emptyFile = 1;
+      if( (flags & SQLITE_OPEN_READONLY)!=0 ) cs->readOnly = 1;
+    }
+  }else{
+    /* unix xAccess treats a 0-byte regular file as absent. It is still a
+    ** file, and stock opens it as an empty database. A missing path fails
+    ** the size probe and stays absent. */
+    i64 mainSize = 0;
+    int rcSize = csFileSizeByName(pVfs, cs->file.zFilename, &mainSize);
+    if( rcSize==SQLITE_NOMEM || rcSize==SQLITE_IOERR_NOMEM ){
+      chunkStoreClose(cs);
+      return rcSize;
+    }
+    if( rcSize==SQLITE_OK && mainSize==0 ){
+      emptyFile = 1;
+      if( (flags & SQLITE_OPEN_READONLY)!=0 ) cs->readOnly = 1;
     }
   }
 
@@ -566,32 +584,48 @@ static int csOpen(
       }
     }
     rc = csReadManifest(cs);
-    /* Truncate-to-empty only for NOTADB, not for a damaged-but-identified header. */
-    if( rc==SQLITE_NOTADB
-     && (flags & SQLITE_OPEN_CREATE)!=0 && !cs->readOnly ){
-      /* Recover only a proven first-commit crash to empty. */
+    /* Truncate-to-empty only for NOTADB, not for a damaged-but-identified
+    ** header. SQLITE_OPEN_CREATE keeps the full scan. Other modes recover
+    ** only an all-zero header sector, so a foreign file is not read through.
+    ** Read-only presents that empty store and does not rewrite the file. */
+    if( rc==SQLITE_NOTADB ){
+      u8 aHdr[CHUNK_MANIFEST_SIZE];
+      int allZero = 0;
       int everCommitted = 1;
       int creationRoot = 0;
-      int rc2 = csScanForCommittedRoot(cs, &everCommitted, &creationRoot);
-      if( rc2==SQLITE_OK && !everCommitted && !creationRoot ){
-        u8 aHdr[CHUNK_MANIFEST_SIZE];
-        rc2 = sqlite3OsRead(cs->file.pFile, aHdr, CHUNK_MANIFEST_SIZE, 0);
-        if( rc2==SQLITE_OK ){
-          int i;
-          for(i=0; i<CHUNK_MANIFEST_SIZE && aHdr[i]==0; i++){}
-          creationRoot = (i==CHUNK_MANIFEST_SIZE);
-        }
+      int rc2;
+      int i;
+      rc2 = sqlite3OsRead(cs->file.pFile, aHdr, CHUNK_MANIFEST_SIZE, 0);
+      if( rc2==SQLITE_OK ){
+        for(i=0; i<CHUNK_MANIFEST_SIZE && aHdr[i]==0; i++){}
+        allZero = (i==CHUNK_MANIFEST_SIZE);
       }
-      if( rc2==SQLITE_OK && !everCommitted && creationRoot ){
-        cs->index.nChunks = 0;
-        cs->index.iIndexOffset = 0;
-        cs->index.nIndexSize = 0;
-        cs->wal.iWalOffset = CHUNK_MANIFEST_SIZE;
-        cs->file.iFileSize = 0;
-        rc = sqlite3OsTruncate(cs->file.pFile, 0);
-        if( rc==SQLITE_OK ){
-          csMarkRefsCommitted(cs);
-          return SQLITE_OK;
+      if( ((flags & SQLITE_OPEN_CREATE)!=0 && !cs->readOnly) || allZero ){
+        rc2 = csScanForCommittedRoot(cs, &everCommitted, &creationRoot);
+        if( rc2==SQLITE_OK && !everCommitted && !creationRoot && allZero ){
+          creationRoot = 1;
+        }
+        if( rc2==SQLITE_OK && !everCommitted && creationRoot ){
+          cs->index.nChunks = 0;
+          cs->index.iIndexOffset = 0;
+          cs->index.nIndexSize = 0;
+          cs->wal.iWalOffset = CHUNK_MANIFEST_SIZE;
+          if( cs->readOnly ){
+            i64 sz = 0;
+            rc2 = sqlite3OsFileSize(cs->file.pFile, &sz);
+            if( rc2==SQLITE_OK ){
+              cs->file.iFileSize = sz;
+              csMarkRefsCommitted(cs);
+              return SQLITE_OK;
+            }
+          }else{
+            cs->file.iFileSize = 0;
+            rc = sqlite3OsTruncate(cs->file.pFile, 0);
+            if( rc==SQLITE_OK ){
+              csMarkRefsCommitted(cs);
+              return SQLITE_OK;
+            }
+          }
         }
       }
     }
@@ -660,7 +694,7 @@ static int csOpen(
       return rc;
     }
   }else{
-    if( !(flags & SQLITE_OPEN_CREATE) ){
+    if( !emptyFile && !(flags & SQLITE_OPEN_CREATE) ){
       chunkStoreClose(cs);
       return SQLITE_CANTOPEN;
     }
