@@ -766,7 +766,8 @@ int chunkStoreCommitRetryable(
 }
 
 int chunkStoreCommit(ChunkStore *cs){
-  int rc = chunkStoreCommitWithBusyHandler(cs, 0, 0);
+  int rc = chunkStoreCommitWithBusyHandler(cs, cs->xDefaultBusy,
+                                           cs->pDefaultBusyArg);
   /* Settled either way: a failed commit restored the committed refs. */
   csDropTxnSequences(cs);
   return rc;
