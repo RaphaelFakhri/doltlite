@@ -3635,7 +3635,22 @@ static void run_fetch_ref_install_survives_window_gc(void){
 
   gGcWindowPath = localPath;
   doltliteTestSetBeforeRefInstallHook(gcInFetchWindow, 0);
-  res = queryScalarText(localDb, "SELECT dolt_fetch('origin','main')");
+  {
+    char *zErr = 0;
+    int rc = sqlite3_exec(localDb, "SELECT dolt_fetch('origin','main')",
+                          0, 0, &zErr);
+    res = rc==SQLITE_OK ? "0" : "failed";
+    if( gGcWindowCollected ){
+      /* A peer's gc swept the fetched chunks: a retryable busy, not a
+      ** corrupt store or a push error. */
+      check("window_gc_fetch_reports_busy", (rc&0xff)==SQLITE_BUSY);
+      check("window_gc_fetch_message", zErr!=0
+            && strstr(zErr, "fetch")!=0 && strstr(zErr, "push")==0
+            && strstr(zErr, "lazy")==0);
+      if( zErr ) printf("  fetch error: rc=%d %s\n", rc, zErr);
+    }
+    sqlite3_free(zErr);
+  }
   if( gGcWindowCollected ){
     check("window_gc_fetch_reports_failure", res && strstr(res, "0")!=res);
   }else{
@@ -3670,6 +3685,59 @@ static void run_fetch_ref_install_survives_window_gc(void){
         execSqlSilent(afterDb, "SELECT dolt_gc()")==SQLITE_OK);
 
   sqlite3_close(afterDb);
+  removeDbFiles(remotePath);
+  removeDbFiles(localPath);
+}
+
+/* Same window for a remote that is not origin: no lazy-clone source is
+** consulted, and the refusal must still read as a fetch error. */
+static void run_fetch_window_gc_named_remote(void){
+  sqlite3 *remoteDb = 0;
+  sqlite3 *localDb = 0;
+  char remotePath[256];
+  char localPath[256];
+  char sql[512];
+  char *zErr = 0;
+  int rc;
+
+  printf("=== Fetch Window GC Named Remote Test ===\n\n");
+  make_dbpath(remotePath, sizeof(remotePath), "test_fetch_window_gc_up_remote");
+  make_dbpath(localPath, sizeof(localPath), "test_fetch_window_gc_up_local");
+  removeDbFiles(remotePath);
+  removeDbFiles(localPath);
+  check("window_gc_up_open_remote", open_db(remotePath, &remoteDb)==SQLITE_OK);
+  check("window_gc_up_seed_remote", execSql(remoteDb,
+    "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);"
+    "INSERT INTO t VALUES(1,'base');"
+    "SELECT dolt_commit('-A','-m','base');")==SQLITE_OK);
+  check("window_gc_up_open_local", open_db(localPath, &localDb)==SQLITE_OK);
+  check("window_gc_up_seed_local", execSql(localDb,
+    "CREATE TABLE u(id INTEGER PRIMARY KEY);"
+    "SELECT dolt_commit('-A','-m','local');")==SQLITE_OK);
+  snprintf(sql, sizeof(sql),
+           "SELECT dolt_remote('add','up','file://%s')", remotePath);
+  check("window_gc_up_add_remote", execSql(localDb, sql)==SQLITE_OK);
+
+  gGcWindowPath = localPath;
+  doltliteTestSetBeforeRefInstallHook(gcInFetchWindow, 0);
+  rc = sqlite3_exec(localDb, "SELECT dolt_fetch('up','main')", 0, 0, &zErr);
+  doltliteTestSetBeforeRefInstallHook(0, 0);
+  gGcWindowPath = 0;
+  if( gGcWindowCollected ){
+    check("window_gc_up_fetch_reports_busy", (rc&0xff)==SQLITE_BUSY);
+    check("window_gc_up_fetch_message", zErr!=0
+          && strstr(zErr, "fetch")!=0 && strstr(zErr, "push")==0);
+    if( zErr ) printf("  fetch error: rc=%d %s\n", rc, zErr);
+  }else{
+    printf("  SKIP: window_gc_up_fetch_reports_busy (in-window gc unavailable)\n");
+  }
+  sqlite3_free(zErr);
+  check("window_gc_up_retry_fetch",
+        execSqlSilent(localDb, "SELECT dolt_fetch('up','main')")==SQLITE_OK);
+  check("window_gc_up_retry_integrity",
+        strcmp(queryScalarText(localDb, "PRAGMA integrity_check"), "ok")==0);
+  sqlite3_close(localDb);
+  sqlite3_close(remoteDb);
   removeDbFiles(remotePath);
   removeDbFiles(localPath);
 }
@@ -18270,6 +18338,7 @@ static const RegressionCase aCases[] = {
   { "refs_commit_conflicting_peer_ref_fails", "Refs Commit Conflicting Peer Ref Fails Test", run_refs_commit_conflicting_peer_ref_fails },
   { "remote_refs_corruption", "Remote Refs Corruption Test", run_remote_refs_corruption },
   { "fetch_ref_install_survives_window_gc", "Fetch Ref Install Survives Window GC Test", run_fetch_ref_install_survives_window_gc },
+  { "fetch_window_gc_named_remote", "Fetch Window GC Named Remote Test", run_fetch_window_gc_named_remote },
   { "clone_ref_install_survives_window_gc", "Clone Ref Install Survives Window GC Test", run_clone_ref_install_survives_window_gc },
   { "clone_deleted_branch_installs_nothing", "Clone Deleted Branch Installs Nothing Test", run_clone_deleted_branch_installs_nothing },
   { "fetch_preserves_concurrent_local_refs", "Fetch Preserves Concurrent Local Refs Test", run_fetch_preserves_concurrent_local_refs },

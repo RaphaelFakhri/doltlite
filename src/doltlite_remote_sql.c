@@ -279,6 +279,16 @@ static const char *remoteSqlRemoteMsg(DoltliteRemote *pRemote, int rc){
   return 0;
 }
 
+static const char *remoteSqlFetchMsg(DoltliteRemote *pRemote, int rc){
+  if( rc==SQLITE_BUSY_SNAPSHOT && !(pRemote && pRemote->xErrMsg
+                                    && pRemote->xErrMsg(pRemote)
+                                    && pRemote->xErrMsg(pRemote)[0]) ){
+    return "fetch failed (another connection collected the fetched data; "
+           "retry the fetch)";
+  }
+  return remoteSqlRemoteMsg(pRemote, rc);
+}
+
 static void remoteSqlRestoreAndReport(
   sqlite3_context *ctx,
   sqlite3 *db,
@@ -1036,7 +1046,7 @@ static int remoteSqlFetchBranch(
   }
   rc = doltliteFetchInto(cs, pRemote, zRemoteName, zBranch, zTrack);
   if( rc!=SQLITE_OK && pzErr ){
-    const char *zMsg = remoteSqlRemoteMsg(pRemote, rc);
+    const char *zMsg = remoteSqlFetchMsg(pRemote, rc);
     if( zMsg ){
       *pzErr = sqlite3_mprintf("%s", zMsg);
     }else if( rc==SQLITE_NOTFOUND ){
@@ -1499,7 +1509,7 @@ static void doltPullParsed(
     rc = doltliteFetch(cs, pRemote, zRemoteName, zRemoteBranch);
     if( rc!=SQLITE_OK ){
       /* The message lives in the remote; copy it before closing. */
-      const char *zMsg = remoteSqlRemoteMsg(pRemote, rc);
+      const char *zMsg = remoteSqlFetchMsg(pRemote, rc);
       char *zOwned = zMsg ? sqlite3_mprintf("%s", zMsg) : 0;
       pRemote->xClose(pRemote);
       remoteSqlRestoreAndReport(ctx, db, cs, &savedState, rc,

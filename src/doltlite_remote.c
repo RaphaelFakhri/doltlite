@@ -2072,7 +2072,12 @@ static int installFetchedRefs(
     ProllyHash aRoots[1];
     memcpy(&aRoots[0], pRemoteCommit, sizeof(aRoots[0]));
     rc = remoteValidateGraph(pLocal, aRoots, 1);
-    if( rc==SQLITE_NOTFOUND || rc==SQLITE_CORRUPT ) rc = SQLITE_BUSY_SNAPSHOT;
+    if( rc==SQLITE_NOTFOUND || rc==SQLITE_CORRUPT ){
+      /* The miss also recorded a missing-chunk error on the origin source,
+      ** which would report a healthy store as corrupt. */
+      sqlite3_free(chunkStoreSourceTakeError(pLocal, 0));
+      rc = SQLITE_BUSY_SNAPSHOT;
+    }
   }
   if( rc==SQLITE_OK ){
     rc = chunkStoreSerializeRefsToBlob(
