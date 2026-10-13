@@ -777,7 +777,8 @@ static int localPauseDuringPut(void){
     return SQLITE_OK;
   }
   pReady = 0;
-  sqlite3_snprintf(sizeof(zReady), zReady, "%s.ready", zPause);
+  memset(zReady, 0, sizeof(zReady));
+  sqlite3_snprintf(sizeof(zReady)-1, zReady, "%s.ready", zPause);
   if( sqlite3OsOpenMalloc(pVfs, zReady, &pReady,
         SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_MAIN_DB, 0)
       ==SQLITE_OK ){
@@ -2369,7 +2370,8 @@ static void clonePauseBeforeRefs(void){
   if( !pVfs ) return;
   exists = 1;
   pReady = 0;
-  sqlite3_snprintf(sizeof(zReady), zReady, "%s.ready", zPause);
+  memset(zReady, 0, sizeof(zReady));
+  sqlite3_snprintf(sizeof(zReady)-1, zReady, "%s.ready", zPause);
   if( sqlite3OsOpenMalloc(pVfs, zReady, &pReady,
         SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_MAIN_DB, 0)
       ==SQLITE_OK ){

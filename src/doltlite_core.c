@@ -243,7 +243,9 @@ void doltliteTestPause(const char *zEnv){
   if( !zPause || !zPause[0] ) return;
   pVfs = sqlite3_vfs_find(0);
   if( !pVfs ) return;
-  sqlite3_snprintf(sizeof(zReady), zReady, "%s.ready", zPause);
+  /* A main-db open needs the name double-nul terminated. */
+  memset(zReady, 0, sizeof(zReady));
+  sqlite3_snprintf(sizeof(zReady)-1, zReady, "%s.ready", zPause);
   {
     sqlite3_file *pReady = 0;
     int openRc = sqlite3OsOpenMalloc(pVfs, zReady, &pReady,
