@@ -302,6 +302,12 @@ struct ChunkStore {
   int nStoredHitAlloc;
   u32 storedHitReloadGen;
   u8 storedHitLost;
+  /* Commits a VC command resolved by name, kept until the command ends. Its
+  ** result may reference them without a put, so a sweep is caught only here. */
+  ProllyHash aSourceHit[4];
+  int nSourceHit;
+  u32 sourceHitReloadGen;
+  u8 sourceHitLost;
   const SavedRefsState *pDetachedRefs;
   u8 corruptMidStream;    /* Mid-stream WAL damage: reads/commits CORRUPT;
                           ** open still succeeds (stock surfaces on first use) */
@@ -482,6 +488,8 @@ int chunkStoreCommitWithBusyHandler(ChunkStore *cs, int (*xBusy)(void*),
                                     void *pBusyArg);
 int chunkStoreWriteRefused(ChunkStore *cs);
 void chunkStoreClearStoredHits(ChunkStore *cs);
+void chunkStoreNoteSourceCommit(ChunkStore *cs, const ProllyHash *h);
+void chunkStoreClearSourceCommits(ChunkStore *cs);
 int chunkStoreStoredHitSwept(ChunkStore *cs, int *pSwept);
 
 int chunkStoreCopyIntoEmpty(ChunkStore *pSrc, ChunkStore *pDest);

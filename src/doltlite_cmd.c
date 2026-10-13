@@ -84,8 +84,9 @@ static void doltliteCommandFunc(
   }
   /* A failed command abandons what it built; its stored hits must not
   ** refuse the next publish. */
-  if( ctx->isError && !pOuter && doltliteGetChunkStore(db) ){
-    chunkStoreClearStoredHits(doltliteGetChunkStore(db));
+  if( !pOuter && doltliteGetChunkStore(db) ){
+    if( ctx->isError ) chunkStoreClearStoredHits(doltliteGetChunkStore(db));
+    chunkStoreClearSourceCommits(doltliteGetChunkStore(db));
   }
   db->pVcCommand = pOuter;
 }
