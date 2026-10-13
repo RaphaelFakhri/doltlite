@@ -1553,6 +1553,16 @@ static int remoteValidateScopedRefsUpdate(
     if( anc==0 ){ rc = SQLITE_CONSTRAINT; goto done; }
   }
 
+  /* The declared working set may stay as it is or become empty, which is
+  ** what a push writes. Any other hash can name a stored commit chunk, and
+  ** the branch then cannot be opened. Force does not widen this. */
+  if( !bDelete && incB && !prollyHashIsEmpty(&incB->workingSetHash)
+   && (curB==0 || prollyHashCompare(&incB->workingSetHash,
+                                    &curB->workingSetHash)!=0) ){
+    rc = SQLITE_CONSTRAINT;
+    goto done;
+  }
+
   rc = SQLITE_OK;
 
 done:

@@ -464,6 +464,9 @@ int main(void){
     chunkStoreSetBranchWorkingSet(&working, "foo", &wsHash);
     memset(&tmp, 0, sizeof(tmp));
     chunkStoreSerializeRefsToBlob(&working, &blob, &n);
+    rc = doltliteValidateScopedRefsUpdate(&working, blob, n, "foo", 0, 0);
+    check("allow a push that leaves a clean working set unchanged",
+          rc==SQLITE_OK);
     chunkStoreLoadRefsFromBlob(&tmp, blob, n);
     sqlite3_free(blob);
     blob = 0;
@@ -476,6 +479,57 @@ int main(void){
     sqlite3_free(blob);
     chunkStoreClose(&working);
     remove(DOLTLITE_TEST_TMPDIR "/scoped_refs_working.db");
+  }
+
+  /* Attack: an unforced push changes nothing but the declared branch's
+  ** working set, pointing it at that branch's commit chunk. */
+  {
+    ChunkStore tmp;
+    u8 *blob = 0; int n = 0;
+    memset(&tmp, 0, sizeof(tmp));
+    chunkStoreLoadRefsFromBlob(&tmp, curBlob, nCur);
+    chunkStoreSetBranchWorkingSet(&tmp, "main", &Ha);
+    chunkStoreSerializeRefsToBlob(&tmp, &blob, &n);
+    chunkStoreClose(&tmp);
+    rc = doltliteValidateScopedRefsUpdate(&cs, blob, n, "main", 0, 0);
+    check("reject working set retarget of main", rc==SQLITE_CONSTRAINT);
+    rc = doltliteValidateScopedRefsUpdate(&cs, blob, n, "main", 1, 0);
+    check("force does not authorize a working set retarget",
+          rc==SQLITE_CONSTRAINT);
+    sqlite3_free(blob);
+
+    memset(&tmp, 0, sizeof(tmp));
+    chunkStoreLoadRefsFromBlob(&tmp, curBlob, nCur);
+    chunkStoreSetBranchWorkingSet(&tmp, "foo", &Hd);
+    chunkStoreSerializeRefsToBlob(&tmp, &blob, &n);
+    chunkStoreClose(&tmp);
+    rc = doltliteValidateScopedRefsUpdate(&cs, blob, n, "foo", 0, 0);
+    check("reject working set retarget of a non-default branch",
+          rc==SQLITE_CONSTRAINT);
+    sqlite3_free(blob);
+  }
+
+  {
+    ChunkStore fresh;
+    ChunkStore tmp;
+    u8 *blob = 0; int n = 0;
+    check("open fresh target for a working set",
+          openStore(&fresh, DOLTLITE_TEST_TMPDIR "/scoped_refs_ws_fresh.db")==SQLITE_OK);
+    memset(&tmp, 0, sizeof(tmp));
+    chunkStoreSetDefaultBranch(&tmp, "foo");
+    chunkStoreAddBranch(&tmp, "foo", &Hb);
+    chunkStoreSetBranchWorkingSet(&tmp, "foo", &Hb);
+    chunkStoreSerializeRefsToBlob(&tmp, &blob, &n);
+    chunkStoreClose(&tmp);
+    rc = doltliteValidateScopedRefsUpdate(&fresh, blob, n, "foo", 0, 0);
+    check("reject creating a branch whose working set is not empty",
+          rc==SQLITE_CONSTRAINT);
+    rc = doltliteValidateScopedRefsUpdate(&fresh, blob, n, "foo", 1, 0);
+    check("force does not authorize a new non-empty working set",
+          rc==SQLITE_CONSTRAINT);
+    sqlite3_free(blob);
+    chunkStoreClose(&fresh);
+    remove(DOLTLITE_TEST_TMPDIR "/scoped_refs_ws_fresh.db");
   }
 
   sqlite3_free(curBlob);
