@@ -386,7 +386,12 @@ static void csCommitPublishStaging(
   csMarkRefsCommitted(cs);
 }
 
-static int csCommitToFile(ChunkStore *cs, int (*xBusy)(void*), void *pBusyArg){
+static int csCommitToFile(
+  ChunkStore *cs,
+  int (*xBusy)(void*),
+  void *pBusyArg,
+  int retryBusy
+){
   int rc;
   int i;
   i64 fileSize = 0;
@@ -652,7 +657,7 @@ commit_done:
   if( publicationLocked ) sqlite3OsUnlock(pPublicationFile, SQLITE_LOCK_NONE);
   csCloseFile(pRetiredFile);
   csFileUnlock(lockFd, &lockName);
-  (void)csRestoreCommittedRefsState(cs);
+  if( !retryBusy || rc!=SQLITE_BUSY ) (void)csRestoreCommittedRefsState(cs);
   if( aCommittedPending!=aSmallCommittedPending ){
     sqlite3_free(aCommittedPending);
   }
@@ -669,7 +674,8 @@ int chunkStoreWriteRefused(ChunkStore *cs){
 static int csCommitWithBusyHandler(
   ChunkStore *cs,
   int (*xBusy)(void*),
-  void *pBusyArg
+  void *pBusyArg,
+  int retryBusy
 ){
   int rc;
   int acquiredLock = 0;
@@ -730,7 +736,7 @@ static int csCommitWithBusyHandler(
                         &cs->refs.committedRefsHash)==0 ){
     rc = SQLITE_OK;
   }else{
-    rc = csCommitToFile(cs, xBusy, pBusyArg);
+    rc = csCommitToFile(cs, xBusy, pBusyArg, retryBusy);
   }
   if( acquiredLock ) chunkStoreUnlock(cs);
   return rc;
@@ -742,8 +748,20 @@ int chunkStoreCommitWithBusyHandler(
   int (*xBusy)(void*),
   void *pBusyArg
 ){
-  int rc = csCommitWithBusyHandler(cs, xBusy, pBusyArg);
+  int rc = csCommitWithBusyHandler(cs, xBusy, pBusyArg, 0);
   chunkStoreClearStoredHits(cs);
+  return rc;
+}
+
+int chunkStoreCommitRetryable(
+  ChunkStore *cs,
+  int (*xBusy)(void*),
+  void *pBusyArg
+){
+  int rc;
+  PROLLY_ASSERT_STORE_GRAPH_LOCKED(cs);
+  rc = csCommitWithBusyHandler(cs, xBusy, pBusyArg, 1);
+  if( rc!=SQLITE_BUSY ) chunkStoreClearStoredHits(cs);
   return rc;
 }
 
@@ -756,6 +774,7 @@ int chunkStoreCommit(ChunkStore *cs){
 
 void chunkStoreRollback(ChunkStore *cs){
   csDropTxnSequences(cs);
+  chunkStoreClearStoredHits(cs);
   cs->staging.nPending = 0;
   csPendHTReset(cs);
   if( cs->isMemory ){
