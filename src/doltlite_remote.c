@@ -770,6 +770,17 @@ static DoltliteRemote *fsRemoteOpen(
     sqlite3_free(p);
     return 0;
   }
+  /* A zero-byte or torn creation file opens as an empty database. It has
+  ** no repository, so a read-only remote cannot fetch or clone it. A
+  ** foreign file still opens and fails later as not a database. */
+  if( (flags & SQLITE_OPEN_READONLY)!=0
+   && !p->store.notADatabase
+   && !p->store.corruptHeader
+   && chunkStoreIsEmpty(&p->store) ){
+    chunkStoreClose(&p->store);
+    sqlite3_free(p);
+    return 0;
+  }
 
   return &p->base;
 }

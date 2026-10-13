@@ -625,6 +625,21 @@ check "clone without scheme errors" "1" "$(echo "$result" | grep -c 'file://')"
 result=$("$DB" "$TMPDIR/err2.db" "SELECT dolt_clone('file:///nonexistent/path.db');" 2>&1)
 check "clone nonexistent file errors" "1" "$(echo "$result" | grep -cE 'failed to open remote|clone failed')"
 
+: > "$TMPDIR/zero_remote.db"
+"$DB" "$TMPDIR/zero_client.db" <<ENDSQL
+CREATE TABLE t(id INTEGER PRIMARY KEY);
+INSERT INTO t VALUES(1);
+SELECT dolt_add('-A');
+SELECT dolt_commit('-m','base');
+SELECT dolt_remote('add','origin','file://$TMPDIR/zero_remote.db');
+.quit
+ENDSQL
+result=$("$DB" "$TMPDIR/zero_client.db" "SELECT dolt_fetch('origin','main');" 2>&1)
+check_match "fetch from a zero-byte remote fails at open" "failed to open remote" "$result"
+result=$("$DB" "$TMPDIR/zero_clone.db" "SELECT dolt_clone('file://$TMPDIR/zero_remote.db');" 2>&1)
+check_match "clone of a zero-byte remote fails at open" "failed to open remote" "$result"
+check "zero-byte remote stays empty" "0" "$(file_size "$TMPDIR/zero_remote.db")"
+
 echo "=== 17. Empty table push/clone ==="
 "$DB" "$TMPDIR/empty_src.db" <<ENDSQL
 CREATE TABLE empty_t(id INTEGER PRIMARY KEY);

@@ -97,4 +97,81 @@ run_test "torn_creation_zeroed_data_opens_empty" \
 rm -f "$T" "$(dirname "$T")/.$(basename "$T")-lock"
 db_rm "$DB"; rm -f "$(dirname "$DB")/.$(basename "$DB")-lock"
 
+# A crash during creation can leave a 0-byte file or a zero header sector.
+# Both open as an empty database without SQLITE_OPEN_CREATE. Read-only does
+# not rewrite the file. A missing path and a non-store file still fail, and
+# a later commit under a zeroed header stays refused.
+byte_size() { wc -c < "$1" | tr -d ' '; }
+file_prefix() { python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).read_bytes()[:4].hex())' "$1"; }
+lock_rm() { rm -f "$1" "$(dirname "$1")/.$(basename "$1")-lock" "${1}-wal"; }
+
+DB=/tmp/test_open_empty_$$.db
+FRESH="$DB.fresh"
+$DOLTLITE "$FRESH" "SELECT 1;" > /dev/null 2>&1
+FULL=$(byte_size "$FRESH")
+PRECLOSE=$((FULL - 169))
+TORN="$DB.torn"
+head -c "$PRECLOSE" "$FRESH" > "$TORN"
+dd if=/dev/zero of="$TORN" bs=1 count=168 conv=notrunc 2>/dev/null
+TORN_SZ=$(byte_size "$TORN")
+
+ZERO="$DB.zero"
+: > "$ZERO"
+run_test "zero_byte_rw_opens_empty" \
+  "SELECT count(*) FROM sqlite_master;" "0" "file:$ZERO?mode=rw"
+lock_rm "$ZERO"
+: > "$ZERO"
+run_test "zero_byte_ro_opens_empty" \
+  "SELECT count(*) FROM sqlite_master;" "0" "file:$ZERO?mode=ro"
+dltest_assert_equal "zero_byte_ro_open_leaves_the_file_empty" "$(byte_size "$ZERO")" "0"
+run_test_error_match "zero_byte_ro_does_not_create" \
+  "CREATE TABLE t(a);" "attempt to write a readonly database" "file:$ZERO?mode=ro"
+dltest_assert_equal "zero_byte_ro_write_leaves_the_file_empty" "$(byte_size "$ZERO")" "0"
+lock_rm "$ZERO"
+
+for mode in rw ro rwc; do
+  X="$DB.$mode"
+  cp "$TORN" "$X"
+  run_test "torn_header_${mode}_opens_empty" \
+    "SELECT count(*) FROM sqlite_master;" "0" "file:$X?mode=$mode"
+  if [ "$mode" = ro ]; then
+    dltest_assert_equal "torn_header_ro_does_not_rewrite" "$(byte_size "$X")" "$TORN_SZ"
+    dltest_assert_equal "torn_header_ro_keeps_the_zero_header" "$(file_prefix "$X")" "00000000"
+    run_test_error_match "torn_header_ro_does_not_repair" \
+      "CREATE TABLE t(a);" "attempt to write a readonly database" "file:$X?mode=ro"
+    dltest_assert_equal "torn_header_ro_write_keeps_the_bytes" "$(byte_size "$X")" "$TORN_SZ"
+  else
+    dltest_assert_equal "torn_header_${mode}_repairs_the_header" "$(file_prefix "$X")" "43544c44"
+  fi
+  lock_rm "$X"
+done
+
+MISS="$DB.missing"
+run_test_error_match "missing_rw_stays_closed" \
+  "SELECT count(*) FROM sqlite_master;" "unable to open database file" "file:$MISS?mode=rw"
+run_test_error_match "missing_ro_stays_closed" \
+  "SELECT count(*) FROM sqlite_master;" "unable to open database file" "file:$MISS?mode=ro"
+
+GARB="$DB.garb"
+printf 'not a doltlite database file!!!!' > "$GARB"
+dltest_expect_integrity "$GARB" 'skip:foreign bytes are not a database'
+run_test_error_match "garbage_rw_stays_not_a_database" \
+  "SELECT count(*) FROM sqlite_master;" "file is not a database" "file:$GARB?mode=rw"
+run_test_error_match "garbage_ro_stays_not_a_database" \
+  "SELECT count(*) FROM sqlite_master;" "file is not a database" "file:$GARB?mode=ro"
+lock_rm "$GARB"
+
+COMMITTED="$DB.committed"
+$DOLTLITE "$COMMITTED" "CREATE TABLE t(a INTEGER PRIMARY KEY); INSERT INTO t VALUES(1); SELECT dolt_commit('-Am','c1'); INSERT INTO t VALUES(2); SELECT dolt_commit('-am','c2');" > /dev/null 2>&1
+cp "$COMMITTED" "$DB.poison"
+dd if=/dev/zero of="$DB.poison" bs=1 count=168 conv=notrunc 2>/dev/null
+dltest_expect_integrity "$DB.poison" 'skip:a later commit under a zeroed header stays closed'
+run_test_error_match "zeroed_header_after_a_later_commit_stays_closed" \
+  "SELECT count(*) FROM t;" "file is not a database" "file:$DB.poison?mode=rw"
+lock_rm "$COMMITTED"
+lock_rm "$DB.poison"
+lock_rm "$FRESH"
+lock_rm "$TORN"
+rm -f "$ZERO"
+
 dltest_finish
