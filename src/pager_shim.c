@@ -4,6 +4,7 @@
 #include "pager_shim.h"
 #include "sqliteInt.h"
 #include "chunk_store.h"
+#include "chunk_store_int.h"
 #include "prolly_cache.h"
 
 int sqlite3_pager_writej_count = 0;
@@ -1362,12 +1363,19 @@ int sqlite3_backup_step(sqlite3_backup *pBackup, int nPage){
 #endif
     rc = chunkStoreReplaceLockedFile(destCs, zTmpFile, &retainTmp);
     if( rc==SQLITE_OK ){
-      doltliteBtreeInstallBackupBranch(pDestBt, zPreparedBranch);
-      zPreparedBranch = 0;
-      sqlite3BeginBenignMalloc();
-      (void)chunkStorePublishPathReplacementProof(
-          destCs, &destCs->refs.committedRefsHash, &replacementProofTip);
-      sqlite3EndBenignMalloc();
+      /* The temporary store is gone under its own name; its graph-lock
+      ** sidecar would otherwise outlive it forever (#3961). A delete that
+      ** fails here (an injected OOM among them) fails the backup, exactly
+      ** like the pre-replace delete of the same name above. */
+      rc = csLockSidecarDelete(pDestVfs, zTmpFile);
+      if( rc==SQLITE_OK ){
+        doltliteBtreeInstallBackupBranch(pDestBt, zPreparedBranch);
+        zPreparedBranch = 0;
+        sqlite3BeginBenignMalloc();
+        (void)chunkStorePublishPathReplacementProof(
+            destCs, &destCs->refs.committedRefsHash, &replacementProofTip);
+        sqlite3EndBenignMalloc();
+      }
     }
 #if SQLITE_OS_WIN
     {

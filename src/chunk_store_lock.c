@@ -179,6 +179,29 @@ static char *csLockPath(const char *path){
   return sqlite3_mprintf("%.*s.%s-lock", nDir, path, zBase);
 }
 
+/* Delete the graph-lock sidecar a store at zPath would hold. A replaced
+** temporary store leaves its sidecar behind: the store name is gone, so
+** nothing would ever remove it (doltlite#3961). Builds the sidecar name on
+** the stack so a backup does not add heap allocations that would shift the
+** malloc-failure sequence the OOM tests inject around this path, and
+** returns the delete's result so a failure surfaces in the caller's rc. */
+int csLockSidecarDelete(sqlite3_vfs *pVfs, const char *zPath){
+  int nPath = (int)strlen(zPath);
+  const char *zBase = strrchr(zPath, '/');
+  int nDir = zBase ? (int)(zBase - zPath) + 1 : 0;
+  char zLock[nDir + (nPath - nDir) + sizeof(".-lock") + 1];
+  int rc;
+
+  if( nPath - nDir <= 0 ) return SQLITE_OK;
+  memcpy(zLock, zPath, nDir);
+  zLock[nDir] = '.';
+  memcpy(zLock + nDir + 1, zPath + nDir, nPath - nDir);
+  memcpy(zLock + nPath + 1, "-lock", sizeof("-lock"));
+  rc = sqlite3OsDelete(pVfs, zLock, 0);
+  /* Nothing to remove is not a failure. */
+  return rc==SQLITE_IOERR_DELETE_NOENT ? SQLITE_OK : rc;
+}
+
 /* Missing parent is CANTOPEN, not READONLY_DIRECTORY (file:// clone). */
 static int csDirectoryAccess(
   sqlite3_vfs *pVfs,
