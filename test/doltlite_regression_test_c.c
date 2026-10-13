@@ -10294,16 +10294,32 @@ struct PublicationProbe {
   const char *zPath;
   int nHooks;
   int openRc;
+  int liveRc;
   int nLogs;
   int nFreshLogs;
   int readRc;
 };
 
+/* As in stock SQLite, a statement that starts while a writer publishes
+** waits in its busy handler or reports SQLITE_BUSY; it never sees the
+** in-flight commit. */
+static int publicationCount(sqlite3 *db, int *pCount){
+  sqlite3_stmt *stmt = 0;
+  int rc = sqlite3_prepare_v2(db, "SELECT count(*) FROM dolt_log", -1,
+                              &stmt, 0);
+  if( rc==SQLITE_OK ){
+    rc = sqlite3_step(stmt);
+    if( rc==SQLITE_ROW ) *pCount = sqlite3_column_int(stmt, 0);
+  }
+  sqlite3_finalize(stmt);
+  return rc;
+}
+
 static void publicationSyncHook(void *pArg){
   PublicationProbe *p = (PublicationProbe*)pArg;
   sqlite3 *fresh = 0;
   p->nHooks++;
-  p->nLogs = (int)queryInt64(p->peer, "SELECT count(*) FROM dolt_log");
+  p->liveRc = publicationCount(p->peer, &p->nLogs);
   p->openRc = sqlite3_open_v2(p->zPath, &fresh,
                             SQLITE_OPEN_READONLY, 0);
   if( p->openRc==SQLITE_OK ){
@@ -10381,7 +10397,11 @@ static void run_publication_process(int fail, int wait){
     if( open_db(dbpath,&peer)!=SQLITE_OK ) _exit(1);
     nLogs = (int)queryInt64(peer,"SELECT count(*) FROM dolt_log");
     if( write(responses[1],"y",1)!=1 || read(requests[0],&command,1)!=1 ) _exit(1);
-    valid = queryInt64(peer,"SELECT count(*) FROM dolt_log")==nLogs;
+    {
+      int nLive = -1;
+      rc = publicationCount(peer, &nLive);
+      valid = rc==SQLITE_BUSY || (rc==SQLITE_ROW && nLive==nLogs);
+    }
     rc = sqlite3_open_v2(dbpath,&fresh,SQLITE_OPEN_READWRITE,0);
     valid = valid && rc==SQLITE_OK;
     if( rc==SQLITE_OK ){
@@ -10555,7 +10575,8 @@ static void run_commit_publication(void){
     gSyncHook = 0;
     gFailSyncNth = 0;
     check("publication_hook",probe.nHooks>0);
-    check("publication_during_live",probe.nLogs==nLogs);
+    check("publication_during_live",probe.liveRc==SQLITE_BUSY
+          || (probe.liveRc==SQLITE_ROW && probe.nLogs==nLogs));
     check("publication_during_open",probe.openRc==SQLITE_OK);
     check("publication_during_fresh",probe.readRc==SQLITE_BUSY
           || (probe.readRc==SQLITE_ROW && probe.nFreshLogs==nLogs));

@@ -16,7 +16,7 @@ proc publication_decline {n} {
 proc publication_sync {method file args} {
   if {$::armed && [string match *test.db $file]} {
     set ::armed 0
-    set ::during [publication_snapshot peer]
+    set ::liveError [catch {publication_snapshot peer} ::during]
     set ::openError [catch {sqlite3 observer test.db} ::openMessage]
     if {!$::openError} {
       observer busy publication_decline
@@ -55,6 +55,7 @@ foreach branch {main dev} {
       sqlite3 peer test.db
       set before [publication_snapshot peer]
       set ::during {}
+      set ::liveError 0
       set ::freshDuring {}
       set ::openError 0
       set ::readError 0
@@ -68,7 +69,10 @@ foreach branch {main dev} {
       set ::armed 0
       set prefix commit-publication-$branch-$kind-$::fail
       do_test $prefix.result {set failed} $::fail
-      do_test $prefix.during-live {set ::during} $before
+      do_test $prefix.during-live {
+        expr {($::liveError && [string match *locked* $::during])
+            || (!$::liveError && $::during eq $before)}
+      } 1
       do_test $prefix.during-open {set ::openError} 0
       do_test $prefix.during-fresh {
         expr {($::readError && [string match *locked* $::freshDuring])
