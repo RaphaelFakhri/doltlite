@@ -721,14 +721,12 @@ static void doltliteResetFunc(
       azPaths = 0;
       goto reset_cleanup;
     }
-    if( !db->autoCommit ){
-      rc = doltliteEnsureWriteTxnAndSavepoints(db);
-      if( rc!=SQLITE_OK ){
-        sqlite3_free(azPaths);
-        azPaths = 0;
-        sqlite3_result_error_code(context, rc);
-        goto reset_cleanup;
-      }
+    rc = doltliteEnsureWriteTxnAndSavepoints(db);
+    if( rc!=SQLITE_OK ){
+      sqlite3_free(azPaths);
+      azPaths = 0;
+      doltliteCmdResultWriteTxnError(context, db, rc);
+      goto reset_cleanup;
     }
     rc = resetStageNamedPaths(db, cs, azPaths, nPaths);
     sqlite3_free(azPaths);
@@ -935,6 +933,7 @@ reset_cleanup:
   if( graphLocked ){
     chunkStoreUnlock(cs);
   }
+  doltliteFinishAutocommitWrite(db);
   if( bSucceeded ){
     /* Dolt ends the SQL txn on dolt_reset; COMMIT then BEGIN so a
     ** following ROLLBACK does not undo the reset or prior row writes. */

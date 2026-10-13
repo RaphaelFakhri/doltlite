@@ -7675,6 +7675,56 @@ static void run_persist_does_not_resurrect_deleted_branch(void){
   removeDbFiles(dbpath);
 }
 
+static void run_vc_persist_does_not_resurrect_deleted_branch(void){
+  static const char *azOp[] = {
+    "SELECT dolt_clean();", "SELECT dolt_reset('t');", "SELECT dolt_clean();"
+  };
+  static const char *azDirty[] = {
+    "INSERT INTO t VALUES(1,'dirty');", "INSERT INTO t VALUES(1,'dirty');",
+    "CREATE TABLE u(x);"
+  };
+  sqlite3 *dbA = 0;
+  sqlite3 *dbB = 0;
+  char *zErr = 0;
+  char dbpath[256];
+  char label[64];
+  int i;
+  int rc;
+
+  printf("=== VC Persist Does Not Resurrect Deleted Branch Test ===\n\n");
+  for(i=0; i<3; i++){
+    make_dbpath(dbpath, sizeof(dbpath), "test_vc_persist_no_resurrect");
+    removeDbFiles(dbpath);
+    check("vnr_open_A", open_db(dbpath, &dbA)==SQLITE_OK);
+    check("vnr_seed", execSql(dbA,
+      "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);"
+      "SELECT dolt_commit('-A','-m','base');"
+      "SELECT dolt_branch('feat');"
+      "SELECT dolt_checkout('feat');")==SQLITE_OK);
+    check("vnr_dirty", execSql(dbA, azDirty[i])==SQLITE_OK);
+    check("vnr_open_B", open_db(dbpath, &dbB)==SQLITE_OK);
+    check("vnr_peer_delete",
+          execSql(dbB, "SELECT dolt_branch('-D','feat');")==SQLITE_OK);
+
+    rc = sqlite3_exec(dbA, azOp[i], 0, 0, &zErr);
+    snprintf(label, sizeof(label), "vnr_op%d_rejected", i);
+    check(label, rc==SQLITE_BUSY);
+    if( i<2 ){
+      snprintf(label, sizeof(label), "vnr_op%d_names_deleted_branch", i);
+      check(label, zErr!=0 && strstr(zErr, "branch 'feat' no longer exists")!=0);
+    }
+    sqlite3_free(zErr);
+    zErr = 0;
+    snprintf(label, sizeof(label), "vnr_op%d_does_not_resurrect", i);
+    check(label, strcmp(queryScalarText(dbB,
+        "SELECT count(*) FROM dolt_branches WHERE name='feat'"), "0")==0);
+    sqlite3_close(dbA);
+    sqlite3_close(dbB);
+    dbA = dbB = 0;
+    removeDbFiles(dbpath);
+  }
+}
+
 static void run_peer_commit_keeps_local_row_durable(void){
   sqlite3 *dbA = 0;
   sqlite3 *dbB = 0;
@@ -18147,6 +18197,7 @@ static const RegressionCase aCases[] = {
   { "active_readers_after_schema_commit", "Active Readers After Schema Commit", run_active_readers_after_schema_commit },
   { "prepared_stmt_reuse_after_schema_checkout", "Prepared Statement Reuse After Schema Checkout Test", run_prepared_stmt_reuse_after_schema_checkout },
   { "persist_does_not_resurrect_deleted_branch", "Persist Does Not Resurrect Deleted Branch Test", run_persist_does_not_resurrect_deleted_branch },
+  { "vc_persist_does_not_resurrect_deleted_branch", "VC Persist Does Not Resurrect Deleted Branch Test", run_vc_persist_does_not_resurrect_deleted_branch },
   { "peer_commit_keeps_local_row_durable", "Peer Commit Keeps Local Row Durable Test", run_peer_commit_keeps_local_row_durable },
   { "commit_recovers_after_peer_commit", "Commit Recovers After Peer Commit Test", run_commit_recovers_after_peer_commit },
   { "working_set_refreshes_staged_across_connections", "Working Set Refreshes Staged Across Connections Test", run_working_set_refreshes_staged_across_connections },

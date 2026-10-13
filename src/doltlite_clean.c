@@ -294,12 +294,15 @@ static void doltliteCleanFunc(
   }
 
   if( !dryRun ){
-    /* A transaction that has only read holds a snapshot, not the graph
-    ** lock; persisting from it would overwrite a later peer commit. */
-    if( !db->autoCommit ){
+    /* Persisting without the write lock would overwrite a later peer
+    ** write, or recreate a branch a peer deleted. */
+    if( !db->autoCommit || untracked.n==0 ){
       rc = doltliteEnsureWriteTxnAndSavepoints(db);
-      if( rc!=SQLITE_OK ) goto clean_error;
-    }else if( untracked.n>0 ){
+      if( rc!=SQLITE_OK ){
+        doltliteCmdResultWriteTxnError(context, db, rc);
+        goto clean_done;
+      }
+    }else{
       /* Each nested DROP commits on its own in autocommit. One transaction
       ** keeps an earlier drop off disk when a later write fails. */
       rc = sqlite3_exec(db, "BEGIN", 0, 0, 0);
@@ -331,6 +334,7 @@ clean_error:
       -1);
   sqlite3_result_error_code(context, rc);
 clean_done:
+  doltliteFinishAutocommitWrite(db);
   cleanNamesClear(&untracked);
   cleanNamesClear(&selected);
   cleanNamesClear(&staged);
