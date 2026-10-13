@@ -230,6 +230,7 @@ static void doltliteCleanFunc(
   int i;
   int rc;
   int bBegan = 0;
+  ProllyHash wsBasis;
 
   if( doltliteCmdRejectInWriteStatement(context, "clean") ) return;
   memset(&args, 0, sizeof(args));
@@ -253,6 +254,9 @@ static void doltliteCleanFunc(
   rc = doltliteCmdParseArgs(context, argc, argv, aOption, ArraySize(aOption),
                             0, &args);
   if( rc!=SQLITE_OK ) goto clean_done;
+  rc = doltliteRefreshAutocommitWorkingState(db);
+  if( rc!=SQLITE_OK ) goto clean_error;
+  doltliteGetSessionWorkingSetBasis(db, &wsBasis);
 
   if( args.nPositional ){
     for(i=0; i<args.nPositional; i++){
@@ -293,22 +297,25 @@ static void doltliteCleanFunc(
     }
   }
 
-  if( !dryRun ){
-    /* Persisting without the write lock would overwrite a later peer
-    ** write, or recreate a branch a peer deleted. */
-    if( !db->autoCommit || untracked.n==0 ){
-      rc = doltliteEnsureWriteTxnAndSavepoints(db);
-      if( rc!=SQLITE_OK ){
-        doltliteCmdResultWriteTxnError(context, db, rc);
-        goto clean_done;
-      }
-    }else{
+  if( !dryRun && untracked.n==0 && cs->refs.nBranches>0
+   && chunkStoreFindBranch(cs, doltliteGetSessionBranch(db), 0)==SQLITE_NOTFOUND ){
+    rc = doltliteEnsureWriteTxnAndSavepoints(db);
+    if( rc!=SQLITE_OK ){
+      doltliteCmdResultWriteTxnError(context, db, rc);
+      goto clean_done;
+    }
+  }
+  if( !dryRun && untracked.n>0 ){
+    if( db->autoCommit ){
       /* Each nested DROP commits on its own in autocommit. One transaction
       ** keeps an earlier drop off disk when a later write fails. */
       rc = sqlite3_exec(db, "BEGIN", 0, 0, 0);
       if( rc!=SQLITE_OK ) goto clean_error;
       bBegan = 1;
     }
+    rc = doltliteEnsureWriteTxnAndSavepoints(db);
+    if( rc==SQLITE_OK ) rc = doltliteConfirmWorkingSet(db, cs, &wsBasis);
+    if( rc!=SQLITE_OK ) goto clean_rollback;
     rc = cleanDropTables(db, &untracked);
     if( rc!=SQLITE_OK ) goto clean_rollback;
     if( bBegan ){

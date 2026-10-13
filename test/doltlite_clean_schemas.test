@@ -119,4 +119,48 @@ do_execsql_test clean-schemas-view-trigger {
   SELECT count(*) FROM t;
 } {0 0 0}
 
+db close
+testvfs noopvfs
+noopvfs filter {xWrite}
+proc clean_reset_noop_write {method file args} {
+  if {$::noopArmed} {
+    incr ::noopWrites
+    return SQLITE_IOERR_WRITE
+  }
+  return SQLITE_OK
+}
+noopvfs script clean_reset_noop_write
+set noopArmed 0
+forcedelete noop.db
+sqlite3 db noop.db -vfs noopvfs
+execsql {
+  CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);
+  CREATE INDEX tv ON t(v);
+  CREATE TABLE u(id INTEGER PRIMARY KEY);
+  SELECT dolt_commit('-Am','base');
+  INSERT INTO t VALUES(3,'dirty');
+  INSERT INTO u VALUES(7);
+  SELECT dolt_add('u');
+}
+foreach sql {{SELECT dolt_clean()} {SELECT dolt_clean('t')}
+             {SELECT dolt_reset('t')}} {
+  set noopWrites 0
+  set noopArmed 1
+  do_execsql_test clean-reset-noop.$sql $sql {0}
+  set noopArmed 0
+  do_test clean-reset-noop.$sql.writes {set noopWrites} 0
+  do_execsql_test clean-reset-noop.$sql.kept {
+    SELECT id,v FROM t;
+    SELECT table_name,staged FROM dolt_status ORDER BY table_name;
+  } {3 dirty t 0 u 1}
+}
+db close
+noopvfs delete
+sqlite3 db noop.db
+do_execsql_test clean-reset-noop.reopen {
+  SELECT id,v FROM t;
+  SELECT table_name,staged FROM dolt_status ORDER BY table_name;
+  PRAGMA integrity_check;
+} {3 dirty t 0 u 1 ok}
+
 finish_test

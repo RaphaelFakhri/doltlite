@@ -81,11 +81,60 @@ static int resetNameIsTablePath(
   return SQLITE_OK;
 }
 
+static int resetSchemaInPath(const SchemaEntry *p, const char *zName){
+  if( !p->zType ) return 0;
+  if( !zName ){
+    return strcmp(p->zType, "view")==0 || strcmp(p->zType, "trigger")==0;
+  }
+  return (strcmp(p->zType, "table")==0 || strcmp(p->zType, "index")==0)
+      && p->zTblName && strcmp(p->zTblName, zName)==0;
+}
+
+static int resetPathUnchanged(
+  struct TableEntry *aHead, int nHead,
+  SchemaEntry *aHeadSchema, int nHeadSchema, const char *zHead,
+  struct TableEntry *aStaged, int nStaged,
+  SchemaEntry *aStagedSchema, int nStagedSchema, const char *zStaged
+){
+  int i, j, nH = 0, nS = 0;
+  for(i=0; i<nStagedSchema; i++){
+    if( resetSchemaInPath(&aStagedSchema[i], zStaged) ) nS++;
+  }
+  for(i=0; i<nHeadSchema; i++){
+    SchemaEntry *h = &aHeadSchema[i];
+    if( !resetSchemaInPath(h, zHead) ) continue;
+    nH++;
+    for(j=0; j<nStagedSchema; j++){
+      SchemaEntry *s = &aStagedSchema[j];
+      struct TableEntry *hEntry, *sEntry;
+      if( !resetSchemaInPath(s, zStaged) || !h->zName || !s->zName
+       || strcmp(h->zName, s->zName)!=0 || strcmp(h->zType, s->zType)!=0 ){
+        continue;
+      }
+      if( (h->zSql==0)!=(s->zSql==0)
+       || (h->zSql && strcmp(h->zSql, s->zSql)!=0) ) return 0;
+      hEntry = h->iRootpage>1
+             ? doltliteFindTableByNumber(aHead, nHead, h->iRootpage) : 0;
+      sEntry = s->iRootpage>1
+             ? doltliteFindTableByNumber(aStaged, nStaged, s->iRootpage) : 0;
+      if( (hEntry==0)!=(sEntry==0) ) return 0;
+      if( hEntry && (hEntry->flags!=sEntry->flags
+                 || prollyHashCompare(&hEntry->root, &sEntry->root)!=0) ){
+        return 0;
+      }
+      break;
+    }
+    if( j==nStagedSchema ) return 0;
+  }
+  return nH==nS;
+}
+
 static int resetStageNamedPaths(
   sqlite3 *db,
   ChunkStore *cs,
   const char **azPaths,
-  int nPaths
+  int nPaths,
+  int *pbChanged
 ){
   struct TableEntry *aHead = 0, *aStaged = 0;
   SchemaEntry *aHeadSchema = 0;
@@ -100,6 +149,8 @@ static int resetStageNamedPaths(
   int resetSchemas = 0;
   int p, k;
   int rc;
+
+  *pbChanged = 0;
 
   rc = doltliteGetHeadCatalogHash(db, &headCatHash);
   if( rc!=SQLITE_OK ) return rc;
@@ -142,12 +193,23 @@ static int resetStageNamedPaths(
     const char *zStagedTable = iS>=0 ? aStaged[iS].zName : 0;
     char *zDup;
     if( bSchemas ){
+      if( resetPathUnchanged(aHead, nHead, aHeadSchema, nHeadSchema, 0,
+                            aStaged, nStaged, aStagedSchema, nStagedSchema, 0) ){
+        continue;
+      }
       resetSchemas = 1;
+      *pbChanged = 1;
       continue;
     }
     if( iH<0 && iS<0 ){
       rc = SQLITE_NOTFOUND;
       goto done;
+    }
+    if( iH>=0 && iS>=0
+     && resetPathUnchanged(aHead, nHead, aHeadSchema, nHeadSchema, zHeadTable,
+                           aStaged, nStaged, aStagedSchema, nStagedSchema,
+                           zStagedTable) ){
+      continue;
     }
     if( iH>=0 ){
       const char **azNew = sqlite3_realloc(azReset,
@@ -253,7 +315,10 @@ static int resetStageNamedPaths(
                                         zHeadTable);
       if( rc!=SQLITE_OK ) goto done;
     }
+    *pbChanged = 1;
   }
+
+  if( !*pbChanged ) goto done;
 
   /* The entries above now carry HEAD content, but the staged master still
   ** spells the staged definition of each reset table: its CREATE TABLE text
@@ -585,6 +650,7 @@ static void doltliteResetFunc(
   u8 isMerging = 0;
   int bSucceeded = 0;
   int haveSaved = 0;
+  int reloadWorking = 0;
   DoltliteTxnState saved;
 
   if( doltliteCmdRejectInWriteStatement(context, "reset") ) return;
@@ -604,6 +670,7 @@ static void doltliteResetFunc(
     sqlite3_result_error_code(context, rc);
     goto reset_cleanup;
   }
+  doltliteGetSessionWorkingSetBasis(db, &wsBasis);
 
   for(i=0; i<argc; i++){
     if( sqlite3_value_type(argv[i])==SQLITE_NULL ) nNullArgs++;
@@ -714,6 +781,7 @@ static void doltliteResetFunc(
   haveSaved = 1;
 
   if( nPaths>0 ){
+    int changed = 0;
     if( isHard || isSoft || zRef ){
       sqlite3_result_error(context,
         "table paths cannot be combined with --hard / --soft or a target ref", -1);
@@ -721,14 +789,18 @@ static void doltliteResetFunc(
       azPaths = 0;
       goto reset_cleanup;
     }
-    rc = doltliteEnsureWriteTxnAndSavepoints(db);
-    if( rc!=SQLITE_OK ){
-      sqlite3_free(azPaths);
-      azPaths = 0;
-      doltliteCmdResultWriteTxnError(context, db, rc);
-      goto reset_cleanup;
+    if( !db->autoCommit || (cs->refs.nBranches>0
+     && chunkStoreFindBranch(cs, doltliteGetSessionBranch(db), 0)==SQLITE_NOTFOUND) ){
+      rc = doltliteEnsureWriteTxnAndSavepoints(db);
+      if( rc!=SQLITE_OK ){
+        sqlite3_free(azPaths);
+        azPaths = 0;
+        doltliteCmdResultWriteTxnError(context, db, rc);
+        goto reset_cleanup;
+      }
     }
-    rc = resetStageNamedPaths(db, cs, azPaths, nPaths);
+    reloadWorking = db->autoCommit;
+    rc = resetStageNamedPaths(db, cs, azPaths, nPaths, &changed);
     sqlite3_free(azPaths);
     azPaths = 0;
     if( rc==SQLITE_NOTFOUND ){
@@ -739,7 +811,7 @@ static void doltliteResetFunc(
       sqlite3_result_error_code(context, rc);
       goto reset_cleanup;
     }
-    rc = doltlitePersistWorkingSet(db);
+    rc = changed ? doltlitePersistWorkingSetConfirmed(db, &wsBasis) : SQLITE_OK;
     if( rc!=SQLITE_OK ){
       sqlite3_result_error_code(context, rc);
       goto reset_cleanup;
@@ -758,7 +830,6 @@ static void doltliteResetFunc(
   }
 
   doltliteGetSessionHead(db, &sessionHeadBeforeLock);
-  doltliteGetSessionWorkingSetBasis(db, &wsBasis);
   if( zRef ){
     DoltliteCommit commit;
 
@@ -934,6 +1005,7 @@ reset_cleanup:
     chunkStoreUnlock(cs);
   }
   doltliteFinishAutocommitWrite(db);
+  if( reloadWorking ) doltliteInvalidateSessionWorkingState(db);
   if( bSucceeded ){
     /* Dolt ends the SQL txn on dolt_reset; COMMIT then BEGIN so a
     ** following ROLLBACK does not undo the reset or prior row writes. */
