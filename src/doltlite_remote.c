@@ -2208,7 +2208,7 @@ int doltliteFetch(
   const char *zRemoteName,
   const char *zBranch
 ){
-  return doltliteFetchInto(pLocal, pRemote, zRemoteName, zBranch, zBranch);
+  return doltliteFetchInto(pLocal, pRemote, zRemoteName, zBranch, zBranch, 0);
 }
 
 /* Fetch remote branch zBranch into the tracking ref zRemoteName/zTrack.
@@ -2219,11 +2219,13 @@ int doltliteFetchInto(
   DoltliteRemote *pRemote,
   const char *zRemoteName,
   const char *zBranch,
-  const char *zTrack
+  const char *zTrack,
+  int *pbMissingBranch
 ){
   int attempt;
   int rc;
 
+  if( pbMissingBranch ) *pbMissingBranch = 0;
   rc = SQLITE_OK;
   for(attempt=0; attempt<8; attempt++){
     u8 *refsData = 0;
@@ -2251,6 +2253,7 @@ int doltliteFetchInto(
     sqlite3_free(refsData);
     if( rc==SQLITE_OK ){
       rc = chunkStoreFindBranch(&remoteRefs, zBranch, &remoteCommit);
+      if( rc==SQLITE_NOTFOUND && pbMissingBranch ) *pbMissingBranch = 1;
     }
     if( rc!=SQLITE_OK ){
       chunkStoreClose(&remoteRefs);
@@ -2258,6 +2261,7 @@ int doltliteFetchInto(
     }
 
     if( prollyHashIsEmpty(&remoteCommit) ){
+      if( pbMissingBranch ) *pbMissingBranch = 1;
       chunkStoreClose(&remoteRefs);
       return SQLITE_NOTFOUND;
     }

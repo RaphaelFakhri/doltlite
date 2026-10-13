@@ -1014,7 +1014,7 @@ static int mutatePruneTracking(sqlite3 *db, ChunkStore *cs, void *pArg){
     for(i=0; i<nTrk; i++){
       if( strcmp(aTrk[i].zRemote, p->zRemote)!=0 ) continue;
       for(j=0; j<p->nKeep; j++){
-        if( strcmp(aTrk[i].zBranch, p->azKeep[j])==0 ) break;
+        if( p->azKeep[j] && strcmp(aTrk[i].zBranch, p->azKeep[j])==0 ) break;
       }
       if( j>=p->nKeep ) break;
     }
@@ -1034,17 +1034,20 @@ static int remoteSqlFetchBranch(
   const char *zRemoteName,
   const char *zBranch,
   const char *zTrack,
+  int *pbMissingBranch,
   char **pzErr
 ){
   DoltliteRemote *pRemote =
       openRemoteByUrl(db, chunkFileGetVfs(&cs->file), zUrl, 0);
   int rc;
+  if( pbMissingBranch ) *pbMissingBranch = 0;
   if( pzErr ) *pzErr = 0;
   if( !pRemote ){
     if( pzErr ) *pzErr = sqlite3_mprintf("failed to open remote");
     return SQLITE_CANTOPEN;
   }
-  rc = doltliteFetchInto(cs, pRemote, zRemoteName, zBranch, zTrack);
+  rc = doltliteFetchInto(cs, pRemote, zRemoteName, zBranch, zTrack,
+                         pbMissingBranch);
   if( rc!=SQLITE_OK && pzErr ){
     const char *zMsg = remoteSqlFetchMsg(pRemote, rc);
     if( zMsg ){
@@ -1068,19 +1071,20 @@ static int remoteSqlFetchOne(
   const char *zUrl,
   const char *zRemoteName,
   const char *zBranch,
-  const char *zTrack
+  const char *zTrack,
+  int *pbMissingBranch
 ){
   char *zErr = 0;
   int rc = remoteSqlFetchBranch(db, cs, zUrl, zRemoteName, zBranch, zTrack,
-                                &zErr);
-  if( rc!=SQLITE_OK ){
+                                pbMissingBranch, &zErr);
+  if( rc!=SQLITE_OK && !(pbMissingBranch && *pbMissingBranch) ){
     (void)doltliteVcSealSavepointError(db);
     remoteSqlResultError(ctx, rc, zErr ? zErr
         : (rc==SQLITE_CANTOPEN ? "failed to open remote"
          : rc==SQLITE_NOTFOUND ? "fetch failed: branch not found on remote"
                                : "fetch failed"));
-    sqlite3_free(zErr);
   }
+  sqlite3_free(zErr);
   return rc;
 }
 
@@ -1364,7 +1368,7 @@ static void doltFetchFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
         }
         zBranch = remoteSqlStripPrefix(zSrc, REMOTE_HEADS_PREFIX);
         rc = remoteSqlFetchOne(ctx, db, cs, zUrlOwned, zRemoteName,
-                               zBranch, zBranch);
+                               zBranch, zBranch, 0);
         sqlite3_free(zSrc);
         continue;
       }
@@ -1379,6 +1383,7 @@ static void doltFetchFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
         for(k=0; k<nNames && rc==SQLITE_OK; k++){
           const char *zCap = 0;
           int nCap = 0;
+          int missing = 0;
           char *zTrack;
           if( !fetchPatMatch(zSrcPat, azNames[k], &zCap, &nCap) ) continue;
           zTrack = fetchPatApply(zDstPat, zCap, nCap);
@@ -1388,12 +1393,13 @@ static void doltFetchFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
             break;
           }
           rc = remoteSqlFetchOne(ctx, db, cs, zUrlOwned, zTrackRemote,
-                                 azNames[k], zTrack);
+                                 azNames[k], zTrack, &missing);
+          if( missing ) rc = SQLITE_OK;
           sqlite3_free(zTrack);
         }
       }else{
         rc = remoteSqlFetchOne(ctx, db, cs, zUrlOwned, zTrackRemote,
-                               zSrcPat, zDstPat);
+                               zSrcPat, zDstPat, 0);
       }
       sqlite3_free(zTrackRemote);
       sqlite3_free(zSrcPat);
@@ -1401,8 +1407,14 @@ static void doltFetchFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
     }
   }else{
     for(i=0; i<nNames && rc==SQLITE_OK; i++){
+      int missing = 0;
       rc = remoteSqlFetchOne(ctx, db, cs, zUrlOwned, zRemoteName,
-                             azNames[i], azNames[i]);
+                             azNames[i], azNames[i], &missing);
+      if( missing ){
+        sqlite3_free(azNames[i]);
+        azNames[i] = 0;
+        rc = SQLITE_OK;
+      }
     }
   }
 
@@ -1490,8 +1502,14 @@ static void doltPullParsed(
     pRemote = 0;
     for(i=0; i<nNames && rc==SQLITE_OK; i++){
       char *zFetchErr = 0;
+      int missing = 0;
       rc = remoteSqlFetchBranch(db, cs, zUrlOwned, zRemoteName,
-                                azNames[i], azNames[i], &zFetchErr);
+                                azNames[i], azNames[i], &missing, &zFetchErr);
+      if( missing && strcmp(azNames[i], zRemoteBranch)!=0 ){
+        sqlite3_free(zFetchErr);
+        rc = SQLITE_OK;
+        continue;
+      }
       if( rc!=SQLITE_OK ){
         remoteSqlRestoreAndReport(ctx, db, cs, &savedState, rc,
             zFetchErr ? zFetchErr
