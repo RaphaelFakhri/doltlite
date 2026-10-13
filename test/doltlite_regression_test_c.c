@@ -4833,6 +4833,78 @@ static void run_pull_dirty_working_set_fails(void){
   removeDbFiles(remoteClientPath);
 }
 
+static void run_pull_dirty_uptodate_fails(void){
+  sqlite3 *src = 0;
+  sqlite3 *db = 0;
+  char zSrc[256];
+  char zRemote[256];
+  char zClone[256];
+  char sql[768];
+  const char *res;
+  char zHead[128];
+
+  printf("=== Pull Dirty Up-To-Date Fails Test ===\n\n");
+  make_dbpath(zSrc, sizeof(zSrc), "pull_dirty_uptodate_src");
+  make_dbpath(zRemote, sizeof(zRemote), "pull_dirty_uptodate_remote");
+  make_dbpath(zClone, sizeof(zClone), "pull_dirty_uptodate_clone");
+  removeDbFiles(zSrc);
+  removeDbFiles(zRemote);
+  removeDbFiles(zClone);
+
+  check("open_src_for_dirty_uptodate", open_db(zSrc, &src)==SQLITE_OK);
+  snprintf(sql, sizeof(sql),
+    "CREATE TABLE t(id INT PRIMARY KEY);"
+    "INSERT INTO t VALUES(1);"
+    "SELECT dolt_commit('-Am','init');"
+    "SELECT dolt_remote('add','origin','file://%s');"
+    "SELECT dolt_push('origin','main');",
+    zRemote);
+  check("push_src_for_dirty_uptodate", execSql(src, sql)==SQLITE_OK);
+  sqlite3_close(src);
+  src = 0;
+
+  check("open_clone_for_dirty_uptodate", open_db(zClone, &db)==SQLITE_OK);
+  snprintf(sql, sizeof(sql), "SELECT dolt_clone('file://%s')", zRemote);
+  check("clone_for_dirty_uptodate", execSql(db, sql)==SQLITE_OK);
+  check("dirty_uptodate_insert",
+        execSql(db, "INSERT INTO t VALUES(5);")==SQLITE_OK);
+  sqlite3_snprintf(sizeof(zHead), zHead, "%s",
+                   queryScalarText(db, "SELECT commit_hash FROM dolt_log LIMIT 1"));
+  res = queryScalarText(db, "SELECT dolt_pull('origin','main')");
+  check("dirty_uptodate_pull_errors", strstr(res, "ERROR:")!=0);
+  check("dirty_uptodate_pull_says_uncommitted",
+        strstr(res, "uncommitted changes")!=0);
+  check("dirty_uptodate_keeps_row",
+        strcmp(queryScalarText(db, "SELECT count(*) FROM t WHERE id=5"), "1")==0);
+  check("dirty_uptodate_keeps_head",
+        strcmp(queryScalarText(db, "SELECT commit_hash FROM dolt_log LIMIT 1"),
+               zHead)==0);
+
+  check("reset_after_dirty_uptodate",
+        execSql(db, "SELECT dolt_reset('--hard');")==SQLITE_OK);
+  check("clean_uptodate_pull_returns_0",
+        strcmp(queryScalarText(db, "SELECT dolt_pull('origin','main')"), "0")==0);
+  check("clean_uptodate_has_init_row",
+        strcmp(queryScalarText(db, "SELECT count(*) FROM t"), "1")==0);
+
+  check("stage_uptodate_row", execSql(db,
+        "INSERT INTO t VALUES(4); SELECT dolt_add('-A');")==SQLITE_OK);
+  sqlite3_snprintf(sizeof(zHead), zHead, "%s",
+                   queryScalarText(db, "SELECT commit_hash FROM dolt_log LIMIT 1"));
+  res = queryScalarText(db, "SELECT dolt_pull('origin','main')");
+  check("staged_uptodate_pull_errors", strstr(res, "uncommitted changes")!=0);
+  check("staged_uptodate_keeps_row",
+        strcmp(queryScalarText(db, "SELECT count(*) FROM t WHERE id=4"), "1")==0);
+  check("staged_uptodate_keeps_head",
+        strcmp(queryScalarText(db, "SELECT commit_hash FROM dolt_log LIMIT 1"),
+               zHead)==0);
+
+  sqlite3_close(db);
+  removeDbFiles(zSrc);
+  removeDbFiles(zRemote);
+  removeDbFiles(zClone);
+}
+
 static void run_pull_staged_changes_fails(void){
   sqlite3 *localDb = 0;
   sqlite3 *remoteDb = 0;
@@ -18093,6 +18165,7 @@ static const RegressionCase aCases[] = {
     "Pull Remote Branch Updates Current Test",
     run_pull_remote_branch_updates_current },
   { "pull_dirty_working_set_fails", "Pull Dirty Working Set Fails Test", run_pull_dirty_working_set_fails },
+  { "pull_dirty_uptodate_fails", "Pull Dirty Up-To-Date Fails Test", run_pull_dirty_uptodate_fails },
   { "pull_staged_changes_fails", "Pull Staged Changes Fails Test", run_pull_staged_changes_fails },
   { "push_persist_failure", "Push Persist Failure Test", run_push_persist_failure },
   { "clone_persist_failure", "Clone Persist Failure Test", run_clone_persist_failure },
