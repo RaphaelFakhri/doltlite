@@ -1413,18 +1413,64 @@ static int csPendingMentions(ChunkStore *cs, const ProllyHash *h){
   return 0;
 }
 
+void chunkStoreNoteSourceCommit(ChunkStore *cs, const ProllyHash *h){
+  int i;
+  if( cs->isMemory || cs->isBuffer ) return;
+  if( cs->nSourceHit==0 && !cs->sourceHitLost ){
+    cs->sourceHitReloadGen = cs->reloadGen;
+  }
+  for(i=0; i<cs->nSourceHit; i++){
+    if( prollyHashCompare(&cs->aSourceHit[i], h)==0 ) return;
+  }
+  if( cs->nSourceHit>=(int)(sizeof(cs->aSourceHit)/sizeof(cs->aSourceHit[0])) ){
+    cs->sourceHitLost = 1;
+    return;
+  }
+  cs->aSourceHit[cs->nSourceHit++] = *h;
+}
+
+void chunkStoreClearSourceCommits(ChunkStore *cs){
+  cs->nSourceHit = 0;
+  cs->sourceHitLost = 0;
+}
+
+static int csSourceCommitSwept(ChunkStore *cs, int *pSwept){
+  int i;
+  *pSwept = 0;
+  if( cs->nSourceHit==0 && !cs->sourceHitLost ) return SQLITE_OK;
+  if( cs->reloadGen==cs->sourceHitReloadGen ) return SQLITE_OK;
+  if( cs->sourceHitLost ){
+    *pSwept = 1;
+    return SQLITE_OK;
+  }
+  for(i=0; i<cs->nSourceHit; i++){
+    int has = 0;
+    int rc = chunkStoreHas(cs, &cs->aSourceHit[i], &has);
+    if( rc!=SQLITE_OK ) return rc;
+    if( !has ){
+      *pSwept = 1;
+      return SQLITE_OK;
+    }
+  }
+  return SQLITE_OK;
+}
+
 /* Chunks leave the store only when a gc replaces the file, which forces a
 ** full reload; without one since the first hit, every hit still holds. A
 ** swept hit matters only if this batch references it; one left by abandoned
 ** work does not. */
 int csVerifyStoredHits(ChunkStore *cs){
   int i;
+  int bSwept = 0;
+  int rc = csSourceCommitSwept(cs, &bSwept);
+  if( rc!=SQLITE_OK ) return rc;
+  if( bSwept ) return SQLITE_BUSY;
   if( cs->nStoredHit==0 && !cs->storedHitLost ) return SQLITE_OK;
   if( cs->reloadGen==cs->storedHitReloadGen ) return SQLITE_OK;
   if( cs->storedHitLost ) return SQLITE_BUSY;
   for(i=0; i<cs->nStoredHit; i++){
     int has = 0;
-    int rc = chunkStoreHas(cs, &cs->aStoredHit[i], &has);
+    rc = chunkStoreHas(cs, &cs->aStoredHit[i], &has);
     if( rc!=SQLITE_OK ) return rc;
     if( !has && csPendingMentions(cs, &cs->aStoredHit[i]) ) return SQLITE_BUSY;
   }
@@ -1435,7 +1481,8 @@ int csVerifyStoredHits(ChunkStore *cs){
 ** part of it. */
 int chunkStoreStoredHitSwept(ChunkStore *cs, int *pSwept){
   int i;
-  *pSwept = 0;
+  int rc = csSourceCommitSwept(cs, pSwept);
+  if( rc!=SQLITE_OK || *pSwept ) return rc;
   if( cs->nStoredHit==0 && !cs->storedHitLost ) return SQLITE_OK;
   if( cs->reloadGen==cs->storedHitReloadGen ) return SQLITE_OK;
   if( cs->storedHitLost ){
@@ -1444,7 +1491,7 @@ int chunkStoreStoredHitSwept(ChunkStore *cs, int *pSwept){
   }
   for(i=0; i<cs->nStoredHit; i++){
     int has = 0;
-    int rc = chunkStoreHas(cs, &cs->aStoredHit[i], &has);
+    rc = chunkStoreHas(cs, &cs->aStoredHit[i], &has);
     if( rc!=SQLITE_OK ) return rc;
     if( !has ){
       *pSwept = 1;

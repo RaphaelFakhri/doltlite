@@ -375,6 +375,9 @@ int doltliteResolveRef(sqlite3 *db, const char *zRef, ProllyHash *pCommit){
     if( rc==SQLITE_NOTFOUND && !cs->pChunkSource ) rc = SQLITE_ERROR;
     if( rc!=SQLITE_OK ) return rc;
   }
+  if( db->pVcCommand && !prollyHashIsEmpty(pCommit) ){
+    chunkStoreNoteSourceCommit(cs, pCommit);
+  }
   return rc;
 }
 

@@ -275,6 +275,7 @@ int doltliteRefreshAndConfirmHead(
     failNextHeadConfirm = 0;
     return SQLITE_BUSY;
   }
+  doltliteTestPause("DOLTLITE_PAUSE_BEFORE_HEAD_CONFIRM");
 
   do {
     rc = chunkStoreLockAndRefresh(cs);

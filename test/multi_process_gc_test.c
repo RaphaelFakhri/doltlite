@@ -1282,6 +1282,85 @@ static void test_own_gc_sees_peer_write(void){
   remove(path);
 }
 
+/* A command reads its source commit before the head-confirm lock. A peer that
+** deletes the source branch and runs gc in that window sweeps the commit; the
+** command must refuse instead of publishing a ref to it. */
+static void gc_sweeps_vc_source_case(const char *zName, const char *zCmd,
+                                     int bDiverge){
+  char path[256];
+  char pause[256];
+  char ready[300];
+  char label[128];
+  sqlite3 *db = 0;
+  int status = 0;
+  pid_t pid;
+
+  printf("--- Test: peer deletes and sweeps the source of %s ---\n", zName);
+  snprintf(path, sizeof(path), DOLTLITE_TEST_TMPDIR "/mp_gc_src_%s_%d.db",
+           zName, (int)getpid());
+  snprintf(pause, sizeof(pause), DOLTLITE_TEST_TMPDIR "/mp_gc_src_%s_%d.pause",
+           zName, (int)getpid());
+  snprintf(ready, sizeof(ready), "%s.ready", pause);
+  setup_db_with_rows(path, 5);
+  sqlite3_open(path, &db);
+  execSql(db, "SELECT dolt_checkout('-b','feat')");
+  execSql(db, "UPDATE t SET v='feat' WHERE id=4");
+  execSql(db, "SELECT dolt_commit('-Am','feat')");
+  execSql(db, "SELECT dolt_checkout('main')");
+  if( bDiverge ){
+    execSql(db, "UPDATE t SET v='main' WHERE id=1");
+    execSql(db, "SELECT dolt_commit('-Am','main')");
+  }
+  sqlite3_close(db);
+  db = 0;
+
+  mpHoldPause(pause, ready);
+  pid = fork();
+  if( pid==0 ){
+    int rc;
+    setenv("DOLTLITE_PAUSE_BEFORE_HEAD_CONFIRM", pause, 1);
+    if( sqlite3_open(path, &db)!=SQLITE_OK ) _exit(1);
+    sqlite3_busy_timeout(db, 10000);
+    rc = execSql(db, zCmd);
+    sqlite3_close(db);
+    if( (rc&0xff)==SQLITE_BUSY ) _exit(10);
+    _exit(rc==SQLITE_OK ? 0 : 3);
+  }
+  if( pid<0 ){ perror("fork"); _exit(1); }
+  snprintf(label, sizeof(label), "gc_src_%s_reached_pause", zName);
+  check(label, mpAwaitPause(ready));
+  sqlite3_open(path, &db);
+  sqlite3_busy_timeout(db, 10000);
+  snprintf(label, sizeof(label), "gc_src_%s_peer_delete", zName);
+  check(label, execSql(db, "SELECT dolt_branch('-D','feat')")==SQLITE_OK);
+  snprintf(label, sizeof(label), "gc_src_%s_peer_gc", zName);
+  check(label, execSql(db, "SELECT dolt_gc()")==SQLITE_OK);
+  remove(pause);
+  waitpid(pid, &status, 0);
+  snprintf(label, sizeof(label), "gc_src_%s_busy", zName);
+  check(label, WIFEXITED(status) && WEXITSTATUS(status)==10);
+  sqlite3_close(db);
+  sqlite3_open(path, &db);
+  snprintf(label, sizeof(label), "gc_src_%s_integrity", zName);
+  check(label, strcmp(queryScalarText(db, "PRAGMA integrity_check"), "ok")==0);
+  snprintf(label, sizeof(label), "gc_src_%s_log", zName);
+  check(label, countRowsDiag(db, "SELECT count(*) FROM dolt_log")>0);
+  snprintf(label, sizeof(label), "gc_src_%s_gc_after", zName);
+  check(label, execSql(db, "SELECT dolt_gc()")==SQLITE_OK);
+  sqlite3_close(db);
+  remove(path);
+  remove(pause);
+  remove(ready);
+}
+
+static void test_gc_sweeps_vc_source(void){
+  gc_sweeps_vc_source_case("reset_soft", "SELECT dolt_reset('--soft','feat')", 0);
+  gc_sweeps_vc_source_case("reset", "SELECT dolt_reset('feat')", 0);
+  gc_sweeps_vc_source_case("merge_ff", "SELECT dolt_merge('feat')", 0);
+  gc_sweeps_vc_source_case("merge", "SELECT dolt_merge('feat')", 1);
+  gc_sweeps_vc_source_case("cherry_pick", "SELECT dolt_cherry_pick('feat')", 1);
+}
+
 int main(){
   printf("=== Multi-Process GC Concurrency Tests ===\n\n");
 
@@ -1303,6 +1382,7 @@ int main(){
   test_gc_sweeps_refused_commit_catalog();
   test_gc_before_add_persist();
   test_own_gc_sees_peer_write();
+  test_gc_sweeps_vc_source();
 
   printf("\n=== Results: %d passed, %d failed out of %d tests ===\n",
     nPass, nFail, nPass+nFail);
