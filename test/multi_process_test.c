@@ -2147,6 +2147,111 @@ static void test_ref_commands_wait_for_reader_lock(void){
   remove(path);
 }
 
+/* A shared holder forces publication to wait. The wait must not keep the
+** pending lock, so another process can read the pre-commit snapshot. */
+static void test_reader_during_publication_wait(void){
+  char path[256];
+  char pause[256];
+  char readyPath[300];
+  sqlite3 *db = 0;
+  int holdReady[2], holdRelease[2];
+  int status = 0;
+  int i;
+  pid_t holder, publisher;
+  char ch;
+
+  printf("--- Test: reader proceeds while publication waits ---\n");
+  snprintf(path, sizeof(path),
+           DOLTLITE_TEST_TMPDIR "/mp_pub_wait_%d.db", (int)getpid());
+  snprintf(pause, sizeof(pause),
+           DOLTLITE_TEST_TMPDIR "/mp_pub_wait_%d.pause", (int)getpid());
+  snprintf(readyPath, sizeof(readyPath), "%s.ready", pause);
+  remove(path);
+  remove(pause);
+  remove(readyPath);
+  setup_db(path);
+  {
+    FILE *hold = fopen(pause, "w");
+    if( !hold ){ perror("pause"); _exit(1); }
+    if( fputc('x', hold)==EOF ){ perror("pause"); _exit(1); }
+    fclose(hold);
+  }
+
+  mpPipe(holdReady);
+  mpPipe(holdRelease);
+  holder = fork();
+  if( holder<0 ){ perror("fork"); _exit(1); }
+  if( holder==0 ){
+    sqlite3_vfs *vfs = sqlite3_vfs_find(0);
+    sqlite3_file *file = malloc(vfs->szOsFile);
+    char zOpen[260];
+    int flags = 0;
+    close(holdReady[0]);
+    close(holdRelease[1]);
+    if( !file ) _exit(1);
+    memset(file, 0, vfs->szOsFile);
+    /* xOpen expects the main-db name double-nul terminated. */
+    memset(zOpen, 0, sizeof(zOpen));
+    snprintf(zOpen, sizeof(zOpen)-2, "%s", path);
+    if( vfs->xOpen(vfs, zOpen, file,
+        SQLITE_OPEN_MAIN_DB|SQLITE_OPEN_READWRITE, &flags)!=SQLITE_OK ){
+      _exit(2);
+    }
+    if( file->pMethods->xLock(file, SQLITE_LOCK_SHARED)!=SQLITE_OK ) _exit(3);
+    mpWrite(holdReady[1], "r");
+    mpRead(holdRelease[0], &ch);
+    if( file->pMethods->xUnlock(file, SQLITE_LOCK_NONE)!=SQLITE_OK ) _exit(4);
+    if( file->pMethods->xClose(file)!=SQLITE_OK ) _exit(5);
+    free(file);
+    _exit(0);
+  }
+  close(holdReady[1]);
+  close(holdRelease[0]);
+  mpRead(holdReady[0], &ch);
+
+  publisher = fork();
+  if( publisher<0 ){ perror("fork"); _exit(1); }
+  if( publisher==0 ){
+    int rc;
+    close(holdReady[0]);
+    close(holdRelease[1]);
+    setenv("DOLTLITE_PAUSE_DURING_PUBLISH", pause, 1);
+    if( sqlite3_open(path, &db)!=SQLITE_OK ) _exit(1);
+    sqlite3_busy_timeout(db, 15000);
+    rc = execSql(db, "INSERT INTO t VALUES(2, 'pending')");
+    sqlite3_close(db);
+    if( rc==SQLITE_OK ) _exit(0);
+    if( rc==SQLITE_BUSY ) _exit(10);
+    _exit(3);
+  }
+
+  for( i=0; i<500 && access(readyPath, F_OK)!=0; i++ ) sqlite3_sleep(20);
+  check("mp_pub_wait_reached_pause", access(readyPath, F_OK)==0);
+  check("mp_pub_wait_open", sqlite3_open(path, &db)==SQLITE_OK);
+  sqlite3_busy_timeout(db, 1000);
+  check("mp_pub_wait_sees_precommit",
+        strcmp(queryScalarText(db, "SELECT count(*) FROM t"), "1")==0);
+  sqlite3_close(db);
+
+  mpWrite(holdRelease[1], "g");
+  check("mp_pub_wait_holder_exit", waitpid(holder, &status, 0)==holder);
+  check("mp_pub_wait_holder_ok",
+        WIFEXITED(status) && WEXITSTATUS(status)==0);
+  remove(pause);
+  check("mp_pub_wait_publisher_exit", waitpid(publisher, &status, 0)==publisher);
+  check("mp_pub_wait_publisher_ok",
+        WIFEXITED(status) && WEXITSTATUS(status)==0);
+  check("mp_pub_wait_reopen", sqlite3_open(path, &db)==SQLITE_OK);
+  check("mp_pub_wait_sees_commit",
+        strcmp(queryScalarText(db, "SELECT count(*) FROM t"), "2")==0);
+  sqlite3_close(db);
+  close(holdReady[0]);
+  close(holdRelease[1]);
+  remove(path);
+  remove(pause);
+  remove(readyPath);
+}
+
 int main(){
   printf("=== Multi-Process Concurrency Tests ===\n\n");
 
@@ -2175,6 +2280,7 @@ int main(){
   test_cross_process_commit_after_peer();
   test_many_process_commit_contention();
   test_reader_waits_for_publishing_writer();
+  test_reader_during_publication_wait();
 
   printf("\n=== Results: %d passed, %d failed out of %d tests ===\n",
     nPass, nFail, nPass+nFail);
