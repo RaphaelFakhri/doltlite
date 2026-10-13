@@ -3023,7 +3023,11 @@ static void doltliteRebaseInteractiveContinue(
 
   rc = doltliteValidateRebasePlanTable(db, &zPlanErr);
   if( rc!=SQLITE_OK ){
-    if( zPlanErr ) sqlite3_result_error(context, zPlanErr, -1);
+    if( zPlanErr ){
+      sqlite3_result_error(context, zPlanErr, -1);
+    }else{
+      sqlite3_result_error_code(context, rc);
+    }
     sqlite3_free(zPlanErr);
     goto abort_err_silent;
   }
