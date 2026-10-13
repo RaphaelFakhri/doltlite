@@ -3391,6 +3391,10 @@ int sqlite3VdbeHalt(Vdbe *p){
     int mrc;   /* Primary error code from p->rc */
     int eStatementOp = 0;
     int isSpecialError;            /* Set to true if a 'special' error */
+#ifdef DOLTLITE_PROLLY
+    int bVcInterrupt = (p->rc&0xff)==SQLITE_INTERRUPT
+        && db->nVcStatementRestore && db->pVcCommand && db->pVcCommand!=p;
+#endif
 
     /* Lock all btrees used by the statement */
     sqlite3VdbeEnter(p);
@@ -3422,8 +3426,13 @@ int sqlite3VdbeHalt(Vdbe *p){
         if( (mrc==SQLITE_NOMEM || mrc==SQLITE_FULL
 #ifdef DOLTLITE_PROLLY
              || (mrc&0xff)==SQLITE_NOMEM
+             || bVcInterrupt
 #endif
+#ifdef DOLTLITE_PROLLY
+            ) && (p->usesStmtJournal || bVcInterrupt) ){
+#else
             ) && p->usesStmtJournal ){
+#endif
           eStatementOp = SAVEPOINT_ROLLBACK;
         }else{
           /* We are forced to roll back the active transaction. Before doing
@@ -3523,8 +3532,13 @@ int sqlite3VdbeHalt(Vdbe *p){
     ** current statement error code.
     */
     if( eStatementOp ){
+#ifdef DOLTLITE_PROLLY
+      int bVcRestore = eStatementOp==SAVEPOINT_ROLLBACK && bVcInterrupt;
+      db->nVcInterruptMask += bVcRestore;
+#endif
       rc = sqlite3VdbeCloseStatement(p, eStatementOp);
 #ifdef DOLTLITE_PROLLY
+      db->nVcInterruptMask -= bVcRestore;
       if( rc==SQLITE_OK && eStatementOp==SAVEPOINT_RELEASE
        && db->mallocFailed ){
         p->rc = SQLITE_NOMEM_BKPT;
