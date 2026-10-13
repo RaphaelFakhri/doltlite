@@ -1264,6 +1264,9 @@ static int remoteDbAcquire(
   return SQLITE_OK;
 
 acquire_error:
+#if SQLITE_OS_WIN
+  remoteDbHandleCloseStore(h);
+#endif
   pthread_mutex_unlock(&h->mu);
   pthread_mutex_lock(&pSrv->mutex);
   h->nReservations--;
@@ -1273,11 +1276,14 @@ acquire_error:
 
 static void remoteDbRelease(DoltliteServer *pSrv, RemoteDbHandle *h){
   if( !h ) return;
-  /* Leave the store open; only drop the exclusive lock. */
   if( h->bOpen
    && (h->store.staging.nPending>0 || h->store.staging.nRecentUncommitted>0) ){
     chunkStoreRollback(&h->store);
   }
+#if SQLITE_OS_WIN
+  /* An idle open handle prevents a Windows peer from replacing the file. */
+  remoteDbHandleCloseStore(h);
+#endif
   pthread_mutex_unlock(&h->mu);
   pthread_mutex_lock(&pSrv->mutex);
   h->nReservations--;

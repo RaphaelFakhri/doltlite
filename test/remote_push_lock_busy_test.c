@@ -153,7 +153,7 @@ static void test_diverged_is_not_lock(void){
 
 static DoltliteRemote originalRemote;
 static sqlite3 *racePeer;
-static int raceStage, raceSameBranch, raceRemaining, raceCount;
+static int raceStage, raceSameBranch, raceRemaining, raceCount, raceTag;
 
 static int movePeer(void){
   char *zSql;
@@ -167,6 +167,12 @@ static int movePeer(void){
   if( !zSql ) return SQLITE_NOMEM;
   rc = exec(racePeer, zSql);
   sqlite3_free(zSql);
+  if( rc==SQLITE_OK && raceSameBranch && raceTag ){
+    if( chunkStoreFindTag(doltliteGetChunkStore(racePeer), "release", 0)==SQLITE_OK ){
+      rc = exec(racePeer, "SELECT dolt_tag('-d','release');");
+    }
+    if( rc==SQLITE_OK ) rc = exec(racePeer, "SELECT dolt_tag('release');");
+  }
   return rc;
 }
 
@@ -200,7 +206,7 @@ static int racingCommit(DoltliteRemote *p){
 }
 
 static void test_push_ref_race(int stage, int sameBranch, int noOp,
-                              int force, int nRaces, int deleting){
+                              int force, int nRaces, int deleting, int tagging){
   char zRemote[256], zSrc[256], zSql[512];
   sqlite3 *dbSrc = 0;
   DoltliteRemote *remote;
@@ -216,6 +222,10 @@ static void test_push_ref_race(int stage, int sameBranch, int noOp,
     "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);"
     "INSERT INTO t VALUES(1,'base');"
     "SELECT dolt_commit('-Am','base');") == SQLITE_OK);
+  if( tagging>1 ){
+    check("tag race: seed remote tag", exec(racePeer,
+      "SELECT dolt_tag('release');")==SQLITE_OK);
+  }
   if( deleting ){
     check("race: retain default branch", exec(racePeer,
       "SELECT dolt_branch('keep'); SELECT dolt_default_branch('keep');")==SQLITE_OK);
@@ -229,6 +239,14 @@ static void test_push_ref_race(int stage, int sameBranch, int noOp,
       "INSERT INTO t VALUES(2,'local');"
       "SELECT dolt_commit('-Am','local');") == SQLITE_OK);
   }
+  if( tagging ){
+    if( tagging>1 ){
+      check("tag race: replace local tag", exec(dbSrc,
+        "SELECT dolt_tag('-d','release');")==SQLITE_OK);
+    }
+    check("tag race: local tag", exec(dbSrc,
+      "SELECT dolt_tag('release');")==SQLITE_OK);
+  }
   local = doltliteGetChunkStore(dbSrc);
   check("race: read local head", chunkStoreFindBranch(local, "main", &localTip)==SQLITE_OK);
   remote = doltliteFsRemoteOpen(sqlite3_vfs_find(0), zRemote);
@@ -236,34 +254,42 @@ static void test_push_ref_race(int stage, int sameBranch, int noOp,
   if( remote ){
     originalRemote = *remote;
     raceStage = stage;
+    raceTag = tagging;
     raceSameBranch = sameBranch;
     raceRemaining = nRaces;
     raceCount = 0;
     remote->xGetRefs = racingGetRefs;
     remote->xSetRefsIf = racingSetRefs;
     remote->xCommit = racingCommit;
-    rc = doltlitePush(local, remote, deleting ? ":main" : "main", force);
+    rc = tagging ? doltlitePushTag(local, remote, "release")
+                 : doltlitePush(local, remote, deleting ? ":main" : "main", force);
     if( rc!=SQLITE_OK && !sameBranch && nRaces<64 ){
       fprintf(stderr, "race stage=%d noOp=%d delete=%d rc=%d\n",
               stage, noOp, deleting, rc);
     }
     if( sameBranch ){
-      check("same_branch_race_rejected_even_with_force", rc==SQLITE_BUSY_SNAPSHOT);
+      check(tagging ? "same_tag_race_rejected"
+                    : "same_branch_race_rejected_even_with_force",
+            rc==SQLITE_BUSY_SNAPSHOT);
     }else if( nRaces>=64 ){
       check("unrelated_ref_retry_is_bounded", rc==SQLITE_BUSY_SNAPSHOT && raceCount==64);
     }else{
-      check("unrelated_ref_push_retries", rc==SQLITE_OK);
+      check(tagging ? "unrelated_ref_tag_push_retries"
+                    : "unrelated_ref_push_retries", rc==SQLITE_OK);
       check("race: all unrelated updates completed", raceCount==nRaces);
     }
     remote->xClose(remote);
     check("race: refresh peer", chunkStoreLockAndRefresh(doltliteGetChunkStore(racePeer))==SQLITE_OK);
-    rc = chunkStoreFindBranch(doltliteGetChunkStore(racePeer), "main", &remoteTip);
+    rc = tagging
+        ? chunkStoreFindTag(doltliteGetChunkStore(racePeer), "release", &remoteTip)
+        : chunkStoreFindBranch(doltliteGetChunkStore(racePeer), "main", &remoteTip);
     if( !sameBranch && nRaces<64 ){
       check("race: expected final target", deleting ? rc==SQLITE_NOTFOUND
           : rc==SQLITE_OK && prollyHashCompare(&localTip, &remoteTip)==0);
     }else{
-      check("race: rejected push preserves peer", rc==SQLITE_OK
-          && prollyHashCompare(&localTip, &remoteTip)!=0);
+      check("race: rejected push preserves peer",
+          tagging==1 && !sameBranch ? rc==SQLITE_NOTFOUND
+          : rc==SQLITE_OK && prollyHashCompare(&localTip, &remoteTip)!=0);
     }
     if( !sameBranch ){
       sqlite3_snprintf(sizeof(zSql), zSql, "peer%d", raceCount);
@@ -428,18 +454,26 @@ int main(void){
   test_push_waits_for_busy_timeout();
   test_fetch_pull_wait_for_local_busy_timeout();
   test_diverged_is_not_lock();
-  test_push_ref_race(1, 0, 0, 0, 1, 0);
-  test_push_ref_race(2, 0, 0, 0, 2, 0);
-  test_push_ref_race(3, 0, 0, 0, 2, 0);
-  test_push_ref_race(2, 0, 0, 0, 20, 0);
-  test_push_ref_race(3, 0, 0, 0, 20, 0);
-  test_push_ref_race(1, 0, 1, 0, 1, 0);
-  test_push_ref_race(1, 1, 0, 0, 1, 0);
-  test_push_ref_race(2, 1, 0, 1, 1, 0);
-  test_push_ref_race(3, 1, 0, 1, 1, 0);
-  test_push_ref_race(2, 0, 0, 0, 100, 0);
-  test_push_ref_race(2, 0, 0, 0, 1, 1);
-  test_push_ref_race(2, 1, 0, 1, 1, 1);
+  test_push_ref_race(1, 0, 0, 0, 1, 0, 0);
+  test_push_ref_race(2, 0, 0, 0, 2, 0, 0);
+  test_push_ref_race(3, 0, 0, 0, 2, 0, 0);
+  test_push_ref_race(2, 0, 0, 0, 20, 0, 0);
+  test_push_ref_race(3, 0, 0, 0, 20, 0, 0);
+  test_push_ref_race(1, 0, 1, 0, 1, 0, 0);
+  test_push_ref_race(1, 1, 0, 0, 1, 0, 0);
+  test_push_ref_race(2, 1, 0, 1, 1, 0, 0);
+  test_push_ref_race(3, 1, 0, 1, 1, 0, 0);
+  test_push_ref_race(2, 0, 0, 0, 100, 0, 0);
+  test_push_ref_race(2, 0, 0, 0, 1, 1, 0);
+  test_push_ref_race(2, 1, 0, 1, 1, 1, 0);
+  test_push_ref_race(1, 0, 0, 0, 1, 0, 1);
+  test_push_ref_race(1, 1, 0, 0, 1, 0, 1);
+  test_push_ref_race(2, 0, 0, 0, 2, 0, 1);
+  test_push_ref_race(3, 0, 0, 0, 2, 0, 1);
+  test_push_ref_race(2, 0, 0, 0, 2, 0, 2);
+  test_push_ref_race(2, 1, 0, 0, 1, 0, 1);
+  test_push_ref_race(2, 1, 0, 0, 1, 0, 2);
+  test_push_ref_race(2, 0, 0, 0, 100, 0, 1);
   printf("remote_push_lock_busy_test: %d passed, %d failed\n", nPass, nFail);
   return nFail ? 1 : 0;
 }
