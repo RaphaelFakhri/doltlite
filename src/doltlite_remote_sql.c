@@ -86,6 +86,164 @@ static int remoteSqlOpenErrorCode(const char *zUrl){
       || strncmp(zUrl, "https://", 8)==0 ? SQLITE_CANTOPEN : SQLITE_ERROR;
 }
 
+static int remoteSqlPathIsAbs(const char *z){
+  if( z[0]=='/' ) return 1;
+  if( ((z[0]>='A' && z[0]<='Z') || (z[0]>='a' && z[0]<='z'))
+   && z[1]==':' && (z[2]=='/' || z[2]=='\\') ) return 1;
+  return 0;
+}
+
+/* Drop "." and ".." and repeated slashes. A relative ".." that would leave
+** the string stays. The caller frees the result. */
+static char *remoteSqlCleanPath(const char *zIn){
+  char *zOut;
+  char *pWrite;
+  const char *z;
+  int abs;
+
+  zOut = sqlite3_malloc((int)strlen(zIn) + 2);
+  if( !zOut ) return 0;
+  abs = zIn[0]=='/';
+  pWrite = zOut;
+  if( abs ) *pWrite++ = '/';
+  z = zIn;
+  while( *z ){
+    const char *zStart;
+    int n;
+    while( *z=='/' ) z++;
+    if( !*z ) break;
+    zStart = z;
+    while( *z && *z!='/' ) z++;
+    n = (int)(z - zStart);
+    if( n==1 && zStart[0]=='.' ) continue;
+    if( n==2 && zStart[0]=='.' && zStart[1]=='.' ){
+      if( pWrite > zOut + abs ){
+        while( pWrite>zOut+abs && pWrite[-1]!='/' ) pWrite--;
+        if( pWrite>zOut+abs && pWrite[-1]=='/' ) pWrite--;
+      }else if( !abs ){
+        if( pWrite>zOut ) *pWrite++ = '/';
+        memcpy(pWrite, "..", 2);
+        pWrite += 2;
+      }
+      continue;
+    }
+    if( pWrite > zOut + abs ) *pWrite++ = '/';
+    memcpy(pWrite, zStart, (size_t)n);
+    pWrite += n;
+  }
+  if( pWrite==zOut ) *pWrite++ = '.';
+  *pWrite = 0;
+  return zOut;
+}
+
+/* file://rel.db is stored as file:// plus the directory it was added from,
+** so a later push, fetch, or pull does not follow the process's cwd.
+** An absolute file URL is only cleaned. The caller frees the result. */
+static char *remoteSqlAbsoluteFileUrl(sqlite3_vfs *pVfs, const char *zUrl){
+  const char *zRest;
+  const char *zSlash;
+  const char *zHost;
+  const char *zPath;
+  char *zHostOwned = 0;
+  char *zPathOwned = 0;
+  char *zJoined = 0;
+  char *zClean = 0;
+  char *zCwd = 0;
+  char *zAbs = 0;
+  char *zOut = 0;
+  char *p;
+  int nHost;
+  int nFull;
+  int rc;
+
+  zRest = zUrl + 7;
+  zSlash = strchr(zRest, '/');
+  if( !zSlash ){
+    zHost = zRest;
+    zPath = "";
+  }else{
+    nHost = (int)(zSlash - zRest);
+    zHostOwned = sqlite3_mprintf("%.*s", nHost, zRest);
+    if( !zHostOwned ) return 0;
+    zHost = zHostOwned;
+    zPath = zSlash;
+  }
+  if( zHost[0]=='.' ){
+    char *zMoved = sqlite3_mprintf("%s%s", zHost, zPath);
+    sqlite3_free(zHostOwned);
+    zHostOwned = 0;
+    if( !zMoved ) return 0;
+    sqlite3_free(zPathOwned);
+    zPathOwned = zMoved;
+    zHost = "";
+    zPath = zPathOwned;
+  }
+  if( zPath[0]==0 || (zPath[0]!='/' && zPath[0]!='.') ){
+    char *zPrefixed = sqlite3_mprintf("/%s", zPath);
+    if( !zPrefixed ){
+      sqlite3_free(zHostOwned);
+      sqlite3_free(zPathOwned);
+      return 0;
+    }
+    sqlite3_free(zPathOwned);
+    zPathOwned = zPrefixed;
+    zPath = zPathOwned;
+  }
+  zJoined = sqlite3_mprintf("%s%s", zHost, zPath);
+  sqlite3_free(zHostOwned);
+  sqlite3_free(zPathOwned);
+  zHostOwned = 0;
+  zPathOwned = 0;
+  if( !zJoined ) return 0;
+  for(p=zJoined; *p; p++){
+    if( *p=='\\' ) *p = '/';
+  }
+  zClean = remoteSqlCleanPath(zJoined);
+  sqlite3_free(zJoined);
+  if( !zClean ) return 0;
+  if( !remoteSqlPathIsAbs(zClean) ){
+    if( !pVfs ) pVfs = sqlite3_vfs_find(0);
+    nFull = pVfs ? pVfs->mxPathname + 1 : 0;
+    if( nFull<2 ){
+      sqlite3_free(zClean);
+      return 0;
+    }
+    zCwd = sqlite3_malloc(nFull);
+    if( !zCwd ){
+      sqlite3_free(zClean);
+      return 0;
+    }
+    rc = sqlite3OsFullPathname(pVfs, ".", nFull, zCwd);
+    if( rc!=SQLITE_OK && rc!=SQLITE_OK_SYMLINK ){
+      sqlite3_free(zCwd);
+      sqlite3_free(zClean);
+      return 0;
+    }
+    for(p=zCwd; *p; p++){
+      if( *p=='\\' ) *p = '/';
+    }
+    if( strcmp(zClean, ".")==0 ){
+      zAbs = zCwd;
+      zCwd = 0;
+    }else{
+      zAbs = sqlite3_mprintf("%s/%s", zCwd, zClean);
+      sqlite3_free(zCwd);
+      zCwd = 0;
+      if( !zAbs ){
+        sqlite3_free(zClean);
+        return 0;
+      }
+    }
+    sqlite3_free(zClean);
+    zClean = remoteSqlCleanPath(zAbs);
+    sqlite3_free(zAbs);
+    if( !zClean ) return 0;
+  }
+  zOut = sqlite3_mprintf("file://%s", zClean);
+  sqlite3_free(zClean);
+  return zOut;
+}
+
 static void remoteSqlResultError(
   sqlite3_context *ctx,
   int rc,
@@ -370,6 +528,7 @@ static void doltRemoteFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv)
     const char *zUrl;
     const char *zNormalizedName;
     char *zOwnedName;
+    char *zUrlOwned = 0;
     if( argc<3 ){
       doltliteVcResultError(ctx, db, "url required for add");
       return;
@@ -390,10 +549,20 @@ static void doltRemoteFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv)
       doltliteVcResultError(ctx, db, "remote name invalid");
       return;
     }
+    if( strncmp(zUrl, "file://", 7)==0 ){
+      zUrlOwned = remoteSqlAbsoluteFileUrl(chunkFileGetVfs(&cs->file), zUrl);
+      if( !zUrlOwned ){
+        sqlite3_free(zOwnedName);
+        doltliteVcResultError(ctx, db, "failed to resolve remote URL");
+        return;
+      }
+      zUrl = zUrlOwned;
+    }
     m.zName = zNormalizedName;
     m.zUrl = zUrl;
     rc = doltliteMutateRefs(db, mutateRemoteRef, &m);
     sqlite3_free(zOwnedName);
+    sqlite3_free(zUrlOwned);
     if( rc!=SQLITE_OK ){
       (void)doltliteVcSealSavepointError(db);
       remoteSqlResultError(ctx, rc,
@@ -1555,6 +1724,7 @@ static void doltCloneFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
     { "branch", 'b', DOLTLITE_CMD_OPTION_VALUE, 0, 0 }
   };
   const char *zUrl;
+  char *zUrlOwned = 0;
   const char *zRevision = 0;
   const char *zBranchOpt = 0;
   DoltliteTxnState savedState;
@@ -1649,11 +1819,22 @@ static void doltCloneFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
     chunkStoreClearRefs(cs);
   }
 
+  if( zUrl && strncmp(zUrl, "file://", 7)==0 ){
+    zUrlOwned = remoteSqlAbsoluteFileUrl(chunkFileGetVfs(&cs->file), zUrl);
+    if( !zUrlOwned ){
+      remoteSqlRestoreAndReport(ctx, db, cs, &savedState, SQLITE_CANTOPEN,
+                                "failed to resolve remote URL");
+      return;
+    }
+    zUrl = zUrlOwned;
+  }
+
   pRemote = openRemoteByUrl(db, chunkFileGetVfs(&cs->file), zUrl, 0);
   if( !pRemote ){
     int openRc = remoteSqlOpenErrorCode(zUrl);
     const char *zMsg = openRc==SQLITE_CANTOPEN ? "failed to open remote"
       : "failed to open remote (URL must start with file:// or http://)";
+    sqlite3_free(zUrlOwned);
     remoteSqlRestoreAndReport(ctx, db, cs, &savedState, openRc, zMsg);
     return;
   }
@@ -1669,6 +1850,7 @@ static void doltCloneFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
     doltliteFreeStringArray(azNames, nNames);
     if( rc!=SQLITE_OK || !found ){
       pRemote->xClose(pRemote);
+      sqlite3_free(zUrlOwned);
       remoteSqlRestoreAndReport(ctx, db, cs, &savedState,
           rc!=SQLITE_OK ? rc : SQLITE_ERROR,
           rc!=SQLITE_OK ? 0 : "branch not found on remote");
@@ -1680,6 +1862,7 @@ static void doltCloneFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
     rc = doltliteOriginSourceEnable(cs, db, 0);
     if( rc!=SQLITE_OK ){
       pRemote->xClose(pRemote);
+      sqlite3_free(zUrlOwned);
       remoteSqlRestoreAndReport(ctx, db, cs, &savedState, rc,
                                 "failed to initialize lazy clone");
       return;
@@ -1720,9 +1903,12 @@ static void doltCloneFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
                               zOwned ? zOwned : "clone failed");
     if( occupied ) doltliteInvalidateSessionWorkingState(db);
     sqlite3_free(zOwned);
+    sqlite3_free(zUrlOwned);
     return;
   }
   pRemote->xClose(pRemote);
+  sqlite3_free(zUrlOwned);
+  zUrlOwned = 0;
 
   if( bLazy ){
     Btree *pBtree = sqlite3DbNameToBtree(db, 0);

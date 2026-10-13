@@ -35,7 +35,7 @@ SELECT dolt_clone('--lazy', '--revision', 'v1.0', 'file:///data/src.db');
 
 | Function | Arguments | Notes |
 |---|---|---|
-| `dolt_remote` | `'add', name, url` or `'remove', name` | `file://` or `http(s)://...` URL naming the database file |
+| `dolt_remote` | `'add', name, url` or `'remove', name` | `file://` or `http(s)://...` URL naming the database file. A `file://` path is stored absolute |
 | `dolt_push` | `remote, branch [, '--force']` or `remote, 'src:dst'` or `remote, tag` or `remote, '--tags'` | Non-fast-forward is refused without `--force`. `src:dst` pushes revision `src` as remote branch `dst`. `HEAD` as `src` is the checked-out branch's tip; any other `src` is a revision |
 | `dolt_fetch` | `remote [, branch or refspec] [, '--prune']` | Updates `remotes/<remote>/<branch>` tracking refs and tags. A refspec maps `refs/heads/<pat>` onto `refs/remotes/<name>/<pat>`. `--prune` drops tracking refs the remote no longer has, and is refused together with a refspec |
 | `dolt_pull` | `[remote [, branch]]` | With no branch, fetches every remote branch and tag, then fast-forwards or merges the current branch. With a branch, fetches only that branch |
