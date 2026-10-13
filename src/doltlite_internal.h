@@ -823,6 +823,9 @@ static SQLITE_INLINE int doltliteDupBytes(const u8 *pIn, int nIn, u8 **ppOut){
   return SQLITE_OK;
 }
 
+int doltliteLoadCatalogFromStore(ChunkStore *cs, const ProllyHash *catHash,
+                                 struct TableEntry **ppTables, int *pnTables,
+                                 Pgno *piNextTable);
 int doltliteLoadCatalog(sqlite3 *db, const ProllyHash *catHash,
                         struct TableEntry **ppTables, int *pnTables,
                         Pgno *piNextTable);

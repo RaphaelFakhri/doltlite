@@ -5,6 +5,7 @@
 #include "chunk_store.h"
 #include "doltlite_commit.h"
 #include "doltlite_remote.h"
+#include "doltlite_internal.h"
 #include "lib/test_tmpdir.h"
 
 static int nPass = 0;
@@ -89,6 +90,50 @@ static u8 *seedRefs(ChunkStore *cs, const ProllyHash *a, const ProllyHash *b,
   return blob;
 }
 
+static void test_file_pushed_sequences(void){
+  const char *zPath = DOLTLITE_TEST_TMPDIR "/scoped_refs_file_sequences.db";
+  sqlite3 *db = 0;
+  DoltliteRemote *pRemote;
+  ChunkStore next;
+  u8 *pBlob = 0;
+  int nBlob = 0;
+  ProllyHash expected, head;
+  int rc;
+  remove(zPath);
+  check("file sequences: open", sqlite3_open(zPath, &db)==SQLITE_OK);
+  check("file sequences: seed", sqlite3_exec(db,
+    "CREATE TABLE t(id INTEGER PRIMARY KEY AUTOINCREMENT,v);"
+    "INSERT INTO t(v) VALUES('base'); SELECT dolt_commit('-Am','seed');",
+    0, 0, 0)==SQLITE_OK);
+  pRemote = doltliteFsRemoteOpen(sqlite3_vfs_find(0), zPath);
+  check("file sequences: transport", pRemote!=0);
+  memset(&next, 0, sizeof(next));
+  if( pRemote ){
+    check("file sequences: read refs", pRemote->xGetRefs(pRemote, &pBlob, &nBlob)==SQLITE_OK);
+    prollyHashCompute(pBlob, nBlob, &expected);
+    check("file sequences: load refs", chunkStoreLoadRefsFromBlob(&next, pBlob, nBlob)==SQLITE_OK);
+    sqlite3_free(pBlob);
+    pBlob = 0;
+    check("file sequences: branch", chunkStoreFindBranch(&next, "main", &head)==SQLITE_OK);
+    chunkStoreAddBranch(&next, "forged", &head);
+    chunkStoreBumpSequence(&next, "t", LARGEST_INT64);
+    chunkStoreBumpSequence(&next, "ghost", LARGEST_INT64);
+    check("file sequences: serialize", chunkStoreSerializeRefsToBlob(&next, &pBlob, &nBlob)==SQLITE_OK);
+    rc = pRemote->xSetRefsIf(pRemote, &expected, "forged", 0, pBlob, nBlob);
+    check("file sequences: install", rc==SQLITE_OK);
+    if( rc==SQLITE_OK ) check("file sequences: commit", pRemote->xCommit(pRemote)==SQLITE_OK);
+    pRemote->xClose(pRemote);
+  }
+  check("file_pushed_sequences_do_not_exhaust_inserts", sqlite3_exec(db,
+    "INSERT INTO t(v) VALUES('after');", 0, 0, 0)==SQLITE_OK);
+  check("file sequences: actual counter", chunkStoreGetSequenceValue(doltliteGetChunkStore(db), "t")==2);
+  check("file sequences: invented counter absent", chunkStoreGetSequenceValue(doltliteGetChunkStore(db), "ghost")==0);
+  sqlite3_free(pBlob);
+  chunkStoreClose(&next);
+  sqlite3_close(db);
+  remove(zPath);
+}
+
 int main(void){
   ChunkStore cs;
   ProllyHash Ha, Hb, Hc, Hd, found;
@@ -98,6 +143,7 @@ int main(void){
   const char *path = DOLTLITE_TEST_TMPDIR "/scoped_refs_push_test.db";
 
   sqlite3_initialize();
+  test_file_pushed_sequences();
   printf("Scoped refs-push authorization tests\n");
   printf("====================================\n\n");
 
@@ -110,6 +156,38 @@ int main(void){
   curBlob = seedRefs(&cs, &Ha, &Hb, &nCur);
   check("seed refs (main@a, foo@b)", curBlob!=0);
   if( !curBlob ){ printf("\n%d passed, %d failed\n", nPass, nFail); return 1; }
+
+  {
+    const char *azName[] = {"HEAD", "head", "WORKING", "STAGED", "a..b",
+      "main~1", "x y", "x.lock", "/x", "x/", "a//b", "a/.b"};
+    int k, force;
+    for(k=0; k<(int)(sizeof(azName)/sizeof(azName[0])); k++){
+      ChunkStore tmp;
+      u8 *blob = 0;
+      int n = 0;
+      memset(&tmp, 0, sizeof(tmp));
+      chunkStoreLoadRefsFromBlob(&tmp, curBlob, nCur);
+      chunkStoreAddBranch(&tmp, azName[k], &Ha);
+      chunkStoreSerializeRefsToBlob(&tmp, &blob, &n);
+      for(force=0; force<=1; force++){
+        check("reject_invalid_pushed_branch_name",
+          doltliteValidateScopedRefsUpdate(&cs, blob, n, azName[k], force, 0)==SQLITE_CONSTRAINT);
+      }
+      sqlite3_free(blob);
+      blob = 0;
+      chunkStoreDeleteBranch(&tmp, azName[k]);
+      chunkStoreAddTag(&tmp, azName[k], &Ha);
+      chunkStoreSerializeRefsToBlob(&tmp, &blob, &n);
+      for(force=0; force<=1; force++){
+        char *zScope = sqlite3_mprintf("tag:%s", azName[k]);
+        check("reject_invalid_pushed_tag_name",
+          doltliteValidateScopedRefsUpdate(&cs, blob, n, zScope, force, 0)==SQLITE_CONSTRAINT);
+        sqlite3_free(zScope);
+      }
+      sqlite3_free(blob);
+      chunkStoreClose(&tmp);
+    }
+  }
 
   /* Attack: a push declaring branch foo carries a blob that also rewrites
   ** main. The scoped validator must reject it, with or without force. */

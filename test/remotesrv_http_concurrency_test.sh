@@ -253,6 +253,14 @@ else
   check "conditional installs preserve peer writes without global retries" 0 1
 fi
 
+echo "=== pushed ref names and sequence metadata ==="
+if python3 "$(dirname "$0")/lib/remotesrv_refs_validation.py" "$DOLTLITE" \
+    "http://127.0.0.1:$PORT/refs_validation.db" "$TMP/srv/refs_validation.db"; then
+  check "pushed refs cannot inject invalid names or sequence counters" 0 0
+else
+  check "pushed refs cannot inject invalid names or sequence counters" 0 1
+fi
+
 echo "=== remote branch deletion during fetch and pull ==="
 if python3 "$(dirname "$0")/lib/remotesrv_fetch_race.py" "$DOLTLITE" \
     "http://127.0.0.1:$PORT/fetch_race.db" "$TMP/srv/fetch_race.db" "$TMP"; then

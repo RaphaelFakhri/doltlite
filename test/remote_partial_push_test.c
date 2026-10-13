@@ -89,12 +89,21 @@ static int putOne(ChunkStore *pSrc, ChunkStore *pDst, const ProllyHash *pHash){
   return rc;
 }
 
-static u8 *refsBlobFor(const ProllyHash *pCommit, int *pnBlob){
+static u8 *refsBlobFor(ChunkStore *pStore, const ProllyHash *pCommit, int *pnBlob){
   ChunkStore refs;
   u8 *pBlob = 0;
   memset(&refs, 0, sizeof(refs));
+  if( chunkStoreSerializeRefsToBlob(pStore, &pBlob, pnBlob)!=SQLITE_OK ) return 0;
+  if( chunkStoreLoadRefsFromBlob(&refs, pBlob, *pnBlob)!=SQLITE_OK ){
+    sqlite3_free(pBlob);
+    return 0;
+  }
+  sqlite3_free(pBlob);
+  pBlob = 0;
   if( chunkStoreSetDefaultBranch(&refs, "main")==SQLITE_OK
-   && chunkStoreAddBranch(&refs, "main", pCommit)==SQLITE_OK
+   && (chunkStoreFindBranch(&refs, "main", 0)==SQLITE_OK
+       ? chunkStoreUpdateBranch(&refs, "main", pCommit)
+       : chunkStoreAddBranch(&refs, "main", pCommit))==SQLITE_OK
    && chunkStoreSerializeRefsToBlob(&refs, &pBlob, pnBlob)!=SQLITE_OK ){
     pBlob = 0;
   }
@@ -159,7 +168,7 @@ int main(void){
 
   /* Server holds c1 and main -> c1. */
   check("sync c1", syncInto(&local, &server, &c1, 0, 0)==SQLITE_OK);
-  pBlob = refsBlobFor(&c1, &nBlob);
+  pBlob = refsBlobFor(&server, &c1, &nBlob);
   check("install main -> c1",
         pBlob && doltliteRemoteSrvApplyScopedRefsForTest(
             &server, "main", 0, pBlob, nBlob)==SQLITE_OK);
@@ -167,7 +176,7 @@ int main(void){
 
   /* c2 not held at all, as after a gc swept an unreferenced upload: the
   ** ancestry walk cannot prove a fast-forward, which is not a refusal. */
-  pBlob = refsBlobFor(&c2, &nBlob);
+  pBlob = refsBlobFor(&server, &c2, &nBlob);
   check("absent commit is retryable, not non-ff",
         pBlob && doltliteRemoteSrvApplyScopedRefsForTest(
             &server, "main", 0, pBlob, nBlob)==SQLITE_BUSY_SNAPSHOT);

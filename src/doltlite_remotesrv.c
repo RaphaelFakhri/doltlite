@@ -898,7 +898,7 @@ static int remoteSrvApplyRefsLocked(ChunkStore *pStore, const char *zBranch,
     chunkStoreRollback(pStore);
     return rc;
   }
-  rc = chunkStoreInstallRefsBlob(pStore, pBody, nBody);
+  rc = doltliteInstallPushedRefsBlob(pStore, pBody, nBody, zBranch);
   if( rc!=SQLITE_OK ){
     chunkStoreRollback(pStore);
     return rc;
