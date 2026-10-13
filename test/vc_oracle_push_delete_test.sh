@@ -50,12 +50,12 @@ run_dl "SELECT dolt_fetch('origin');" >/dev/null
 run_dt "CALL dolt_fetch('origin');" >/dev/null
 compare_state fetch_does_not_resurrect_deleted_branch
 dl_rc=0; dt_rc=0
-run_dl "SELECT dolt_push('origin',':feature');" >"$TMPROOT/dl.out" 2>"$TMPROOT/dl.err" || dl_rc=$?
+run_dl "SELECT dolt_push('origin',':feature');" --expect-error >"$TMPROOT/dl.out" 2>"$TMPROOT/dl.err" || dl_rc=$?
 run_dt "CALL dolt_push('origin',':feature');" >"$TMPROOT/dt.err" 2>&1 || dt_rc=$?
-if [ "$dl_rc" -eq 0 ] && vc_oracle_is_clean_error "$dt_rc"; then
+if vc_oracle_is_clean_error "$dl_rc" && vc_oracle_is_clean_error "$dt_rc"; then
   pass=$((pass+1))
 else
-  echo "FAIL: repeated delete of an absent branch succeeds ($dl_rc/$dt_rc)"
+  echo "FAIL: repeated delete of an absent branch must fail ($dl_rc/$dt_rc)"
   fail=$((fail+1))
 fi
 compare_state repeated_delete_preserves_other_refs
