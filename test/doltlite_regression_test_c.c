@@ -10718,6 +10718,57 @@ static void run_vc_interrupt(void){
   removeDbFiles(dbpath);
 }
 
+/* A read fault while dolt_rebase('--continue') adopts the persisted rebase
+** fails its checkout, whose restore must not read session strings the
+** failed reload freed; every fault surfaces as an error or a result. */
+static void run_rebase_continue_read_fault(void){
+  char dbpath[512];
+  int nth, nNull = 0;
+
+  check("rebase_continue_read_register", registerFailVfs()==SQLITE_OK);
+  make_dbpath(dbpath, sizeof(dbpath), "rebase_continue_read");
+  for(nth=1; nth<2000; nth++){
+    sqlite3 *db = 0;
+    sqlite3_stmt *stmt = 0;
+    int rc, hits;
+    removeDbFiles(dbpath);
+    check("rebase_continue_read_open", open_db(dbpath, &db)==SQLITE_OK);
+    if( !db ) break;
+    execSql(db,
+      "CREATE TABLE t(id INTEGER PRIMARY KEY, v INT);"
+      "INSERT INTO t VALUES(1,1);"
+      "SELECT dolt_commit('-Am','base');"
+      "SELECT dolt_checkout('-b','feat');"
+      "INSERT INTO t VALUES(2,2);"
+      "SELECT dolt_commit('-Am','f1');"
+      "SELECT dolt_checkout('main');"
+      "INSERT INTO t VALUES(3,3);"
+      "SELECT dolt_commit('-Am','m1');"
+      "SELECT dolt_checkout('feat');"
+      "SELECT dolt_rebase('-i','main');");
+    sqlite3_close(db);
+    db = 0;
+    check("rebase_continue_read_open", open_fail_db(dbpath, &db)==SQLITE_OK);
+    if( !db ) break;
+    gFailHits = 0;
+    gFailReadNth = nth;
+    rc = sqlite3_prepare_v2(db, "SELECT dolt_rebase('--continue')", -1,
+                            &stmt, 0);
+    if( rc==SQLITE_OK
+     && sqlite3_step(stmt)==SQLITE_ROW
+     && sqlite3_column_type(stmt, 0)==SQLITE_NULL ){
+      nNull++;
+    }
+    sqlite3_finalize(stmt);
+    hits = gFailHits;
+    gFailReadNth = 0;
+    sqlite3_close(db);
+    if( hits==0 ) break;
+  }
+  check("rebase_continue_read_fault_reports_outcome", nNull==0);
+  removeDbFiles(dbpath);
+}
+
 static void run_commit_stage_read_failure(void){
   char dbpath[512];
   int nth;
@@ -18321,6 +18372,8 @@ static const RegressionCase aCases[] = {
     run_open_reader_across_catalog_swap },
   { "commit_stage_read_failure", "Commit Stage Read Failure Test",
     run_commit_stage_read_failure },
+  { "rebase_continue_read_fault", "Rebase Continue Read Fault Test",
+    run_rebase_continue_read_fault },
   { "failed_refs_restore_keeps_refs", "Failed Refs Restore Keeps Refs Test",
     run_failed_refs_restore_keeps_refs },
   { "amend_all_read_failure_keeps_changes", "Amend -a Read Failure Keeps Working Changes Test", run_amend_all_read_failure_keeps_changes },
