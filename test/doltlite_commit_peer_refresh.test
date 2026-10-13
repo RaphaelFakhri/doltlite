@@ -177,4 +177,96 @@ do_execsql_test commit-peer-shared-memory-kept {
   SELECT count(*) FROM dolt_status;
 } {1 2 0}
 peer close
+foreach boundary {begin savepoint nested} {
+  foreach {name op} {
+    amend {SELECT dolt_commit('--amend','-m','caller')}
+    amend-a {SELECT dolt_commit('-a','--amend','-m','caller')}
+    amend-A {SELECT dolt_commit('-A','--amend','-m','caller')}
+    allow {SELECT dolt_commit('--allow-empty','-m','caller')}
+    allow-a {SELECT dolt_commit('-a','--allow-empty','-m','caller')}
+    allow-A {SELECT dolt_commit('-A','--allow-empty','-m','caller')}
+    commit-a {SELECT dolt_commit('-a','-m','caller')}
+    commit-A {SELECT dolt_commit('-A','-m','caller')}
+    skip-a {SELECT dolt_commit('-a','--skip-empty','-m','caller')}
+    skip-A {SELECT dolt_commit('-A','--skip-empty','-m','caller')}
+  } {
+    commit_peer_setup
+    db eval {INSERT INTO t VALUES(2,'two'); SELECT dolt_commit('-am','c2')}
+    switch $boundary {
+      begin {db eval BEGIN}
+      savepoint {db eval {SAVEPOINT caller}}
+      nested {db eval {BEGIN; SAVEPOINT caller}}
+    }
+    set head [db one {SELECT dolt_hashof('HEAD')}]
+    db eval {SELECT * FROM t; SELECT message FROM dolt_log LIMIT 1}
+    set staged [db eval {SELECT table_name,staged,status FROM dolt_status ORDER BY table_name,staged}]
+    peer eval {
+      INSERT INTO t VALUES(900,'peer');
+      SELECT dolt_commit('-am','peer commit');
+    }
+    set peerHead [peer one {SELECT dolt_hashof('HEAD')}]
+    set prefix commit-stale-$boundary-$name
+    do_test $prefix.busy {
+      list [catch {db eval $op} message] [sqlite3_errcode db]
+    } {1 SQLITE_BUSY}
+    do_test $prefix.transaction {sqlite3_get_autocommit db} 0
+    do_test $prefix.snapshot {
+      list [db one {SELECT dolt_hashof('HEAD')}] [db eval {SELECT id FROM t ORDER BY id}]
+    } [list $head {1 2}]
+    do_test $prefix.staging {db eval {SELECT table_name,staged,status FROM dolt_status ORDER BY table_name,staged}} $staged
+    do_test $prefix.peer {
+      peer eval {
+        SELECT dolt_hashof('HEAD');
+        SELECT message FROM dolt_log LIMIT 1;
+        SELECT id FROM t ORDER BY id;
+        SELECT count(*) FROM dolt_log WHERE message='caller';
+      }
+    } [list $peerHead {peer commit} 1 2 900 0]
+    do_execsql_test $prefix.rollback {ROLLBACK} {}
+    peer close
+    do_test $prefix.reopen {
+      db close
+      sqlite3 db test.db
+      db eval {
+        SELECT dolt_hashof('HEAD');
+        SELECT id FROM dolt_at_t('main') ORDER BY id;
+        PRAGMA integrity_check;
+      }
+    } [list $peerHead 1 2 900 ok]
+  }
+}
+
+foreach boundary {begin savepoint nested} {
+  foreach flag {-a -A} {
+    foreach pinned {0 1} {
+      commit_peer_setup
+      db eval {INSERT INTO t VALUES(2,'two'); SELECT dolt_commit('-am','c2')}
+      switch $boundary {
+        begin {db eval BEGIN}
+        savepoint {db eval {SAVEPOINT caller}}
+        nested {db eval {BEGIN; SAVEPOINT caller}}
+      }
+      if {$pinned} {
+        db eval {SELECT * FROM t}
+      } else {
+        peer eval {INSERT INTO t VALUES(900,'peer'); SELECT dolt_commit('-am','peer commit')}
+      }
+      set parent [peer one {SELECT dolt_hashof('HEAD~1')}]
+      set prefix commit-fresh-$boundary-$flag-$pinned
+      do_test $prefix.amend {
+        set result [catchsql "SELECT dolt_commit('$flag','--amend','-m','fresh amend')"]
+        expr {[lindex $result 0]==0 && [regexp {^[0-9a-f]{40}$} [lindex $result 1]]}
+      } 1
+      do_test $prefix.parent {db one {SELECT dolt_hashof('HEAD~1')}} $parent
+      do_execsql_test $prefix.rows {SELECT id FROM t ORDER BY id} \
+        [expr {$pinned ? {1 2} : {1 2 900}}]
+      do_execsql_test $prefix.status {
+        SELECT message FROM dolt_log LIMIT 1;
+        SELECT count(*) FROM dolt_status;
+      } {{fresh amend} 0}
+      peer close
+    }
+  }
+}
+
 finish_test
