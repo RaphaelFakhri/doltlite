@@ -6,6 +6,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
+#include <dirent.h>
 #include "sqlite3.h"
 #include "chunk_store.h"
 #include "lib/test_tmpdir.h"
@@ -2185,6 +2186,108 @@ static void test_34_rebase_start_crash(void){
   }
 }
 
+/* Files left beside zDest whose names contain "<dest base>-backup". */
+static int countBackupLeftovers(const char *zDest){
+  char zDir[512];
+  char zNeedle[300];
+  const char *zBase = strrchr(zDest, '/');
+  DIR *d;
+  struct dirent *e;
+  int n = 0;
+  if( zBase ){
+    snprintf(zDir, sizeof(zDir), "%.*s", (int)(zBase - zDest), zDest);
+    zBase++;
+  }else{
+    snprintf(zDir, sizeof(zDir), ".");
+    zBase = zDest;
+  }
+  snprintf(zNeedle, sizeof(zNeedle), "%s-backup", zBase);
+  d = opendir(zDir);
+  if( !d ) return -1;
+  while( (e = readdir(d))!=0 ){
+    if( strstr(e->d_name, zNeedle) ) n++;
+  }
+  closedir(d);
+  return n;
+}
+
+static int runBackup(const char *zSrc, const char *zDest, const char *zVfs){
+  sqlite3 *pSrc = 0, *pDest = 0;
+  sqlite3_backup *b;
+  int rc;
+  if( sqlite3_open(zSrc, &pSrc)!=SQLITE_OK ) return SQLITE_CANTOPEN;
+  if( sqlite3_open_v2(zDest, &pDest,
+        SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE, zVfs)!=SQLITE_OK ){
+    sqlite3_close(pSrc);
+    return SQLITE_CANTOPEN;
+  }
+  b = sqlite3_backup_init(pDest, "main", pSrc, "main");
+  rc = b ? sqlite3_backup_step(b, -1) : sqlite3_errcode(pDest);
+  if( b ) sqlite3_backup_finish(b);
+  sqlite3_close(pDest);
+  sqlite3_close(pSrc);
+  return rc==SQLITE_DONE ? SQLITE_OK : rc;
+}
+
+/* A backup that crashes before installing its copy leaves the staged file
+** and its lock sidecar; the next backup to the same destination removes
+** them, and a successful backup leaves nothing beside the destination. */
+static void test_35_backup_crash_leftovers(void){
+  int before;
+  printf("--- Test 35: backup leaves no temporary files after a crash ---\n");
+  check("test_35: tracking vfs registered", duraRegister()==SQLITE_OK);
+  for(before=0; before<2; before++){
+    int at;
+    for(at=1; at<=6; at++){
+      char zSrc[512], zDest[600], desc[160];
+      sqlite3 *db = 0;
+      pid_t pid;
+      int status = 0, crashed;
+      snprintf(zSrc, sizeof(zSrc), "%s", fresh_db());
+      snprintf(zDest, sizeof(zDest), "%s-dest.db", zSrc);
+      removeDbFiles(zDest);
+      check("test_35: setup open", sqlite3_open(zSrc, &db)==SQLITE_OK);
+      check("test_35: setup", execSql(db,
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);"
+        "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c"
+        " WHERE x<2000) INSERT INTO t SELECT x, printf('%0100d', x) FROM c;"
+        "SELECT dolt_commit('-Am','base');")==SQLITE_OK);
+      sqlite3_close(db);
+      check("test_35: first backup", runBackup(zSrc, zDest, 0)==SQLITE_OK);
+      snprintf(desc, sizeof(desc), "backup_%s_%d: no leftovers after success",
+               before ? "before" : "after", at);
+      check(desc, countBackupLeftovers(zDest)==0);
+
+      pid = fork();
+      if( pid<0 ){ perror("fork"); exit(1); }
+      if( pid==0 ){
+        gDuraCrashAt = at;
+        gDuraSyncCount = 0;
+        gDuraCrashBefore = before;
+        _exit(runBackup(zSrc, zDest, "dura-track")==SQLITE_OK ? 0 : 11);
+      }
+      check("test_35: child waited", waitpid(pid, &status, 0)==pid);
+      crashed = WIFEXITED(status) && WEXITSTATUS(status)==99;
+      if( !crashed ){
+        removeDbFiles(zSrc);
+        removeDbFiles(zDest);
+        break;
+      }
+      check("test_35: backup after crash", runBackup(zSrc, zDest, 0)==SQLITE_OK);
+      snprintf(desc, sizeof(desc), "backup_%s_%d: crash leftovers removed",
+               before ? "before" : "after", at);
+      check(desc, countBackupLeftovers(zDest)==0);
+      check("test_35: dest open", sqlite3_open(zDest, &db)==SQLITE_OK);
+      snprintf(desc, sizeof(desc), "backup_%s_%d: dest rows",
+               before ? "before" : "after", at);
+      check(desc, queryScalarInt(db, "SELECT count(*) FROM t", -1)==2000);
+      sqlite3_close(db);
+      removeDbFiles(zSrc);
+      removeDbFiles(zDest);
+    }
+  }
+}
+
 int main(void){
   printf("=== DoltLite Crash Recovery Tests ===\n\n");
 
@@ -2226,6 +2329,7 @@ int main(void){
   test_32_merge_abort_atomic_sync();
   test_33_cv_rollback_atomic_sync();
   test_34_rebase_start_crash();
+  test_35_backup_crash_leftovers();
 
   printf("\n=== Results: %d passed, %d failed out of %d tests ===\n",
          nPass, nFail, nPass+nFail);
