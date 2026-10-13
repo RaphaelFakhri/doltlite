@@ -10,6 +10,8 @@
 #include "doltlite_internal.h"
 #include "prolly_hashset.h"
 #include "prolly_node.h"
+#include "prolly_cursor.h"
+#include "record_codec.h"
 #include "prolly_chunk_walk.h"
 #include <stdlib.h>
 #include <string.h>
@@ -657,7 +659,7 @@ static int fsSetRefs(DoltliteRemote *pRemote, const char *zBranch, int bForce,
   }
   if( bMissing ) p->base.bForceResumeScan = 1;
   if( rc!=SQLITE_OK ) return rc;
-  return chunkStoreInstallRefsBlob(&p->store, pData, nData);
+  return doltliteInstallPushedRefsBlob(&p->store, pData, nData, zBranch);
 }
 
 static int fsSetRefsIf(
@@ -943,7 +945,7 @@ static int localSetRefs(DoltliteRemote *pRemote, const char *zBranch,
   }
   if( bMissing ) p->base.bForceResumeScan = 1;
   if( rc!=SQLITE_OK ) return rc;
-  return chunkStoreInstallRefsBlob(p->pStore, pData, nData);
+  return doltliteInstallPushedRefsBlob(p->pStore, pData, nData, zBranch);
 }
 
 static int localSetRefsIf(
@@ -1512,6 +1514,7 @@ static int remoteValidateScopedRefsUpdate(
     return SQLITE_CONSTRAINT;
   }
   if( !zRef || !zRef[0] ) return SQLITE_MISUSE;
+  if( !doltliteUserRefNameIsValid(zTag ? zTag : zRef) ) return SQLITE_CONSTRAINT;
   memset(&inc, 0, sizeof(inc));
   rc = csDeserializeRefsIntoTemp(&inc, pBlob, nBlob);
   if( rc!=SQLITE_OK ){
@@ -1681,6 +1684,149 @@ static int remoteValidateScopedRefsUpdate(
 
 done:
   csFreeRefsState(&inc);
+  return rc;
+}
+
+
+static int remoteCatalogSequences(
+  ChunkStore *pStore,
+  ChunkStore *pNext,
+  ProllyCache *pCache,
+  const ProllyHash *pCatalog
+){
+  struct TableEntry *aTables = 0;
+  int nTables = 0;
+  int i;
+  int rc = doltliteLoadCatalogFromStore(pStore, pCatalog, &aTables, &nTables, 0);
+  for(i=0; i<nTables && rc==SQLITE_OK; i++){
+    struct TableEntry *pTable = &aTables[i];
+    ProllyCursor cursor;
+    int res;
+    if( pTable->iTable==1 || !pTable->zName
+     || !(pTable->flags & PROLLY_NODE_INTKEY) ) continue;
+    prollyCursorInit(&cursor, pStore, pCache, &pTable->root, pTable->flags);
+    if( strcmp(pTable->zName, "sqlite_sequence")==0 ){
+      rc = prollyCursorFirst(&cursor, &res);
+      while( rc==SQLITE_OK && prollyCursorIsValid(&cursor) ){
+        DoltliteRecordInfo info = {0};
+        DoltliteSerialValue name, seq;
+        const u8 *pValue;
+        int nValue;
+        prollyCursorValue(&cursor, &pValue, &nValue);
+        rc = doltliteParseRecordStrict(pValue, nValue, &info);
+        if( rc==SQLITE_OK && info.nField!=2 ) rc = SQLITE_CORRUPT;
+        if( rc==SQLITE_OK ){
+          rc = doltliteSerialValueFromPayload(pValue, nValue,
+                    info.aType[0], info.aOffset[0], &name);
+        }
+        if( rc==SQLITE_OK ){
+          rc = doltliteSerialValueFromPayload(pValue, nValue,
+                    info.aType[1], info.aOffset[1], &seq);
+        }
+        if( rc==SQLITE_OK && name.eType==SQLITE_TEXT && name.n>0
+         && !memchr(name.p, 0, name.n)
+         && seq.eType==SQLITE_INTEGER && seq.i>0 ){
+          char *zName = sqlite3_mprintf("%.*s", name.n, (const char*)name.p);
+          struct TableEntry *pTarget;
+          if( !zName ){
+            rc = SQLITE_NOMEM;
+          }else{
+            pTarget = doltliteFindTableByName(aTables, nTables, zName);
+            if( pTarget && pTarget->iTable!=1
+             && (pTarget->flags & PROLLY_NODE_INTKEY) ){
+              rc = chunkStoreBumpSequence(pNext, zName, seq.i);
+            }
+          }
+          sqlite3_free(zName);
+        }
+        doltliteRecordInfoClear(&info);
+        if( rc==SQLITE_OK ) rc = prollyCursorNext(&cursor);
+      }
+    }else{
+      rc = prollyCursorLast(&cursor, &res);
+      if( rc==SQLITE_OK && prollyCursorIsValid(&cursor)
+       && prollyCursorIntKey(&cursor)>0 ){
+        rc = chunkStoreBumpSequence(pNext, pTable->zName,
+                                      prollyCursorIntKey(&cursor));
+      }
+    }
+    prollyCursorClose(&cursor);
+  }
+  doltliteFreeCatalog(aTables, nTables);
+  return rc;
+}
+
+int doltliteInstallPushedRefsBlob(
+  ChunkStore *pStore,
+  const u8 *pBlob,
+  int nBlob,
+  const char *zRef
+){
+  ChunkStore next;
+  DoltliteCommitQueue queue;
+  ProllyHashSet catalogs;
+  ProllyCache cache;
+  ProllyHash head;
+  SequenceRef *aSequences = 0;
+  int nSequences = 0;
+  u8 *pNextBlob = 0;
+  int nNextBlob = 0;
+  int i;
+  int rc;
+
+  PROLLY_ASSERT_STORE_GRAPH_LOCKED(pStore);
+  memset(&next, 0, sizeof(next));
+  memset(&queue, 0, sizeof(queue));
+  memset(&catalogs, 0, sizeof(catalogs));
+  memset(&cache, 0, sizeof(cache));
+  rc = chunkStoreLoadRefsFromBlob(&next, pBlob, nBlob);
+  if( rc==SQLITE_OK ) rc = csCopySequences(pStore, &aSequences, &nSequences);
+  if( rc==SQLITE_OK ){
+    csInstallSequences(&next, aSequences, nSequences);
+    aSequences = 0;
+  }
+  if( rc==SQLITE_OK && zRef[0]!=':' && !remoteScopedTagName(zRef) ){
+    rc = chunkStoreFindBranch(&next, zRef, &head);
+    if( rc==SQLITE_OK ) rc = doltliteCommitQueueInit(&queue, &head);
+    if( rc==SQLITE_OK ) rc = prollyHashSetInit(&catalogs, 64);
+    if( rc==SQLITE_OK ) rc = prollyCacheInit(&cache, 1024*1024);
+    for(i=0; i<pStore->refs.nBranches && rc==SQLITE_OK; i++){
+      rc = prollyHashSetAdd(&queue.visited, &pStore->refs.aBranches[i].commitHash);
+    }
+    while( rc==SQLITE_OK ){
+      DoltliteCommit commit;
+      int has;
+      rc = doltliteCommitQueueNext(&queue, &head, &has);
+      if( rc!=SQLITE_OK || !has ) break;
+      memset(&commit, 0, sizeof(commit));
+      {
+        u8 *pData = 0;
+        int nData = 0;
+        rc = chunkStoreGet(pStore, &head, &pData, &nData);
+        if( rc==SQLITE_OK ) rc = doltliteCommitDeserialize(pData, nData, &commit);
+        sqlite3_free(pData);
+      }
+      if( rc==SQLITE_OK
+       && !prollyHashSetContains(&catalogs, &commit.catalogHash) ){
+        rc = prollyHashSetAdd(&catalogs, &commit.catalogHash);
+        if( rc==SQLITE_OK ){
+          rc = remoteCatalogSequences(pStore, &next, &cache, &commit.catalogHash);
+        }
+      }
+      if( rc==SQLITE_OK ) rc = doltliteCommitQueueEnqueueParents(&queue, &commit);
+      doltliteCommitClear(&commit);
+    }
+  }
+  if( rc==SQLITE_OK ){
+    rc = chunkStoreSerializeRefsToBlob(&next, &pNextBlob, &nNextBlob);
+  }
+  if( rc==SQLITE_OK ) rc = chunkStoreInstallRefsBlob(pStore, pNextBlob, nNextBlob);
+  sqlite3_free(pNextBlob);
+  csFreeSequenceArray(aSequences, nSequences);
+  prollyCacheFree(&cache);
+  prollyHashSetFree(&catalogs);
+  doltliteCommitQueueClear(&queue);
+  chunkStoreClose(&next);
   return rc;
 }
 

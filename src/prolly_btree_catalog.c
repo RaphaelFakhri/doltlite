@@ -2266,10 +2266,9 @@ int doltliteDeserializeCatalogForTest(sqlite3 *db, const u8 *data, int nData){
   return deserializeCatalog(db->aDb[0].pBt, data, nData);
 }
 
-int doltliteLoadCatalog(sqlite3 *db, const ProllyHash *catHash,
-                        struct TableEntry **ppTables, int *pnTables,
-                        Pgno *piNextTable){
-  ChunkStore *cs = doltliteGetChunkStore(db);
+int doltliteLoadCatalogFromStore(ChunkStore *cs, const ProllyHash *catHash,
+                                 struct TableEntry **ppTables, int *pnTables,
+                                 Pgno *piNextTable){
   u8 *data = 0;
   int nData = 0;
   int rc;
@@ -2295,6 +2294,13 @@ int doltliteLoadCatalog(sqlite3 *db, const ProllyHash *catHash,
   *pnTables = temp.cat.n;
   if( piNextTable ) *piNextTable = temp.cat.iNextTable;
   return SQLITE_OK;
+}
+
+int doltliteLoadCatalog(sqlite3 *db, const ProllyHash *catHash,
+                        struct TableEntry **ppTables, int *pnTables,
+                        Pgno *piNextTable){
+  return doltliteLoadCatalogFromStore(doltliteGetChunkStore(db), catHash,
+                                      ppTables, pnTables, piNextTable);
 }
 
 static int catalogLoadTableRootByName(
