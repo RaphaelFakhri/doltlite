@@ -697,6 +697,14 @@ int doltliteCmdParseAuthor(
 
 void doltliteCmdResultWriteTxnError(sqlite3_context *ctx, sqlite3 *db, int rc){
   const char *zBranch = doltliteBtreeMissingWriteBranch(db->aDb[0].pBt);
+  if( !zBranch && (rc&0xff)==SQLITE_BUSY && !doltliteIsDetached(db) ){
+    ChunkStore *cs = doltliteGetChunkStore(db);
+    const char *zCurrent = doltliteGetSessionBranch(db);
+    if( cs && cs->refs.nBranches>0
+     && chunkStoreFindBranch(cs, zCurrent, 0)==SQLITE_NOTFOUND ){
+      zBranch = zCurrent;
+    }
+  }
   if( zBranch ){
     char *zErr = sqlite3_mprintf(
         "cannot write: branch '%s' no longer exists", zBranch);

@@ -671,6 +671,11 @@ static void doltliteResetFunc(
     goto reset_cleanup;
   }
   doltliteGetSessionWorkingSetBasis(db, &wsBasis);
+  if( cs->refs.nBranches>0
+   && chunkStoreFindBranch(cs, doltliteGetSessionBranch(db), 0)==SQLITE_NOTFOUND ){
+    doltliteCmdResultWriteTxnError(context, db, SQLITE_BUSY);
+    goto reset_cleanup;
+  }
 
   for(i=0; i<argc; i++){
     if( sqlite3_value_type(argv[i])==SQLITE_NULL ) nNullArgs++;

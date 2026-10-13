@@ -200,6 +200,7 @@ struct CheckoutMutationCtx {
   u8 requireActiveRebase;
   u8 targetRebaseInactive;
   u8 oldBranchExists;
+  u8 oldBranchMissing;
   u8 oldWorkingSetMoved;
   int haveOldState;
   /* Top-level branch-connection checkout must persist despite a savepoint
@@ -210,7 +211,8 @@ struct CheckoutMutationCtx {
 /* Snapshot the current working catalog into *pOldCatHash: serialize
 ** uncommitted changes, else the persisted working hash (else HEAD). */
 static int checkoutCaptureOldCatalog(sqlite3 *db, ChunkStore *cs,
-                                     ProllyHash *pOldCatHash, ProllyHash *pWs){
+                                     ProllyHash *pOldCatHash, ProllyHash *pWs,
+                                     u8 *pMissing){
   int dirty;
   int rc;
   doltliteGetSessionWorkingSetBasis(db, pWs);
@@ -218,6 +220,15 @@ static int checkoutCaptureOldCatalog(sqlite3 *db, ChunkStore *cs,
     ProllyHash head;
     doltliteGetSessionHead(db, &head);
     return doltliteCommitCatalogHash(db, &head, pOldCatHash);
+  }
+  if( cs->refs.nBranches>0
+   && chunkStoreFindBranch(cs, doltliteGetSessionBranch(db), 0)
+      ==SQLITE_NOTFOUND ){
+    *pMissing = 1;
+    rc = doltliteFlushCatalogToHash(db, pOldCatHash);
+    if( rc!=SQLITE_NOTFOUND && (rc&0xff)!=SQLITE_CORRUPT ) return rc;
+    memset(pOldCatHash, 0, sizeof(*pOldCatHash));
+    return doltliteMaterializeEmptyCatalog(db, pOldCatHash);
   }
   rc = doltliteHasUncommittedChanges(db, &dirty);
   if( rc!=SQLITE_OK ) return rc;
@@ -330,13 +341,18 @@ static int checkoutMutateRefs(sqlite3 *db, ChunkStore *cs, void *pArg){
   int bSavepoint = db->pSavepoint!=0;
   int rc;
 
+  if( p->oldBranchMissing
+   && chunkStoreFindBranch(cs, p->zCurrentBranch, 0)==SQLITE_OK ){
+    p->oldWorkingSetMoved = 1;
+    return db->autoCommit ? SQLITE_BUSY : SQLITE_BUSY_SNAPSHOT;
+  }
   if( p->pCreate ){
     p->createRc = mutateBranchRef(db, cs, p->pCreate);
     if( p->createRc!=SQLITE_OK ) return p->createRc;
   }
   rc = chunkStoreFindBranch(cs, p->zTargetBranch, &p->targetCommit);
   if( rc!=SQLITE_OK ) return rc;
-  if( !p->savedWasDetached ){
+  if( !p->savedWasDetached && !p->oldBranchMissing ){
     p->oldBranchExists =
         chunkStoreFindBranch(cs, p->zCurrentBranch, 0)==SQLITE_OK;
   }
@@ -524,7 +540,8 @@ void doltConnectBranchFunc(
   m.zCurrentBranch = zCurrentBranch;
   m.haveOldState = 1;
   checkoutSaveSession(db, &m);
-  rc = checkoutCaptureOldCatalog(db, cs, &m.oldCatHash, &m.oldWorkingSet);
+  rc = checkoutCaptureOldCatalog(db, cs, &m.oldCatHash, &m.oldWorkingSet,
+                                 &m.oldBranchMissing);
   if( rc!=SQLITE_OK ){
     checkoutFreeSavedSession(&m);
     sqlite3_free(zCurrentBranch);
@@ -590,7 +607,8 @@ static int checkoutBranchForRebase(
     memcpy(&m.oldCatHash, pKnownOldCatHash, sizeof(ProllyHash));
     doltliteGetSessionWorkingSetBasis(db, &m.oldWorkingSet);
   }else{
-    rc = checkoutCaptureOldCatalog(db, cs, &m.oldCatHash, &m.oldWorkingSet);
+    rc = checkoutCaptureOldCatalog(db, cs, &m.oldCatHash, &m.oldWorkingSet,
+                                   &m.oldBranchMissing);
     if( rc!=SQLITE_OK ){
       sqlite3_free(zCurrentBranch);
       return rc;
@@ -1465,7 +1483,8 @@ static void doltCheckoutParsedFunc(
     sqlite3_result_error_nomem(ctx);
     return;
   }
-  rc = checkoutCaptureOldCatalog(db, cs, &m.oldCatHash, &m.oldWorkingSet);
+  rc = checkoutCaptureOldCatalog(db, cs, &m.oldCatHash, &m.oldWorkingSet,
+                                 &m.oldBranchMissing);
   if( rc!=SQLITE_OK ){
     sqlite3_free(zCurrentBranch);
     doltliteVcResultErrorCode(ctx, db,
@@ -1500,7 +1519,8 @@ static void doltCheckoutParsedFunc(
         sqlite3_result_error_nomem(ctx);
         return;
       }
-      rc = checkoutCaptureOldCatalog(db, cs, &m.oldCatHash, &m.oldWorkingSet);
+      rc = checkoutCaptureOldCatalog(db, cs, &m.oldCatHash, &m.oldWorkingSet,
+                                     &m.oldBranchMissing);
       if( rc!=SQLITE_OK ){
         sqlite3_free(zCurrentBranch);
         doltliteVcResultErrorCode(ctx, db,

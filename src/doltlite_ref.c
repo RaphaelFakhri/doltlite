@@ -409,6 +409,17 @@ int doltliteLoadCommit(sqlite3 *db, const ProllyHash *pHash,
   int rc;
   if( !cs ) return SQLITE_ERROR;
   rc = chunkStoreGet(cs, pHash, &data, &nData);
+  if( rc==SQLITE_NOTFOUND && !doltliteIsDetached(db) ){
+    ProllyHash head;
+    doltliteGetSessionHead(db, &head);
+    if( prollyHashCompare(pHash, &head)==0 ){
+      rc = chunkStoreEnsureRefsFresh(cs);
+      if( rc!=SQLITE_OK ) return rc;
+      if( chunkStoreFindBranch(cs, doltliteGetSessionBranch(db), 0)
+          ==SQLITE_NOTFOUND ) return SQLITE_BUSY;
+      return SQLITE_NOTFOUND;
+    }
+  }
   if( rc!=SQLITE_OK ) return rc;
   rc = doltliteCommitDeserialize(data, nData, pCommit);
   sqlite3_free(data);

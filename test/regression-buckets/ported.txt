@@ -144,6 +144,7 @@ doltlite_conflicts_unique
 doltlite_merge_unnamed_checks
 doltlite_ref_peer_gc
 doltlite_ref_snapshot_boundary
+doltlite_deleted_branch_gc
 doltlite_reset_peer_gc
 doltlite_backup_peer_write
 doltlite_backup_busy
