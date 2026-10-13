@@ -90,10 +90,13 @@ per-branch.
 ```sql
 SELECT dolt_remote('add', 'origin', 'file:///path/to/remote.db');
 SELECT dolt_push('origin', 'main');
+SELECT dolt_push('--all', 'origin');
 SELECT dolt_push('origin', 'v1');
 SELECT dolt_push('origin', '--tags');
+SELECT dolt_fetch('--prune', 'origin');
 SELECT dolt_pull('origin', 'main');
-SELECT dolt_clone('file:///path/to/source.db');
+SELECT dolt_pull('--prune', 'origin', 'main');
+SELECT dolt_clone('--remote', 'origin', '--single-branch', 'file:///path/to/source.db');
 ```
 
 ## Diffs and History

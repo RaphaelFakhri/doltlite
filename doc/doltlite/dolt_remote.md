@@ -17,18 +17,46 @@ SELECT dolt_push('origin', 'main:feature/x');    -- local main, remote branch fe
 SELECT dolt_push('origin', 'HEAD:hh');           -- checked-out branch, remote branch hh
 SELECT dolt_push('origin', 'v1.0');              -- one tag
 SELECT dolt_push('origin', '--tags');
+SELECT dolt_push('--all', 'origin');             -- every local branch, not tags
 SELECT dolt_fetch('origin');                     -- all branches
 SELECT dolt_fetch('origin', 'main');
+SELECT dolt_fetch('--prune', 'origin');          -- drop tracking refs the remote deleted
 SELECT dolt_fetch('origin', 'refs/heads/*:refs/remotes/origin/*');
 SELECT dolt_pull();                              -- every branch and tag, then merge upstream
 SELECT dolt_pull('origin');
 SELECT dolt_pull('origin', 'main');              -- fetch only main
+SELECT dolt_pull('--prune', 'origin', 'main');   -- prune is allowed with a branch
 SELECT * FROM dolt_remotes;
 SELECT * FROM dolt_remote_branches;
 ```
 
 ```sql
+SELECT dolt_remote('add', 'origin', 'file:///data/remote.db');
+SELECT dolt_fetch('--prune', 'origin', 'main'); -- error: prune refuses a refspec
+SELECT dolt_push('--all', 'origin', 'main'); -- error: refspec
+SELECT dolt_push('--all'); -- error: remote required
+SELECT dolt_push('--all', '--tags', 'origin'); -- error: tags
+```
+
+```sql
 SELECT dolt_clone('--lazy', '--revision', 'v1.0', 'file:///data/src.db');
+```
+
+```sql
+SELECT dolt_clone('--remote', 'upstream', 'http://host:8080/mydb.db');
+```
+
+```sql
+SELECT dolt_clone('--single-branch', 'http://host:8080/mydb.db');
+```
+
+```sql
+SELECT dolt_clone('--remote', 'upstream', '--single-branch', '--branch', 'main',
+                  'http://host:8080/mydb.db');
+```
+
+```sql
+SELECT dolt_clone('--remote', 'bad/name', 'http://host:8080/mydb.db'); -- error: invalid name
 ```
 
 ## Functions
@@ -36,10 +64,10 @@ SELECT dolt_clone('--lazy', '--revision', 'v1.0', 'file:///data/src.db');
 | Function | Arguments | Notes |
 |---|---|---|
 | `dolt_remote` | `'add', name, url` or `'remove', name` | `file://` or `http(s)://...` URL naming the database file. A `file://` path is stored absolute |
-| `dolt_push` | `remote, branch [, '--force']` or `remote, 'src:dst'` or `remote, tag` or `remote, '--tags'` | Non-fast-forward is refused without `--force`. `src:dst` pushes revision `src` as remote branch `dst`. `HEAD` as `src` is the checked-out branch's tip; any other `src` is a revision |
-| `dolt_fetch` | `remote [, branch or refspec] [, '--prune']` | Updates `remotes/<remote>/<branch>` tracking refs and tags. A refspec maps `refs/heads/<pat>` onto `refs/remotes/<name>/<pat>`. `--prune` drops tracking refs the remote no longer has, and is refused together with a refspec |
-| `dolt_pull` | `[remote [, branch]]` | With no branch, fetches every remote branch and tag, then fast-forwards or merges the current branch. With a branch, fetches only that branch |
-| `dolt_clone` | `['--lazy'] ['--revision', rev] url` | Only into an empty database; records `origin` |
+| `dolt_push` | `remote, branch [, '--force']` or `remote, 'src:dst'` or `remote, tag` or `remote, '--tags'` or `'--all', remote` | Non-fast-forward is refused without `--force`. `src:dst` pushes revision `src` as remote branch `dst`. `HEAD` as `src` is the checked-out branch's tip; any other `src` is a revision. `--all` pushes every local branch and not tags; the remote name is required |
+| `dolt_fetch` | `remote [, branch or refspec] [, '--prune']` | Updates `remotes/<remote>/<branch>` tracking refs and tags. A refspec maps `refs/heads/<pat>` onto `refs/remotes/<name>/<pat>`. `--prune` / `-p` drops tracking refs the remote no longer has, and is refused together with a refspec |
+| `dolt_pull` | `[remote [, branch]]` or `'--prune'` | With no branch, fetches every remote branch and tag, then fast-forwards or merges the current branch. With a branch, fetches only that branch. `--prune` / `-p` is allowed with a branch and drops tracking refs the remote no longer has |
+| `dolt_clone` | `['--lazy'] ['--revision', rev] ['--branch', name] ['--remote', name] ['--single-branch'] url` | Only into an empty database. `--remote` names the remote (default `origin`). `--single-branch` tracks and checks out one branch |
 
 All return `0` on success. `dolt_pull` behaves like [dolt_merge](dolt_merge.md)
 when it cannot fast-forward, conflicts included.
@@ -49,7 +77,11 @@ when it cannot fast-forward, conflicts included.
 | `usage: dolt_remote(action, name [, url])`, `url required for add`, `remote already exists`, `unknown action: use 'add' or 'remove'` | `dolt_remote` arguments |
 | `remote not found` | unknown remote name |
 | `push failed: branch or tag not found` | push source does not resolve |
-| `--prune option cannot be provided with a ref spec` | `dolt_fetch --prune` was given a branch or refspec |
+| `--prune option cannot be provided with a ref spec` | `dolt_fetch --prune` was given a branch or refspec. `dolt_pull --prune` still accepts a branch |
+| `fatal: --all can't be combined with refspecs` | `dolt_push --all` was given a branch or other refspec |
+| `--all cannot be combined with --tags` | `dolt_push --all` was combined with `--tags` |
+| `remote required` | `dolt_push --all` or `dolt_push --tags` was missing the remote name |
+| `remote name invalid` | `dolt_clone --remote` used an empty name or a name `dolt_remote add` would reject |
 | `invalid branch name` | `src:dst` destination fails the branch name rules |
 | `unsupported mapping: '<refspec>'` | `src:dst` destination is under `refs/tags/` |
 | `invalid fetch spec: '<spec>'` | fetch refspec is not a branch mapped onto a remote-tracking branch, or a glob matches nothing |
@@ -118,14 +150,35 @@ when it cannot fast-forward, conflicts included.
   refused until the store is fully materialized.
 - Fetch and pull install remote tags whose commits were fetched, replacing a
   same-named local tag when the remote value differs.
+- `dolt_push('--all', remote)` pushes every local branch to that remote.
+  Tags are not included; use `--tags` for those. `--force` applies to each
+  branch. The remote name is required. A branch or other refspec is
+  `fatal: --all can't be combined with refspecs`, and `--tags` is
+  `--all cannot be combined with --tags`. A non-fast-forward among several
+  branches is reported with the other rejected names, the same way a
+  multi-ref push is.
+- `dolt_fetch --prune` (or `-p`) with no refspec drops tracking refs whose
+  branch the remote no longer has. The same flag with a branch or refspec is
+  refused and drops nothing.
 - `dolt_pull()` and `dolt_pull(remote)` fetch every branch on that remote,
   and the tags those fetches install, then fast-forward or merge the current
   branch from the same remote. `dolt_pull(remote, branch)` fetches only that
-  branch, so other tracking refs stay put and a tag whose commit was not
-  fetched stays absent. A branch that exists only on the remote becomes a
-  tracking ref and is not created locally.
+  branch. Without `--prune`, other tracking refs stay put and a tag whose
+  commit was not fetched stays absent. A branch that exists only on the remote becomes a
+  tracking ref and is not created locally. `--prune` / `-p` is allowed with
+  or without a branch. After the fetch succeeds, tracking refs for branches
+  the remote no longer has are dropped, including when the pull is already
+  up to date, the local branch is ahead, or a later merge is refused.
+- `dolt_clone` records the remote as `origin` unless `--remote` names it.
+  The name is trimmed and then checked with the same rules as
+  `dolt_remote('add', ...)`. Without `--single-branch`, every remote branch
+  is tracked and the checkout branch is the only local branch (`--branch`
+  when it names one, otherwise the default). `--single-branch` limits both
+  the local branch and the tracking ref to that checkout branch.
 - A pull that cannot fast-forward merges the commit just fetched onto the
-  tracking ref, including `--no-ff` and `--squash`. A local branch named
+  tracking ref, including `--no-ff` and `--squash`. The merge commit message
+  is `Merge branch '<branch>' of <url> into <local>`, with the remote's
+  stored URL and no quotes around it. A local branch named
   `<remote>/<branch>` does not take that commit's place. Uncommitted changes
   refuse that merge the same way they refuse a fast-forward. An untracked
   table matched by [dolt_ignore](dolt_ignore.md) is not one of those changes,

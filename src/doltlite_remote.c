@@ -2321,36 +2321,86 @@ int doltliteFetchInto(
   return SQLITE_OK;
 }
 
+/* A single-branch clone keeps one local branch: zKeep when that name is a
+** branch, otherwise the default. Every other clone keeps the default and
+** zKeep. */
+static int cloneBranchKept(
+  const char *zName,
+  const char *zDefault,
+  const char *zKeep,
+  int bKeepIsBranch,
+  int bSingle
+){
+  if( bSingle ){
+    if( bKeepIsBranch ) return strcmp(zName, zKeep)==0;
+    return zDefault && strcmp(zName, zDefault)==0;
+  }
+  if( zDefault && strcmp(zName, zDefault)==0 ) return 1;
+  if( bKeepIsBranch && strcmp(zName, zKeep)==0 ) return 1;
+  return 0;
+}
+
 static int remotePrepareCloneRefs(
   ChunkStore *pStore,
   const char *zUrl,
-  const char *zKeep
+  const char *zKeep,
+  const char *zRemoteName,
+  int bSingle
 ){
   const BranchRef *aBranch;
   int nBranch;
   int rc;
   int i;
+  int bKeepIsBranch;
 
+  if( !zRemoteName || !zRemoteName[0] ) zRemoteName = "origin";
   csFreeRemotes(pStore);
   csFreeTracking(pStore);
-  rc = chunkStoreAddRemote(pStore, "origin", zUrl);
+  rc = chunkStoreAddRemote(pStore, zRemoteName, zUrl);
+  bKeepIsBranch = zKeep && zKeep[0]
+               && chunkStoreFindBranch(pStore, zKeep, 0)==SQLITE_OK;
   refsTableGetBranches(&pStore->refs, &nBranch, &aBranch);
   for(i=0; i<nBranch && rc==SQLITE_OK; i++){
+    const char *zDefault = chunkStoreGetDefaultBranch(pStore);
+    if( !cloneBranchKept(aBranch[i].zName, zDefault, zKeep,
+                         bKeepIsBranch, bSingle) && bSingle ){
+      continue;
+    }
     rc = chunkStoreUpdateTracking(
-        pStore, "origin", aBranch[i].zName, &aBranch[i].commitHash);
+        pStore, zRemoteName, aBranch[i].zName, &aBranch[i].commitHash);
   }
   /* Only the default branch and zKeep are local, as in Dolt; the rest stay
-  ** remote-tracking so a later checkout starts from what was fetched. */
+  ** remote-tracking so a later checkout starts from what was fetched.
+  ** --single-branch keeps just the one branch that will be checked out. */
   i = 0;
   while( rc==SQLITE_OK && chunkStoreGetDefaultBranch(pStore) ){
     const char *zDefault = chunkStoreGetDefaultBranch(pStore);
     refsTableGetBranches(&pStore->refs, &nBranch, &aBranch);
-    while( i<nBranch && (strcmp(aBranch[i].zName, zDefault)==0
-                         || (zKeep && strcmp(aBranch[i].zName, zKeep)==0)) ){
+    while( i<nBranch && cloneBranchKept(aBranch[i].zName, zDefault, zKeep,
+                                         bKeepIsBranch, bSingle) ){
       i++;
     }
     if( i>=nBranch ) break;
     rc = chunkStoreDeleteBranch(pStore, aBranch[i].zName);
+  }
+  /* Deleting the old default under --single-branch leaves the name behind.
+  ** Point it at the branch this clone will check out. */
+  if( rc==SQLITE_OK ){
+    const char *zDefault;
+    const char *zCheckout;
+    int missing;
+    zDefault = chunkStoreGetDefaultBranch(pStore);
+    zCheckout = 0;
+    missing = !zDefault
+           || chunkStoreFindBranch(pStore, zDefault, 0)!=SQLITE_OK;
+    if( missing ){
+      if( bKeepIsBranch && zKeep && zKeep[0] ) zCheckout = zKeep;
+      if( !zCheckout ){
+        refsTableGetBranches(&pStore->refs, &nBranch, &aBranch);
+        if( nBranch>0 ) zCheckout = aBranch[0].zName;
+      }
+      if( zCheckout ) rc = chunkStoreSetDefaultBranch(pStore, zCheckout);
+    }
   }
   return rc;
 }
@@ -2429,6 +2479,8 @@ int doltliteCloneLazy(
   DoltliteRemote *pRemote,
   const char *zUrl,
   const char *zKeepBranch,
+  const char *zRemoteName,
+  int bSingleBranch,
   int *pbOccupied
 ){
   ChunkStore refsView;
@@ -2477,7 +2529,8 @@ int doltliteCloneLazy(
         &refsView, aBranch[i].zName, &emptyWs);
   }
   if( rc==SQLITE_OK ){
-    rc = remotePrepareCloneRefs(&refsView, zUrl, zKeepBranch);
+    rc = remotePrepareCloneRefs(&refsView, zUrl, zKeepBranch,
+                                zRemoteName, bSingleBranch);
   }
   if( rc==SQLITE_OK ){
     rc = chunkStoreSerializeRefsToBlob(
@@ -2559,6 +2612,8 @@ int doltliteClone(
   DoltliteRemote *pRemote,
   const char *zUrl,
   const char *zKeepBranch,
+  const char *zRemoteName,
+  int bSingleBranch,
   int *pbMissingBranch,
   int *pbOccupied
 ){
@@ -2668,7 +2723,8 @@ int doltliteClone(
       }
     }
     if( rc==SQLITE_OK ){
-      rc = remotePrepareCloneRefs(pLocal, zUrl, zKeepBranch);
+      rc = remotePrepareCloneRefs(pLocal, zUrl, zKeepBranch,
+                                  zRemoteName, bSingleBranch);
     }
     if( rc==SQLITE_OK ){
       rc = chunkStoreSerializeRefs(pLocal);

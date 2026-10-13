@@ -1398,9 +1398,10 @@ result=$("$DB" "$TMPDIR/shadow_merge/b.db" "SELECT id || ',' || v FROM t ORDER B
 check "divergent pull keeps the remote row" "1,1
 2,2
 5,5" "$result"
+url=$("$DB" "$TMPDIR/shadow_merge/b.db" "SELECT url FROM dolt_remotes WHERE name='origin';")
 result=$("$DB" "$TMPDIR/shadow_merge/b.db" "SELECT message FROM dolt_log LIMIT 1;")
-check "divergent pull message names the remote branch" \
-  "Merge branch 'origin/main' into main" "$result"
+check "divergent pull message names the remote branch and url" \
+  "Merge branch 'main' of $url into main" "$result"
 result=$("$DB" "$TMPDIR/shadow_merge/b.db" \
   "SELECT a.parent_index || '|' || l.message
    FROM dolt_commit_ancestors a
@@ -1414,6 +1415,10 @@ shadow_pull "$TMPDIR/shadow_noff" ff
 result=$("$DB" "$TMPDIR/shadow_noff/b.db" \
   "SELECT dolt_pull('--no-ff','origin','main');")
 check "no-ff pull past a local origin/main returns 0" "0" "$result"
+url=$("$DB" "$TMPDIR/shadow_noff/b.db" "SELECT url FROM dolt_remotes WHERE name='origin';")
+result=$("$DB" "$TMPDIR/shadow_noff/b.db" "SELECT message FROM dolt_log LIMIT 1;")
+check "no-ff pull message names the remote branch and url" \
+  "Merge branch 'main' of $url into main" "$result"
 result=$("$DB" "$TMPDIR/shadow_noff/b.db" "SELECT id || ',' || v FROM t ORDER BY id;")
 check "no-ff pull keeps the remote row" "1,1
 2,2" "$result"
@@ -1430,6 +1435,10 @@ shadow_pull "$TMPDIR/shadow_squash" diverge
 result=$("$DB" "$TMPDIR/shadow_squash/b.db" \
   "SELECT dolt_pull('--squash','origin','main');")
 check "squash pull past a local origin/main returns 0" "0" "$result"
+url=$("$DB" "$TMPDIR/shadow_squash/b.db" "SELECT url FROM dolt_remotes WHERE name='origin';")
+result=$("$DB" "$TMPDIR/shadow_squash/b.db" "SELECT message FROM dolt_log LIMIT 1;")
+check "squash pull message names the remote branch and url" \
+  "Merge branch 'main' of $url into main" "$result"
 result=$("$DB" "$TMPDIR/shadow_squash/b.db" "SELECT id || ',' || v FROM t ORDER BY id;")
 check "squash pull keeps the remote row" "1,1
 2,2
@@ -1573,8 +1582,9 @@ check "refused divergent pull does not take the remote row" "1
 5" "$result"
 "$DB" "$DP/b.db" "SELECT dolt_commit('-am','keep u');" >/dev/null
 result=$("$DB" "$DP/b.db" "SELECT dolt_pull('origin','main'); SELECT message FROM dolt_log LIMIT 1; SELECT id FROM t ORDER BY id; SELECT id FROM u;")
+url=$("$DB" "$DP/b.db" "SELECT url FROM dolt_remotes WHERE name='origin';")
 check "committing the dirty row lets the divergent pull merge" "0
-Merge branch 'origin/main' into main
+Merge branch 'main' of $url into main
 1
 2
 5
@@ -1917,8 +1927,9 @@ ENDSQL
 result=$("$DB" "$DV/b.db" "SELECT count(*) FROM dolt_status;")
 check "ignored table on a diverged branch is absent from dolt_status" "0" "$result"
 result=$("$DB" "$DV/b.db" "SELECT dolt_pull('origin','main'); SELECT message FROM dolt_log LIMIT 1; SELECT id FROM t ORDER BY id; SELECT id FROM tmp_y;")
+url=$("$DB" "$DV/b.db" "SELECT url FROM dolt_remotes WHERE name='origin';")
 check "divergent pull keeps the ignored table" "0
-Merge branch 'origin/main' into main
+Merge branch 'main' of $url into main
 1
 2
 5
@@ -2399,6 +2410,172 @@ result=$("$DB" "$FV/clone.db" \
   "SELECT name || '|' || latest_commit_message FROM dolt_remote_branches ORDER BY name;")
 check "the valid fetch advances only feat" "remotes/origin/feat|c2
 remotes/origin/main|c1" "$result"
+
+echo "=== Pull merge message, prune, clone flags, and push --all ==="
+PP="$TMPDIR/pull_flags"
+mkdir -p "$PP"
+"$DB" "$PP/src.db" <<ENDSQL >/dev/null
+CREATE TABLE t(id INT PRIMARY KEY);
+INSERT INTO t VALUES(1);
+SELECT dolt_commit('-Am','c1');
+SELECT dolt_branch('other');
+SELECT dolt_remote('add','origin','file://$PP/remote.db');
+SELECT dolt_push('origin','main');
+SELECT dolt_push('origin','other');
+ENDSQL
+"$DB" "$PP/b.db" "SELECT dolt_clone('file://$PP/remote.db');" >/dev/null
+"$DB" "$PP/src.db" "SELECT dolt_push('origin',':other');" >/dev/null
+result=$("$DB" "$PP/b.db" "SELECT dolt_fetch('--prune','origin','main');" 2>&1)
+check_match "fetch --prune with a branch is still refused" \
+  "prune option cannot be provided with a ref spec" "$result"
+result=$("$DB" "$PP/b.db" "SELECT name FROM dolt_remote_branches ORDER BY name;")
+check "refused fetch prune leaves the deleted tracking ref" "remotes/origin/main
+remotes/origin/other" "$result"
+result=$("$DB" "$PP/b.db" "SELECT dolt_pull('--prune','origin','main');")
+check "pull --prune with a branch returns 0" "0" "$result"
+result=$("$DB" "$PP/b.db" "SELECT name FROM dolt_remote_branches ORDER BY name;")
+check "pull --prune with a branch drops the deleted tracking ref" "remotes/origin/main" "$result"
+
+"$DB" "$PP/src.db" "SELECT dolt_push('origin','other');" >/dev/null
+result=$("$DB" "$PP/b.db" "SELECT dolt_fetch('origin','other');")
+check "fetch restores a re-pushed branch" "0" "$result"
+result=$("$DB" "$PP/b.db" "SELECT name FROM dolt_remote_branches ORDER BY name;")
+check "fetch puts the re-pushed branch back" "remotes/origin/main
+remotes/origin/other" "$result"
+"$DB" "$PP/src.db" "SELECT dolt_push('origin',':other');" >/dev/null
+result=$("$DB" "$PP/b.db" "SELECT dolt_pull('-p');")
+check "pull -p returns 0" "0" "$result"
+result=$("$DB" "$PP/b.db" "SELECT name FROM dolt_remote_branches ORDER BY name;")
+check "pull -p drops the deleted tracking ref again" "remotes/origin/main" "$result"
+
+"$DB" "$PP/src.db" "SELECT dolt_push('origin','other');" >/dev/null
+"$DB" "$PP/b.db" "SELECT dolt_fetch('origin','other');" >/dev/null
+"$DB" "$PP/src.db" "SELECT dolt_push('origin',':other');" >/dev/null
+"$DB" "$PP/b.db" "INSERT INTO t VALUES(4); SELECT dolt_commit('-am','ahead');" >/dev/null
+result=$("$DB" "$PP/b.db" "SELECT dolt_pull('--prune','origin','main'); SELECT message FROM dolt_log LIMIT 1;")
+check "an ahead pull --prune returns 0 and keeps the local commit" "0
+ahead" "$result"
+result=$("$DB" "$PP/b.db" "SELECT name FROM dolt_remote_branches ORDER BY name;")
+check "an ahead pull --prune still drops the deleted tracking ref" "remotes/origin/main" "$result"
+
+"$DB" "$PP/src.db" "SELECT dolt_push('origin','other');" >/dev/null
+"$DB" "$PP/d.db" "SELECT dolt_clone('file://$PP/remote.db');" >/dev/null
+"$DB" "$PP/src.db" "SELECT dolt_push('origin',':other');" >/dev/null
+"$DB" "$PP/d.db" "INSERT INTO t VALUES(8);" >/dev/null
+result=$("$DB" "$PP/d.db" "SELECT dolt_pull('--prune');" 2>&1)
+check_match "a dirty up-to-date pull --prune is refused" \
+  "cannot pull with uncommitted changes" "$result"
+result=$("$DB" "$PP/d.db" "SELECT name FROM dolt_remote_branches ORDER BY name; SELECT id FROM t WHERE id=8;")
+check "a refused pull --prune still drops the deleted tracking ref" "remotes/origin/main
+8" "$result"
+
+"$DB" "$PP/src.db" "INSERT INTO t VALUES(2); SELECT dolt_commit('-am','remote2'); SELECT dolt_push('origin','main');" >/dev/null
+result=$("$DB" "$PP/b.db" "SELECT dolt_pull('--no-ff','origin','main'); SELECT message FROM dolt_log LIMIT 1;")
+url=$("$DB" "$PP/b.db" "SELECT url FROM dolt_remotes WHERE name='origin';")
+check "no-ff pull message uses the stored remote url" "0
+Merge branch 'main' of $url into main" "$result"
+
+echo "=== Clone --remote and --single-branch ==="
+CF="$TMPDIR/clone_flags"
+mkdir -p "$CF"
+"$DB" "$CF/src.db" <<ENDSQL >/dev/null
+CREATE TABLE t(id INT PRIMARY KEY);
+INSERT INTO t VALUES(1);
+SELECT dolt_commit('-Am','c1');
+SELECT dolt_branch('feat');
+SELECT dolt_remote('add','origin','file://$CF/remote.db');
+SELECT dolt_push('origin','main');
+SELECT dolt_push('origin','feat');
+ENDSQL
+"$DB" "$CF/all.db" "SELECT dolt_clone('file://$CF/remote.db');" >/dev/null
+result=$("$DB" "$CF/all.db" "SELECT name FROM dolt_remotes; SELECT name FROM dolt_branches ORDER BY name; SELECT name FROM dolt_remote_branches ORDER BY name; SELECT active_branch();")
+check "clone tracks every branch and checks out the default" "origin
+main
+remotes/origin/feat
+remotes/origin/main
+main" "$result"
+"$DB" "$CF/one.db" "SELECT dolt_clone('--single-branch','file://$CF/remote.db');" >/dev/null
+result=$("$DB" "$CF/one.db" "SELECT name FROM dolt_remotes; SELECT name FROM dolt_branches ORDER BY name; SELECT name FROM dolt_remote_branches ORDER BY name; SELECT active_branch();")
+check "single-branch clone keeps only the default branch" "origin
+main
+remotes/origin/main
+main" "$result"
+"$DB" "$CF/br.db" "SELECT dolt_clone('--branch','feat','file://$CF/remote.db');" >/dev/null
+result=$("$DB" "$CF/br.db" "SELECT name FROM dolt_remotes; SELECT name FROM dolt_branches ORDER BY name; SELECT name FROM dolt_remote_branches ORDER BY name; SELECT active_branch();")
+check "branch clone tracks every remote branch and checks out feat" "origin
+feat
+remotes/origin/feat
+remotes/origin/main
+feat" "$result"
+"$DB" "$CF/named.db" "SELECT dolt_clone('--remote','up','--single-branch','--branch','feat','file://$CF/remote.db');" >/dev/null
+result=$("$DB" "$CF/named.db" "SELECT name FROM dolt_remotes; SELECT name FROM dolt_branches ORDER BY name; SELECT name FROM dolt_remote_branches ORDER BY name; SELECT active_branch();")
+check "named single-branch clone checks out that branch" "up
+feat
+remotes/up/feat
+feat" "$result"
+"$DB" "$CF/trim.db" "SELECT dolt_clone('--remote',' up ','file://$CF/remote.db');" >/dev/null
+result=$("$DB" "$CF/trim.db" "SELECT name FROM dolt_remotes;")
+check "clone trims the remote name" "up" "$result"
+result=$("$DB" "$CF/bad.db" "SELECT dolt_clone('--remote','bad/name','file://$CF/remote.db');" 2>&1)
+check_match "clone rejects an invalid remote name" "remote name invalid" "$result"
+result=$("$DB" "$CF/bad.db" "SELECT count(*) FROM dolt_remotes; SELECT count(*) FROM sqlite_master WHERE name='t';")
+check "invalid remote name installs nothing" "0
+0" "$result"
+
+echo "=== Push --all ==="
+PA="$TMPDIR/push_all"
+mkdir -p "$PA"
+"$DB" "$PA/src.db" <<ENDSQL >/dev/null
+CREATE TABLE t(id INT PRIMARY KEY);
+INSERT INTO t VALUES(1);
+SELECT dolt_commit('-Am','c1');
+SELECT dolt_branch('b2');
+SELECT dolt_branch('other');
+SELECT dolt_tag('v9');
+SELECT dolt_remote('add','origin','file://$PA/remote.db');
+ENDSQL
+result=$("$DB" "$PA/src.db" "SELECT dolt_push('--all');" 2>&1)
+check_match "push --all without a remote is refused" "remote required" "$result"
+result=$("$DB" "$PA/src.db" "SELECT dolt_push('--all','origin','main');" 2>&1)
+check_match "push --all with a refspec is refused" \
+  "fatal: --all can't be combined with refspecs" "$result"
+result=$("$DB" "$PA/src.db" "SELECT dolt_push('--all','--tags','origin');" 2>&1)
+check_match "push --all with --tags is refused" \
+  "all cannot be combined with --tags" "$result"
+result=$("$DB" "$PA/src.db" "SELECT count(*) FROM dolt_remote_branches;")
+check "refused push --all publishes nothing" "0" "$result"
+result=$("$DB" "$PA/src.db" "SELECT dolt_push('--all','origin');")
+check "push --all returns 0" "0" "$result"
+result=$("$DB" "$PA/src.db" "SELECT name FROM dolt_remote_branches ORDER BY name;")
+check "push --all publishes every local branch" "remotes/origin/b2
+remotes/origin/main
+remotes/origin/other" "$result"
+result=$("$DB" "$PA/remote.db" "SELECT count(*) FROM dolt_tags WHERE tag_name='v9';")
+check "push --all does not publish tags" "0" "$result"
+"$DB" "$PA/src.db" "SELECT dolt_push('origin',':other');" >/dev/null
+result=$("$DB" "$PA/src.db" "SELECT dolt_push('--all','origin');")
+check "push --all after a remote delete returns 0" "0" "$result"
+result=$("$DB" "$PA/src.db" "SELECT name FROM dolt_remote_branches ORDER BY name;")
+check "push --all recreates the deleted remote branch" "remotes/origin/b2
+remotes/origin/main
+remotes/origin/other" "$result"
+
+"$DB" "$PA/c.db" "SELECT dolt_clone('file://$PA/remote.db');" >/dev/null
+"$DB" "$PA/c.db" "INSERT INTO t VALUES(2); SELECT dolt_commit('-am','c-main'); SELECT dolt_push('origin','main');" >/dev/null
+"$DB" "$PA/src.db" "INSERT INTO t VALUES(3); SELECT dolt_commit('-am','src-main'); SELECT dolt_branch('extra');" >/dev/null
+result=$("$DB" "$PA/src.db" "SELECT dolt_push('--all','origin');" 2>&1)
+check_match "push --all reports the rejected branch" "rejected: main" "$result"
+result=$("$DB" "$PA/src.db" "SELECT name FROM dolt_remote_branches ORDER BY name;")
+check "push --all still publishes the other branches" "remotes/origin/b2
+remotes/origin/extra
+remotes/origin/main
+remotes/origin/other" "$result"
+result=$("$DB" "$PA/remote.db" "SELECT message FROM dolt_log LIMIT 1;")
+check "the rejected branch stays at the remote tip" "c-main" "$result"
+result=$("$DB" "$PA/src.db" "SELECT dolt_push('--force','--all','origin');")
+check "push --force --all returns 0" "0" "$result"
+result=$("$DB" "$PA/remote.db" "SELECT message FROM dolt_log LIMIT 1;")
+check "push --force --all updates the rejected branch" "src-main" "$result"
 
 echo ""
 echo "======================================="
