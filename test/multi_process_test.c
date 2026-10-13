@@ -936,6 +936,10 @@ static void test_ref_commands_busy_handler(void){
           "CREATE TABLE t(id INTEGER PRIMARY KEY); INSERT INTO t VALUES(1);"
           "SELECT dolt_commit('-Am','base');"
           "SELECT dolt_branch('feature');")==SQLITE_OK);
+        if( strstr(azSql[i], "dolt_clean") ){
+          check("mp_ref_busy_clean_untracked", execSql(db,
+            "CREATE TABLE scratch(id INTEGER PRIMARY KEY)")==SQLITE_OK);
+        }
         sqlite3_close(db);
         mpPipe(ready);
         mpPipe(release);
@@ -971,6 +975,10 @@ static void test_ref_commands_busy_handler(void){
         rc = execSql(db, azSql[i]);
         if( rc!=SQLITE_OK ) fprintf(stderr, "%s: %s\n", azSql[i], sqlite3_errmsg(db));
         check(useTimeout ? "mp_ref_busy_timeout_waits" : "mp_ref_busy_handler_waits", rc==SQLITE_OK);
+        if( strstr(azSql[i], "dolt_clean") ){
+          check("mp_ref_busy_clean_removed", strcmp(queryScalarText(db,
+            "SELECT count(*) FROM sqlite_master WHERE name='scratch'"), "0")==0);
+        }
         if( !useTimeout ){
           check("mp_ref_busy_callback_invoked", ctx.calls>0);
           if( ctx.calls==0 ) mpWrite(release[1], "G");
@@ -1588,10 +1596,158 @@ static void test_publication_busy_commit(void){
   remove(path);
 }
 
+typedef struct MpCleanResetPeer MpCleanResetPeer;
+struct MpCleanResetPeer {
+  int toPeer;
+  int fromPeer;
+  int fireAt;
+  int nCalls;
+  int fired;
+  char result;
+};
+
+static int mpCleanResetProgress(void *arg){
+  MpCleanResetPeer *p = (MpCleanResetPeer*)arg;
+  if( ++p->nCalls==p->fireAt && !p->fired ){
+    p->fired = 1;
+    mpWrite(p->toPeer, "w");
+    mpRead(p->fromPeer, &p->result);
+  }
+  return 0;
+}
+
+static void test_clean_reset_peer_process(void){
+  static const struct {
+    const char *zName;
+    const char *zPre;
+    const char *zSql;
+  } aCase[] = {
+    { "clean_noop", "", "SELECT dolt_clean()" },
+    { "clean_tracked", "", "SELECT dolt_clean('t')" },
+    { "clean_dry", "CREATE TABLE scratch(id INTEGER PRIMARY KEY)",
+      "SELECT dolt_clean('--dry-run')" },
+    { "clean_drop", "CREATE TABLE scratch(id INTEGER PRIMARY KEY)",
+      "SELECT dolt_clean()" },
+    { "reset_noop", "", "SELECT dolt_reset('t')" },
+    { "reset_staged", "SELECT dolt_add('t')", "SELECT dolt_reset('t')" },
+    { "status", "", "SELECT count(*) FROM dolt_status" }
+  };
+  char path[256];
+  int i, action;
+
+  printf("--- Clean and table reset preserve a peer process's writes ---\n");
+  snprintf(path, sizeof(path), DOLTLITE_TEST_TMPDIR "/mp_clean_reset_%d.db",
+           (int)getpid());
+  for(i=0; i<(int)(sizeof(aCase)/sizeof(aCase[0])); i++){
+    int nAcked = 0, nOk = 0, nLost = 0, nStale = 0, nErrors = 0;
+    char zName[96];
+    for(action=0; action<2; action++){
+      int k;
+      for(k=1; k<5000; k++){
+        sqlite3 *db = 0, *fresh = 0;
+        MpCleanResetPeer p;
+        int toPeer[2], fromPeer[2];
+        int rc, status;
+        pid_t pid;
+        char ch;
+
+        setup_db(path);
+        sqlite3_open(path, &db);
+        check("mp_clean_reset_setup", execSql(db,
+          "CREATE TABLE u(id INTEGER PRIMARY KEY);"
+          "SELECT dolt_commit('-Am','u');"
+          "INSERT INTO t VALUES(3,'dirty')")==SQLITE_OK);
+        check("mp_clean_reset_pre", execSql(db, aCase[i].zPre)==SQLITE_OK);
+        sqlite3_close(db);
+        mpPipe(toPeer);
+        mpPipe(fromPeer);
+        pid = fork();
+        if( pid<0 ){ perror("fork"); _exit(1); }
+        if( pid==0 ){
+          sqlite3 *peer = 0;
+          int peerRc;
+          close(toPeer[1]);
+          close(fromPeer[0]);
+          if( sqlite3_open(path, &peer)!=SQLITE_OK ) _exit(1);
+          if( strcmp(queryScalarText(peer, "SELECT count(*) FROM u"), "0") ){
+            _exit(2);
+          }
+          mpWrite(fromPeer[1], "r");
+          mpRead(toPeer[0], &ch);
+          if( ch=='w' ){
+            peerRc = execSql(peer, "INSERT INTO u VALUES(20)");
+            if( peerRc==SQLITE_OK && action ){
+              peerRc = execSql(peer, "SELECT dolt_commit('-am','peer')");
+            }
+            mpWrite(fromPeer[1], peerRc==SQLITE_OK ? "o"
+                       : isRetryable(peerRc) ? "b" : "e");
+          }
+          sqlite3_close(peer);
+          _exit(0);
+        }
+        close(toPeer[0]);
+        close(fromPeer[1]);
+        mpRead(fromPeer[0], &ch);
+        memset(&p, 0, sizeof(p));
+        p.toPeer = toPeer[1];
+        p.fromPeer = fromPeer[0];
+        p.fireAt = k;
+        sqlite3_open(path, &db);
+        queryScalarText(db, "SELECT count(*) FROM u");
+        sqlite3_progress_handler(db, 1, mpCleanResetProgress, &p);
+        rc = execSql(db, aCase[i].zSql);
+        sqlite3_progress_handler(db, 0, 0, 0);
+        if( !p.fired ) mpWrite(toPeer[1], "q");
+        close(toPeer[1]);
+        close(fromPeer[0]);
+        waitpid(pid, &status, 0);
+        if( !WIFEXITED(status) || WEXITSTATUS(status)!=0 ) nErrors++;
+        if( rc!=SQLITE_OK && !isRetryable(rc) ) nErrors++;
+        if( p.result=='e' ) nErrors++;
+        if( p.result=='o' ){
+          nAcked++;
+          sqlite3_open(path, &fresh);
+          if( strcmp(queryScalarText(fresh,
+                "SELECT count(*) FROM u WHERE id=20"), "1") ) nLost++;
+          if( strcmp(queryScalarText(db,
+                "SELECT count(*) FROM u WHERE id=20"), "1") ) nStale++;
+          if( isRetryable(rc) ) rc = execSql(db, aCase[i].zSql);
+          if( rc==SQLITE_OK ) nOk++;
+          if( execSql(db, "SELECT dolt_clean();"
+                          "INSERT INTO t VALUES(4,'later')")!=SQLITE_OK ){
+            nErrors++;
+          }
+          if( strcmp(queryScalarText(fresh,
+                "SELECT count(*) FROM u WHERE id=20"), "1") ) nLost++;
+          if( strcmp(queryScalarText(fresh, "PRAGMA integrity_check"), "ok") ){
+            nErrors++;
+          }
+          sqlite3_close(fresh);
+        }
+        sqlite3_close(db);
+        if( !p.fired ) break;
+      }
+      if( k==5000 ) nErrors++;
+    }
+    printf("  %s: acknowledged=%d succeeded=%d lost=%d stale=%d errors=%d\n",
+           aCase[i].zName, nAcked, nOk, nLost, nStale, nErrors);
+    snprintf(zName, sizeof(zName), "mp_clean_reset_%s_exercised", aCase[i].zName);
+    check(zName, nAcked>0 && nOk>0);
+    snprintf(zName, sizeof(zName), "mp_clean_reset_%s_peer_kept", aCase[i].zName);
+    check(zName, nLost==0);
+    snprintf(zName, sizeof(zName), "mp_clean_reset_%s_reads_fresh", aCase[i].zName);
+    check(zName, nStale==0);
+    snprintf(zName, sizeof(zName), "mp_clean_reset_%s_errors", aCase[i].zName);
+    check(zName, nErrors==0);
+  }
+  remove(path);
+}
+
 int main(){
   printf("=== Multi-Process Concurrency Tests ===\n\n");
 
   test_publication_busy_commit();
+  test_clean_reset_peer_process();
   test_ref_commands_busy_handler();
   test_two_writers();
   test_reader_during_write();
