@@ -507,6 +507,7 @@ void chunkStoreClearRefs(ChunkStore *cs);
 const char *chunkStoreFilename(ChunkStore *cs);
 
 int chunkStoreRefreshIfChanged(ChunkStore *cs, int *pChanged);
+int chunkStoreRefreshIfChangedOrBusy(ChunkStore *cs, int *pChanged);
 
 /* Reload refs for a VC write, bypassing the size/HAS_MOVED heuristic
 ** (WAL reuse can hide a peer commit). Outermost lock only. */

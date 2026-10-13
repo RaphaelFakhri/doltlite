@@ -723,6 +723,7 @@ static void test_concurrent_continue_adoption(void){
       close(readyfd[0]);
       close(gofd[1]);
       sqlite3_open(path, &cdb);
+      sqlite3_busy_timeout(cdb, 5000);
       if( !writeSignal(readyfd[1]) || !readSignal(gofd[0]) ){
         sqlite3_close(cdb);
         _exit(1);
@@ -742,6 +743,7 @@ static void test_concurrent_continue_adoption(void){
     close(readyfd[1]);
     close(gofd[0]);
     sqlite3_open(path, &db);
+    sqlite3_busy_timeout(db, 5000);
     if( !readSignal(readyfd[0]) || !writeSignal(gofd[1]) ){
       snprintf(parentOut, sizeof(parentOut), "SYNC_ERR");
     }else{
