@@ -24,6 +24,9 @@ foreach {name sql} {
     SELECT dolt_commit('-Am','base');
     SELECT dolt_branch('feature');
   }
+  if {$name eq "clean"} {
+    execsql {CREATE TABLE scratch(id INTEGER PRIMARY KEY)}
+  }
   sqlite3 peer test.db
   peer eval {BEGIN IMMEDIATE; INSERT INTO t VALUES(2);}
   set busy_calls 0
@@ -33,6 +36,11 @@ foreach {name sql} {
     set rc [catch {db eval $sql} msg]
     list $rc [db errorcode] [expr {$busy_calls>0}]
   } {1 5 1}
+  if {$name eq "clean"} {
+    do_execsql_test ref-busy-clean-decline-kept {
+      SELECT count(*) FROM sqlite_master WHERE name='scratch';
+    } 1
+  }
   set busy_calls 0
   set release_peer 1
   db busy ref_busy
@@ -40,6 +48,11 @@ foreach {name sql} {
     set rc [catch {db eval $sql} msg]
     list $rc $busy_calls
   } {0 1}
+  if {$name eq "clean"} {
+    do_execsql_test ref-busy-clean-release-removed {
+      SELECT count(*) FROM sqlite_master WHERE name='scratch';
+    } 0
+  }
   db busy {}
   do_execsql_test ref-busy-$name-rows {SELECT * FROM t} {1}
   peer close
