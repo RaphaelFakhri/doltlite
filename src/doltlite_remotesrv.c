@@ -329,8 +329,9 @@ static int remoteSrvCommitPending(ChunkStore *pStore){
 #define MAX_REQUEST_BYTES  MAX_CHUNK_BYTES
 #define MAX_RESPONSE_BYTES MAX_REQUEST_BYTES
 
-/* After the header, the body must sustain BODY_MIN_RATE against timeoutMs
-** (slow-loris versus a slow large upload). */
+/* After the header budget, the body must sustain BODY_MIN_RATE. A stall
+** during that budget must not hold a worker for the whole --timeout-ms.
+** timeoutMs still caps the read. */
 #define SERVER_BODY_MIN_RATE     (64 * 1024)
 
 static i64 monotonicMs(void){
@@ -365,16 +366,21 @@ static int remoteSrvGrowBuf(u8 **pp, i64 *pnAlloc, i64 need){
 }
 
 static int readExact(DoltliteConn *fd, u8 *pBuf, int nBytes,
-                     i64 startMs, int graceMs){
+                     i64 startMs, int graceMs, int timeoutMs){
   int nRead = 0;
   while( nRead < nBytes ){
-    int n = doltliteConnRead(fd, pBuf + nRead, nBytes - nRead);
-    if( n <= 0 ) return -1;
+    i64 elapsed = monotonicMs() - startMs;
+    i64 allow = (i64)graceMs + (i64)nRead * 1000 / SERVER_BODY_MIN_RATE;
+    i64 leftRate = allow - elapsed;
+    i64 leftOverall = (i64)timeoutMs - elapsed;
+    i64 left = leftRate<leftOverall ? leftRate : leftOverall;
+    int n;
+    if( left<=0 ) return -1;
+    if( left>0x7fffffff ) left = 0x7fffffff;
+    if( doltliteConnSetTimeout(fd, (int)left)!=0 ) return -1;
+    n = doltliteConnRead(fd, pBuf + nRead, nBytes - nRead);
+    if( n<=0 ) return -1;
     nRead += n;
-    if( monotonicMs() - startMs
-        > graceMs + (i64)nRead * 1000 / SERVER_BODY_MIN_RATE ){
-      return -1;
-    }
   }
   return 0;
 }
@@ -535,9 +541,16 @@ static int readRequestBody(
   if( nCopy>contentLength ) nCopy = contentLength;
   if( nCopy>0 ) memcpy(pBody, pHave, (size_t)nCopy);
   if( nCopy<contentLength ){
-    doltliteConnSetTimeout(fd, timeoutMs);
+    int grace = timeoutMs;
+    if( grace>SERVER_HEADER_TIMEOUT_MS ) grace = SERVER_HEADER_TIMEOUT_MS;
     if( readExact(fd, pBody + nCopy, contentLength - nCopy,
-                  monotonicMs(), timeoutMs)!=0 ){
+                  monotonicMs(), grace, timeoutMs)!=0 ){
+      sqlite3_free(pBody);
+      return -1;
+    }
+    /* The body read shortens the socket deadline. The response uses the
+    ** caller's timeout again. */
+    if( doltliteConnSetTimeout(fd, timeoutMs)!=0 ){
       sqlite3_free(pBody);
       return -1;
     }
