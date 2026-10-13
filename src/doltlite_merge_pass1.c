@@ -745,6 +745,166 @@ static int mergePass1RelayoutOneSidedSchema(
       pOtherOut, pAncOut, pbRelaid);
 }
 
+typedef struct MergeSeqRow MergeSeqRow;
+struct MergeSeqRow {
+  char *zName;
+  i64 seq;
+  u8 *pRec;
+  int nRec;
+};
+
+static void mergeSeqRowsFree(MergeSeqRow *a, int n){
+  int i;
+  for(i=0; i<n; i++){
+    sqlite3_free(a[i].zName);
+    sqlite3_free(a[i].pRec);
+  }
+  sqlite3_free(a);
+}
+
+static int mergeSeqLoad(
+  sqlite3 *db,
+  const ProllyHash *pRoot,
+  u8 flags,
+  MergeSeqRow **paRow,
+  int *pnRow
+){
+  ProllyCursor cur;
+  MergeSeqRow *a = 0;
+  int n = 0, nAlloc = 0;
+  int res = 0;
+  int rc;
+
+  *paRow = 0;
+  *pnRow = 0;
+  if( prollyHashIsEmpty(pRoot) ) return SQLITE_OK;
+  prollyCursorInit(&cur, doltliteGetChunkStore(db), doltliteGetCache(db),
+                   pRoot, flags);
+  rc = prollyCursorFirst(&cur, &res);
+  while( rc==SQLITE_OK && !res && prollyCursorIsValid(&cur) ){
+    const u8 *pVal = 0;
+    int nVal = 0;
+    DoltliteRecordInfo info = {0};
+    prollyCursorValue(&cur, &pVal, &nVal);
+    rc = doltliteParseRecordStrict(pVal, nVal, &info);
+    if( rc==SQLITE_OK && info.nField<2 ) rc = SQLITE_CORRUPT;
+    if( rc==SQLITE_OK && n>=nAlloc ){
+      MergeSeqRow *aNew;
+      nAlloc = nAlloc ? nAlloc*2 : 16;
+      aNew = sqlite3_realloc64(a, (sqlite3_uint64)nAlloc*sizeof(*a));
+      if( !aNew ) rc = SQLITE_NOMEM;
+      else a = aNew;
+    }
+    if( rc==SQLITE_OK ){
+      memset(&a[n], 0, sizeof(a[n]));
+      rc = dlRecordTextField(pVal, nVal, &info, 0, &a[n].zName);
+      if( rc==SQLITE_OK && !a[n].zName ) rc = SQLITE_CORRUPT;
+      if( rc==SQLITE_OK ){
+        a[n].seq = dlRecordIntField(pVal, nVal, &info, 1);
+        a[n].pRec = sqlite3_malloc(nVal>0 ? nVal : 1);
+        if( !a[n].pRec ) rc = SQLITE_NOMEM;
+        else memcpy(a[n].pRec, pVal, nVal);
+        a[n].nRec = nVal;
+      }
+      n++;
+      if( rc==SQLITE_OK ) rc = prollyCursorNext(&cur);
+    }
+    doltliteRecordInfoClear(&info);
+  }
+  prollyCursorClose(&cur);
+  if( rc!=SQLITE_OK ){
+    mergeSeqRowsFree(a, n);
+    return rc;
+  }
+  *paRow = a;
+  *pnRow = n;
+  return SQLITE_OK;
+}
+
+static const MergeSeqRow *mergeSeqFind(
+  const MergeSeqRow *a, int n, const char *zName
+){
+  int i;
+  for(i=0; i<n; i++){
+    if( strcmp(a[i].zName, zName)==0 ) return &a[i];
+  }
+  return 0;
+}
+
+static int mergeSeqCmp(const void *pA, const void *pB){
+  return strcmp((*(const MergeSeqRow**)pA)->zName,
+                (*(const MergeSeqRow**)pB)->zName);
+}
+
+/* sqlite_sequence has no key but the rowid, so the two sides' rows for one
+** table do not line up for a row merge. Merge it by table name instead: a
+** counter both sides kept takes the higher value, as Dolt does for
+** AUTO_INCREMENT; a row one side added is kept; a row one side dropped stays
+** dropped unless the other side advanced it. */
+static int mergeSequenceThreeWay(
+  sqlite3 *db,
+  const ProllyHash *pAnc,
+  const ProllyHash *pOurs,
+  const ProllyHash *pTheirs,
+  u8 flags,
+  ProllyHash *pRoot
+){
+  MergeSeqRow *aAnc = 0, *aOurs = 0, *aTheirs = 0;
+  const MergeSeqRow **aKeep = 0;
+  int nAnc = 0, nOurs = 0, nTheirs = 0, nKeep = 0;
+  ProllyMutMap rows;
+  int i;
+  int rc;
+
+  memset(pRoot, 0, sizeof(*pRoot));
+  rc = mergeSeqLoad(db, pAnc, flags, &aAnc, &nAnc);
+  if( rc==SQLITE_OK ) rc = mergeSeqLoad(db, pOurs, flags, &aOurs, &nOurs);
+  if( rc==SQLITE_OK ) rc = mergeSeqLoad(db, pTheirs, flags, &aTheirs, &nTheirs);
+  if( rc==SQLITE_OK && nOurs+nTheirs>0 ){
+    aKeep = sqlite3_malloc64((sqlite3_uint64)(nOurs+nTheirs)*sizeof(*aKeep));
+    if( !aKeep ) rc = SQLITE_NOMEM;
+  }
+  for(i=0; rc==SQLITE_OK && i<nOurs; i++){
+    const MergeSeqRow *pT = mergeSeqFind(aTheirs, nTheirs, aOurs[i].zName);
+    const MergeSeqRow *pA = mergeSeqFind(aAnc, nAnc, aOurs[i].zName);
+    if( pT ){
+      aKeep[nKeep++] = pT->seq>aOurs[i].seq ? pT : &aOurs[i];
+    }else if( !pA || pA->seq!=aOurs[i].seq ){
+      aKeep[nKeep++] = &aOurs[i];
+    }
+  }
+  for(i=0; rc==SQLITE_OK && i<nTheirs; i++){
+    const MergeSeqRow *pA;
+    if( mergeSeqFind(aOurs, nOurs, aTheirs[i].zName) ) continue;
+    pA = mergeSeqFind(aAnc, nAnc, aTheirs[i].zName);
+    if( !pA || pA->seq!=aTheirs[i].seq ) aKeep[nKeep++] = &aTheirs[i];
+  }
+  if( rc==SQLITE_OK && nKeep>0 ){
+    qsort(aKeep, nKeep, sizeof(*aKeep), mergeSeqCmp);
+    rc = prollyMutMapInit(&rows, 1);
+    for(i=0; rc==SQLITE_OK && i<nKeep; i++){
+      rc = prollyMutMapInsert(&rows, 0, 0, (i64)i+1,
+                              aKeep[i]->pRec, aKeep[i]->nRec);
+    }
+    if( rc==SQLITE_OK ){
+      ProllyMutator mut;
+      memset(&mut, 0, sizeof(mut));
+      mut.pStore = doltliteGetChunkStore(db);
+      mut.pCache = doltliteGetCache(db);
+      mut.pEdits = &rows;
+      mut.flags = flags;
+      rc = prollyMutateFlush(&mut);
+      if( rc==SQLITE_OK ) *pRoot = mut.newRoot;
+    }
+    prollyMutMapFree(&rows);
+  }
+  sqlite3_free(aKeep);
+  mergeSeqRowsFree(aAnc, nAnc);
+  mergeSeqRowsFree(aOurs, nOurs);
+  mergeSeqRowsFree(aTheirs, nTheirs);
+  return rc;
+}
+
 static int mergePass1BothSides(
   MergePass1Ctx *c,
   int iOurs,
@@ -857,13 +1017,20 @@ static int mergePass1BothSides(
     }
   }
 
-  /* sqlite_sequence / sqlite_stat* are derived; skip row merge. */
   if( !skipRowMerge && zName
    && strcmp(zName, "sqlite_sequence")==0
    && oursChanged && theirsChanged ){
-    c->aMerged[(*c->pnMerged)++] = c->aOurs[iOurs];
+    struct TableEntry seq = c->aOurs[iOurs];
+    rc = mergeSequenceThreeWay(c->db, &ancEntry->root, &c->aOurs[iOurs].root,
+                               &theirsEntry->root, seq.flags, &seq.root);
+    if( rc!=SQLITE_OK ){
+      sqlite3_free(zOursPrevSql);
+      return rc;
+    }
+    c->aMerged[(*c->pnMerged)++] = seq;
     skipRowMerge = 1;
   }
+  /* sqlite_stat* are derived; skip row merge. */
   if( !skipRowMerge && zName
    && oursChanged && theirsChanged
    && (strcmp(zName, "sqlite_stat1")==0
