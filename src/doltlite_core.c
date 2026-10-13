@@ -260,6 +260,30 @@ void doltliteTestPause(const char *zEnv){
   }
 }
 
+/* After the handler agrees to retry, ride out one short graph-lock hold
+** before asking it again. Process close re-takes the lock to append its
+** clean-close marker, and a one-shot handler will not wait a second time. */
+static int doltliteLockAndRefreshBusy(sqlite3 *db, ChunkStore *cs){
+  int rc;
+  int i;
+  int rode;
+  rc = chunkStoreLockAndRefresh(cs);
+  rode = 0;
+  while( rc==SQLITE_BUSY && sqlite3InvokeBusyHandler(&db->busyHandler) ){
+    if( rode ){
+      rc = chunkStoreLockAndRefresh(cs);
+      continue;
+    }
+    rode = 1;
+    for( i=0; i<140; i++ ){
+      if( i>=8 ) sqlite3_sleep(1);
+      rc = chunkStoreLockAndRefresh(cs);
+      if( rc!=SQLITE_BUSY ) return rc;
+    }
+  }
+  return rc;
+}
+
 int doltliteRefreshAndConfirmHead(
   sqlite3 *db,
   ChunkStore *cs,
@@ -277,9 +301,7 @@ int doltliteRefreshAndConfirmHead(
   }
   doltliteTestPause("DOLTLITE_PAUSE_BEFORE_HEAD_CONFIRM");
 
-  do {
-    rc = chunkStoreLockAndRefresh(cs);
-  }while( rc==SQLITE_BUSY && sqlite3InvokeBusyHandler(&db->busyHandler) );
+  rc = doltliteLockAndRefreshBusy(db, cs);
   if( rc!=SQLITE_OK ) return rc;
 
   /* Refresh in-memory state. No-op under a reentrant lock, so not a CAS basis. */
@@ -531,9 +553,7 @@ int doltliteMutateRefsExpected(
   }
   if( doltliteIsDetached(db) ) return SQLITE_READONLY;
 
-  do {
-    rc = chunkStoreLockAndRefresh(cs);
-  }while( rc==SQLITE_BUSY && sqlite3InvokeBusyHandler(&db->busyHandler) );
+  rc = doltliteLockAndRefreshBusy(db, cs);
   if( rc!=SQLITE_OK ) return rc;
 
   /* xMutate + serializeRefs rewrite the whole refs blob; reload persisted
@@ -628,9 +648,7 @@ int doltliteSyncSessionToBranchTip(sqlite3 *db){
    || sqlite3_txn_state(db, "main")!=SQLITE_TXN_NONE ){
     return SQLITE_OK;
   }
-  do {
-    rc = chunkStoreLockAndRefresh(cs);
-  }while( rc==SQLITE_BUSY && sqlite3InvokeBusyHandler(&db->busyHandler) );
+  rc = doltliteLockAndRefreshBusy(db, cs);
   if( rc!=SQLITE_OK ) return rc;
   rc = chunkStoreForceRefresh(cs);
   if( rc==SQLITE_OK ){
