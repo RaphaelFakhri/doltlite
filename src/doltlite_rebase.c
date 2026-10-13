@@ -1986,7 +1986,8 @@ static int rebaseRetryDbOp(sqlite3 *db, int (*xOp)(sqlite3*)){
 static int rebaseCleanupAfterClaim(
   sqlite3 *db,
   const char *zOrigBranch,
-  const char *zWorkingBranch
+  const char *zWorkingBranch,
+  int *pOrigMissing
 ){
   int nBusy;
   ChunkStore *cs = doltliteGetChunkStore(db);
@@ -1998,11 +1999,20 @@ static int rebaseCleanupAfterClaim(
   int bOnOrig = zOrigBranch && zSession
       && sqlite3_stricmp(zSession, zOrigBranch)==0;
 
+  if( pOrigMissing ) *pOrigMissing = 0;
   if( zOrigBranch && zOrigBranch[0] && !bOnOrig ){
     rc2 = rebaseRetryBranchOp(db, doltliteCheckoutBranchForRebase,
                               zOrigBranch);
     if( rc2!=SQLITE_OK ){
       rc2 = rebaseRetryBranchOp(db, rebaseRestoreBranchState, zOrigBranch);
+    }
+    if( rc2==SQLITE_NOTFOUND && cs ){
+      char *zDefault = sqlite3_mprintf("%s", chunkStoreGetDefaultBranch(cs));
+      if( !zDefault ) return SQLITE_NOMEM;
+      rc2 = rebaseRetryBranchOp(db, doltliteCheckoutBranchForRebase, zDefault);
+      sqlite3_free(zDefault);
+      if( rc2!=SQLITE_OK ) return rc2;
+      if( pOrigMissing ) *pOrigMissing = 1;
     }
     rebaseKeepFirstError(&rc, rc2);
   }
@@ -2032,7 +2042,7 @@ static int rebaseDiscardWorkingBranch(
   if( rc!=SQLITE_OK && rc!=SQLITE_DONE ) return rc;
   rc = rebaseRetryDbOp(db, rebaseDropPlan);
   if( rc!=SQLITE_OK ) return rc;
-  return rebaseCleanupAfterClaim(db, zOrigBranch, zWorkingBranch);
+  return rebaseCleanupAfterClaim(db, zOrigBranch, zWorkingBranch, 0);
 }
 
 static int rebaseAbortConflictedContinue(
@@ -2896,6 +2906,7 @@ static void doltliteRebaseInteractiveAbort(
   char *zOrigBranch = 0;
   char *zWorking = 0;
   int rc;
+  int origMissing = 0;
 
   if( rebaseSessionIsPaused(db) ){
     doltliteRebasePausedAbort(context, db);
@@ -2956,7 +2967,7 @@ static void doltliteRebaseInteractiveAbort(
     return;
   }
 
-  rc = rebaseCleanupAfterClaim(db, zOrigBranch, zWorking);
+  rc = rebaseCleanupAfterClaim(db, zOrigBranch, zWorking, &origMissing);
   if( cs && zReturnBranch && zReturnBranch[0] ){
     int rc2 = rebaseRetryBranchOp(
         db, rebaseRestoreReturnBranchWorkingState, zReturnBranch);
@@ -2978,10 +2989,18 @@ static void doltliteRebaseInteractiveAbort(
     return;
   }
 
+  if( origMissing ){
+    char *zErr = sqlite3_mprintf(
+        "branch not found: %s; interactive rebase aborted", zOrigBranch);
+    if( zErr ) sqlite3_result_error(context, zErr, -1);
+    else sqlite3_result_error_nomem(context);
+    sqlite3_free(zErr);
+  }else{
+    sqlite3_result_text(context, "Interactive rebase aborted", -1, SQLITE_STATIC);
+  }
   sqlite3_free(zReturnBranch);
   sqlite3_free(zWorking);
   sqlite3_free(zOrigBranch);
-  sqlite3_result_text(context, "Interactive rebase aborted", -1, SQLITE_STATIC);
 }
 
 static int rebaseHasUncommittedChanges(sqlite3 *db, int *pDirty){
@@ -3435,7 +3454,7 @@ abort_err:
   }
   recoveryRc = SQLITE_OK;
   recoveryRc = rebaseCleanupAfterClaim(
-      db, zOrigBranch ? zOrigBranch : "main", zWorking);
+      db, zOrigBranch ? zOrigBranch : "main", zWorking, 0);
   if( cs && zReturnBranch && zReturnBranch[0] ){
     rc2 = rebaseRetryBranchOp(
         db, rebaseRestoreReturnBranchWorkingState, zReturnBranch);
