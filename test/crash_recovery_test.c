@@ -1652,6 +1652,9 @@ static sqlite3_vfs gDuraVfs;
 static sqlite3_vfs *gDuraBase = 0;
 static int gDuraViolations = 0;
 static int gDuraRootsSeen = 0;
+static int gDuraCrashAt = 0;
+static int gDuraSyncCount = 0;
+static int gDuraCrashBefore = 0;
 
 static int duraClose(sqlite3_file *pFile){
   DuraFile *p = (DuraFile*)pFile;
@@ -1708,7 +1711,14 @@ static int duraTruncate(sqlite3_file *pFile, sqlite3_int64 size){
 
 static int duraSync(sqlite3_file *pFile, int flags){
   DuraFile *p = (DuraFile*)pFile;
-  int rc = p->pReal->pMethods->xSync(p->pReal, flags);
+  int rc;
+  if( p->isMain && gDuraCrashAt>0 ){
+    gDuraSyncCount++;
+    if( gDuraCrashBefore && gDuraSyncCount==gDuraCrashAt ) _exit(99);
+  }
+  rc = p->pReal->pMethods->xSync(p->pReal, flags);
+  if( p->isMain && !gDuraCrashBefore && gDuraCrashAt>0
+   && gDuraSyncCount==gDuraCrashAt && rc==SQLITE_OK ) _exit(99);
   if( rc==SQLITE_OK ) p->nUnsynced = 0;
   return rc;
 }
@@ -1874,6 +1884,141 @@ static void test_31_drain_durability_watermark(void){
   removeDbFiles(dbpath);
 }
 
+static void verify_merge_abort_local(sqlite3 *db, const char *label, int autoInc){
+  char desc[256];
+  snprintf(desc, sizeof(desc), "%s: untracked rows and index preserved", label);
+  check(desc, strcmp(queryScalarText(db,
+        "SELECT note FROM scratch INDEXED BY scratch_note WHERE id=1"),
+        "my uncommitted work")==0);
+  snprintf(desc, sizeof(desc), "%s: local view preserved", label);
+  check(desc, strcmp(queryScalarText(db, "SELECT note FROM scratch_view"),
+        "my uncommitted work")==0);
+  if( autoInc ){
+    snprintf(desc, sizeof(desc), "%s: local sequence preserved", label);
+    check(desc, queryScalarInt(db,
+          "SELECT seq FROM sqlite_sequence WHERE name='scratch'", -1)==1);
+  }
+  snprintf(desc, sizeof(desc), "%s: untouched table edit preserved", label);
+  check(desc, queryScalarInt(db, "SELECT v FROM u WHERE id=1", -1)==99);
+}
+
+static void test_32_merge_abort_atomic_sync(void){
+  static const char *zLocal =
+    "CREATE INDEX scratch_note ON scratch(note);"
+    "CREATE VIEW scratch_view AS SELECT note FROM scratch;"
+    "INSERT INTO scratch(note) VALUES('my uncommitted work');"
+    "UPDATE u SET v=99 WHERE id=1;";
+  int kind, before;
+
+  printf("--- Test 32: merge abort preserves local work across sync crashes ---\n");
+  check("test_32: tracking vfs registered", duraRegister()==SQLITE_OK);
+  for(kind=0; kind<3; kind++){
+    for(before=0; before<2; before++){
+      int at;
+      for(at=1; at<=8; at++){
+        const char *dbpath = fresh_db();
+        sqlite3 *db = 0;
+        pid_t pid;
+        int status = 0, crashed, merging;
+        char label[96], desc[256], head[64];
+        snprintf(label, sizeof(label), "abort_%s_%s_sync_%d",
+                 kind==1 ? "conflict" : kind==2 ? "ignored" : "nocommit",
+                 before ? "before" : "after", at);
+        check("test_32: setup open", sqlite3_open(dbpath, &db)==SQLITE_OK);
+        check("test_32: setup base", execSql(db,
+          "CREATE TABLE t(id INT PRIMARY KEY,v INT);"
+          "CREATE TABLE u(id INT PRIMARY KEY,v INT);"
+          "INSERT INTO t VALUES(1,1),(2,2); INSERT INTO u VALUES(1,1);")
+          ==SQLITE_OK);
+        if( kind==2 ){
+          check("test_32: ignore pattern", execSql(db,
+                "INSERT INTO dolt_ignore VALUES('scratch',1)")==SQLITE_OK);
+        }
+        check("test_32: setup branches", execSql(db,
+          "SELECT dolt_commit('-Am','base'); SELECT dolt_branch('feat');"
+          "UPDATE t SET v=10 WHERE id=1; SELECT dolt_commit('-am','main change');"
+          "SELECT dolt_checkout('feat');")==SQLITE_OK);
+        check("test_32: feature edit", execSql(db, kind==1
+          ? "UPDATE t SET v=20 WHERE id=1" : "UPDATE t SET v=20 WHERE id=2")
+          ==SQLITE_OK);
+        check("test_32: setup main", execSql(db,
+          "SELECT dolt_commit('-am','feat change'); SELECT dolt_checkout('main');")
+          ==SQLITE_OK);
+        snprintf(head, sizeof(head), "%s",
+                 queryScalarText(db, "SELECT dolt_hashof('HEAD')"));
+        if( kind!=1 ){
+          check("test_32: persisted merge", execSql(db,
+                "SELECT dolt_merge('--no-commit','feat')")==SQLITE_OK);
+          check("test_32: persisted merge active", queryScalarInt(db,
+                "SELECT is_merging FROM dolt_merge_status", -1)==1);
+        }
+        check("test_32: untracked table", execSql(db, kind==1
+          ? "CREATE TABLE scratch(id INTEGER PRIMARY KEY,note TEXT)"
+          : "CREATE TABLE scratch(id INTEGER PRIMARY KEY AUTOINCREMENT,note TEXT)")
+          ==SQLITE_OK);
+        check("test_32: durable local work", execSql(db, zLocal)==SQLITE_OK);
+        sqlite3_close(db);
+        db = 0;
+
+        pid = fork();
+        if( pid<0 ){ perror("fork"); exit(1); }
+        if( pid==0 ){
+          int rc;
+          if( sqlite3_open_v2(dbpath, &db,
+                SQLITE_OPEN_READWRITE, "dura-track")!=SQLITE_OK ) _exit(10);
+          if( kind==1 ){
+            char zMergeError[256];
+            if( execSql(db, "BEGIN")!=SQLITE_OK ) _exit(11);
+            rc = execSql(db, "SELECT dolt_merge('feat')");
+            snprintf(zMergeError, sizeof(zMergeError), "%s", sqlite3_errmsg(db));
+            if( queryScalarInt(db, "SELECT count(*) FROM dolt_conflicts", 0)==0 ){
+              fprintf(stderr, "%s: merge setup rc=%d: %s\n", label, rc, zMergeError);
+              _exit(12);
+            }
+          }
+          gDuraCrashAt = at;
+          gDuraSyncCount = 0;
+          gDuraCrashBefore = before;
+          rc = execSql(db, "SELECT dolt_merge('--abort')");
+          gDuraCrashAt = 0;
+          if( rc!=SQLITE_OK ) _exit(13);
+          _exit(0);
+        }
+        check("test_32: child waited", waitpid(pid, &status, 0)==pid);
+        crashed = WIFEXITED(status) && WEXITSTATUS(status)==99;
+        snprintf(desc, sizeof(desc), "%s: child crashed or abort succeeded", label);
+        check(desc, crashed || (WIFEXITED(status) && WEXITSTATUS(status)==0));
+        if( at==1 ){
+          snprintf(desc, sizeof(desc), "%s: sync crash exercised", label);
+          check(desc, crashed);
+        }
+        check("test_32: recovery open", sqlite3_open(dbpath, &db)==SQLITE_OK);
+        verify_merge_abort_local(db, label, kind!=1);
+        merging = queryScalarInt(db, "SELECT is_merging FROM dolt_merge_status", -1);
+        snprintf(desc, sizeof(desc), "%s: complete merge or complete abort", label);
+        check(desc, (merging==0 || (kind!=1 && crashed && merging==1))
+          && strcmp(queryScalarText(db, "SELECT group_concat(v) FROM "
+               "(SELECT v FROM t ORDER BY id)"), merging==1 ? "10,20" : "10,2")==0);
+        snprintf(desc, sizeof(desc), "%s: HEAD unchanged", label);
+        check(desc, strcmp(queryScalarText(db, "SELECT dolt_hashof('HEAD')"),head)==0);
+        snprintf(desc, sizeof(desc), "%s: conflicts never persisted", label);
+        check(desc, queryScalarInt(db, "SELECT count(*) FROM dolt_conflicts", -1)==0);
+        if( merging==1 ){
+          check("test_32: recovered merge abortable", execSql(db,
+                "SELECT dolt_merge('--abort')")==SQLITE_OK);
+          verify_merge_abort_local(db, label, kind!=1);
+        }
+        snprintf(desc, sizeof(desc), "%s: integrity ok", label);
+        check(desc, strcmp(queryScalarText(db, "PRAGMA integrity_check"), "ok")==0);
+        sqlite3_close(db);
+        removeDbFiles(dbpath);
+        if( !crashed ) break;
+      }
+      check("test_32: all sync points swept", at<=8);
+    }
+  }
+}
+
 int main(void){
   printf("=== DoltLite Crash Recovery Tests ===\n\n");
 
@@ -1912,6 +2057,7 @@ int main(void){
   test_29_gc_after_many_commits();
   test_30_crash_on_open();
   test_31_drain_durability_watermark();
+  test_32_merge_abort_atomic_sync();
 
   printf("\n=== Results: %d passed, %d failed out of %d tests ===\n",
          nPass, nFail, nPass+nFail);
