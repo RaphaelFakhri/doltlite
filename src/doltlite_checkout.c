@@ -922,7 +922,7 @@ static int checkoutAdoptVtabShadows(
   return SQLITE_OK;
 }
 
-int doltliteCheckoutTables(
+static int checkoutTablesInTxn(
   sqlite3 *db,
   sqlite3_context *context,
   const char *zSourceRef,
@@ -1251,6 +1251,37 @@ int doltliteCheckoutTables(
   checkoutSchemaInfoClear(aSchema, nNames);
   doltliteFreeCatalog(aWorking, nWorking);
   doltliteFreeCatalog(aSource, nSource);
+  return rc;
+}
+
+int doltliteCheckoutTables(
+  sqlite3 *db,
+  sqlite3_context *context,
+  const char *zSourceRef,
+  sqlite3_value **argv,
+  int iFirstName,
+  int nNames,
+  const char **pzMissing,
+  int bSourceHead,
+  int bDropIfAbsent
+){
+  int bBegan = 0;
+  int rc;
+  /* In autocommit each nested DROP/CREATE commits and publishes on its own,
+  ** so a later failure would leave the table emptied on disk. */
+  if( db->autoCommit ){
+    rc = sqlite3_exec(db, "BEGIN", 0, 0, 0);
+    if( rc!=SQLITE_OK ) return rc;
+    bBegan = !db->autoCommit;
+  }
+  rc = checkoutTablesInTxn(db, context, zSourceRef, argv, iFirstName, nNames,
+                           pzMissing, bSourceHead, bDropIfAbsent);
+  if( bBegan ){
+    if( rc==SQLITE_OK ) rc = sqlite3_exec(db, "COMMIT", 0, 0, 0);
+    if( rc!=SQLITE_OK && !db->autoCommit ){
+      (void)sqlite3_exec(db, "ROLLBACK", 0, 0, 0);
+    }
+  }
   return rc;
 }
 

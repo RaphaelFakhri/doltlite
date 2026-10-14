@@ -450,7 +450,7 @@ static int fireProcPeer(void *arg){
   return 0;
 }
 
-static int runProcPeer(const char *zSql, int k, int *pLost){
+static int runProcPeer(const char *zPre, const char *zSql, int k, int *pLost){
   char zPath[300];
   sqlite3 *db = 0;
   ProcPeer pp;
@@ -482,6 +482,7 @@ static int runProcPeer(const char *zSql, int k, int *pLost){
   if( pid<0 ){ perror("fork"); exit(1); }
   sqlite3_busy_timeout(db, 5000);
   execSql(db, "INSERT INTO t VALUES(3,'dirty')");
+  if( zPre ) execSql(db, zPre);
   sqlite3_progress_handler(db, 1, fireProcPeer, &pp);
   execSql(db, zSql);
   sqlite3_progress_handler(db, 0, 0, 0);
@@ -496,6 +497,9 @@ static int runProcPeer(const char *zSql, int k, int *pLost){
     if( strcmp(queryText(db, "SELECT count(*) FROM u"), "1")!=0 ){
       fprintf(stderr, "  %s step %d: peer row lost\n", zSql, k);
       (*pLost)++;
+    }else if( strcmp(queryText(db, "SELECT count(*)>0 FROM t"), "1")!=0 ){
+      fprintf(stderr, "  %s step %d: table t emptied\n", zSql, k);
+      (*pLost)++;
     }
     sqlite3_close(db);
   }
@@ -503,10 +507,14 @@ static int runProcPeer(const char *zSql, int k, int *pLost){
   return pp.fired!=0;
 }
 
-static void test_process_peer_write_kept(const char *zName, const char *zSql){
+static void test_process_peer_write_kept(
+  const char *zName,
+  const char *zPre,
+  const char *zSql
+){
   char zCheck[96];
   int k, nLost = 0;
-  for(k=1; k<5000 && runProcPeer(zSql, k, &nLost); k++){}
+  for(k=1; k<5000 && runProcPeer(zPre, zSql, k, &nLost); k++){}
   printf("  process peer %-12s steps=%d lost=%d\n", zName, k-1, nLost);
   snprintf(zCheck, sizeof(zCheck), "process_peer_write_kept_%s", zName);
   check(zCheck, k>1 && nLost==0);
@@ -679,8 +687,13 @@ int main(void){
     test_process_add_flush_lock("-A", i);
   }
 
-  test_process_peer_write_kept("reset_table", "SELECT dolt_reset('t')");
-  test_process_peer_write_kept("clean", "SELECT dolt_clean()");
+  test_process_peer_write_kept("reset_table", 0, "SELECT dolt_reset('t')");
+  test_process_peer_write_kept("clean", 0, "SELECT dolt_clean()");
+  /* A schema change makes the checkout drop and recreate the table. */
+  test_process_peer_write_kept("checkout_schema",
+      "SELECT dolt_commit('-am','base');"
+      "INSERT INTO t VALUES(4,'dirty');"
+      "ALTER TABLE t ADD COLUMN c TEXT", "SELECT dolt_checkout('t')");
 
   remove(zDb); remove(zInto); remove(zRemote); remove(zTemplate);
   remove(zTemplateRemote);
