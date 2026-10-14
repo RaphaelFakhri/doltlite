@@ -1692,7 +1692,7 @@ static void doltPullParsed(
     sqlite3_free(zErr);
     if( dirty ){
       remoteSqlRestoreAndReport(ctx, db, cs, &savedState, SQLITE_ERROR,
-                                "cannot pull with uncommitted changes");
+                                "cannot merge with uncommitted changes");
       return;
     }
     doltliteNoteSessionMissedDiskTip(db);
@@ -1744,7 +1744,7 @@ static void doltPullParsed(
       }
       if( dirty ){
         remoteSqlRestoreAndReport(ctx, db, cs, &savedState, SQLITE_ERROR,
-                                  "cannot pull with uncommitted changes");
+                                  "cannot merge with uncommitted changes");
         return;
       }
       /* Merge owns txn save/restore; drop pull's snapshot first. */
@@ -1792,7 +1792,7 @@ static void doltPullParsed(
   }
   if( dirty ){
     remoteSqlRestoreAndReport(ctx, db, cs, &savedState, SQLITE_ERROR,
-                              "cannot pull with uncommitted changes");
+                              "cannot merge with uncommitted changes");
     return;
   }
 

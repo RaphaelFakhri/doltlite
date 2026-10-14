@@ -1587,7 +1587,7 @@ ENDSQL
 "$DB" "$DP/b.db" "INSERT INTO u VALUES(9);" >/dev/null
 result=$("$DB" "$DP/b.db" "SELECT dolt_pull('origin','main');" 2>&1)
 check_match "divergent pull with uncommitted changes is refused" \
-  "cannot pull with uncommitted changes" "$result"
+  "cannot merge with uncommitted changes" "$result"
 result=$("$DB" "$DP/b.db" "SELECT message FROM dolt_log LIMIT 1; SELECT id FROM u; SELECT table_name || '|' || status FROM dolt_status;")
 check "refused divergent pull keeps the local commit and the dirty row" "b5
 9
@@ -1610,7 +1610,7 @@ Merge branch 'main' of $url into main
 "$DB" "$DP/a.db" "INSERT INTO t VALUES(10); SELECT dolt_commit('-am','a10'); SELECT dolt_push('origin','main');" >/dev/null
 result=$("$DB" "$DP/staged.db" "SELECT dolt_pull('origin','main');" 2>&1)
 check_match "divergent pull with staged changes is refused" \
-  "cannot pull with uncommitted changes" "$result"
+  "cannot merge with uncommitted changes" "$result"
 result=$("$DB" "$DP/staged.db" "SELECT message FROM dolt_log LIMIT 1; SELECT id FROM u; SELECT staged FROM dolt_status WHERE table_name='u';")
 check "refused staged pull keeps the staged row" "st4
 3
@@ -1621,7 +1621,7 @@ check "refused staged pull keeps the staged row" "st4
 "$DB" "$DP/a.db" "INSERT INTO t VALUES(11); SELECT dolt_commit('-am','a11'); SELECT dolt_push('origin','main');" >/dev/null
 result=$("$DB" "$DP/noff.db" "SELECT dolt_pull('--no-ff','origin','main');" 2>&1)
 check_match "dirty --no-ff pull is refused" \
-  "cannot pull with uncommitted changes" "$result"
+  "cannot merge with uncommitted changes" "$result"
 result=$("$DB" "$DP/noff.db" "SELECT message FROM dolt_log LIMIT 1; SELECT id FROM u;")
 check "dirty --no-ff pull leaves the local commit" "n6
 8" "$result"
@@ -1631,7 +1631,7 @@ check "dirty --no-ff pull leaves the local commit" "n6
 "$DB" "$DP/a.db" "INSERT INTO t VALUES(12); SELECT dolt_commit('-am','a12'); SELECT dolt_push('origin','main');" >/dev/null
 result=$("$DB" "$DP/sq.db" "SELECT dolt_pull('--squash','origin','main');" 2>&1)
 check_match "dirty --squash pull is refused" \
-  "cannot pull with uncommitted changes" "$result"
+  "cannot merge with uncommitted changes" "$result"
 result=$("$DB" "$DP/sq.db" "SELECT message FROM dolt_log LIMIT 1; SELECT id FROM u;")
 check "dirty --squash pull creates no commit" "s7
 4" "$result"
@@ -1916,7 +1916,7 @@ check "fast-forward pull keeps the ignored table" "a2
 "$DB" "$IG/b.db" "INSERT INTO t VALUES(9); INSERT INTO tmp_x VALUES(2);" >/dev/null
 result=$("$DB" "$IG/b.db" "SELECT dolt_pull('origin','main');" 2>&1)
 check_match "tracked edit still refuses a pull beside an ignored table" \
-  "cannot pull with uncommitted changes" "$result"
+  "cannot merge with uncommitted changes" "$result"
 result=$("$DB" "$IG/b.db" "SELECT message FROM dolt_log LIMIT 1; SELECT id FROM t ORDER BY id; SELECT id FROM tmp_x ORDER BY id;")
 check "refused pull keeps the tracked edit and the ignored table" "a2
 1
@@ -1968,7 +1968,7 @@ ENDSQL
 "$DB" "$TR/b.db" "INSERT INTO tmp_t VALUES(7);" >/dev/null
 result=$("$DB" "$TR/b.db" "SELECT dolt_pull('origin','main');" 2>&1)
 check_match "editing a tracked table that matches dolt_ignore still refuses" \
-  "cannot pull with uncommitted changes" "$result"
+  "cannot merge with uncommitted changes" "$result"
 result=$("$DB" "$TR/b.db" "SELECT message FROM dolt_log LIMIT 1; SELECT id FROM tmp_t ORDER BY id;")
 check "refused pull keeps the edit to the tracked ignored-name table" "c1
 1
@@ -1979,7 +1979,7 @@ check "refused pull keeps the edit to the tracked ignored-name table" "c1
 "$DB" "$TR/c.db" "INSERT INTO dolt_ignore VALUES('other_%',1);" >/dev/null
 result=$("$DB" "$TR/c.db" "SELECT dolt_pull('origin','main');" 2>&1)
 check_match "an uncommitted dolt_ignore edit refuses a pull" \
-  "cannot pull with uncommitted changes" "$result"
+  "cannot merge with uncommitted changes" "$result"
 result=$("$DB" "$TR/c.db" "SELECT message FROM dolt_log LIMIT 1; SELECT pattern FROM dolt_ignore ORDER BY pattern;")
 check "refused pull keeps the dolt_ignore edit" "a2
 other_%
@@ -2001,7 +2001,7 @@ ENDSQL
 "$DB" "$KP/b.db" "CREATE TABLE tmp_keep(id INT PRIMARY KEY); INSERT INTO tmp_keep VALUES(1);" >/dev/null
 result=$("$DB" "$KP/b.db" "SELECT dolt_pull('origin','main');" 2>&1)
 check_match "a table exempted from dolt_ignore refuses a pull" \
-  "cannot pull with uncommitted changes" "$result"
+  "cannot merge with uncommitted changes" "$result"
 result=$("$DB" "$KP/b.db" "SELECT message FROM dolt_log LIMIT 1; SELECT id FROM tmp_keep;")
 check "refused pull keeps the exempted table" "keep
 1" "$result"
@@ -2095,7 +2095,7 @@ ENDSQL
 "$DB" "$PF/e.db" "INSERT INTO t VALUES(9);" >/dev/null
 result=$("$DB" "$PF/e.db" "SELECT dolt_pull();" 2>&1)
 check_match "dirty bare pull still refuses" \
-  "cannot pull with uncommitted changes" "$result"
+  "cannot merge with uncommitted changes" "$result"
 result=$("$DB" "$PF/e.db" \
   "SELECT name || '|' || latest_commit_message FROM dolt_remote_branches ORDER BY name; SELECT tag_name FROM dolt_tags; SELECT message FROM dolt_log LIMIT 1; SELECT id FROM t ORDER BY id;")
 check "dirty bare pull still fetched the other refs" "remotes/origin/f|f3
@@ -2479,7 +2479,7 @@ check "an ahead pull --prune still drops the deleted tracking ref" "remotes/orig
 "$DB" "$PP/d.db" "INSERT INTO t VALUES(8);" >/dev/null
 result=$("$DB" "$PP/d.db" "SELECT dolt_pull('--prune');" 2>&1)
 check_match "a dirty up-to-date pull --prune is refused" \
-  "cannot pull with uncommitted changes" "$result"
+  "cannot merge with uncommitted changes" "$result"
 result=$("$DB" "$PP/d.db" "SELECT name FROM dolt_remote_branches ORDER BY name; SELECT id FROM t WHERE id=8;")
 check "a refused pull --prune still drops the deleted tracking ref" "remotes/origin/main
 8" "$result"

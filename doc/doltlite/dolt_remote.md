@@ -88,7 +88,7 @@ when it cannot fast-forward, conflicts included.
 | `fetch failed: invalid ref spec: '<branch>'` | `dolt_fetch` refspec names a branch the remote does not have. Nothing is fetched |
 | `not a fast-forward of the remote branch (use force to overwrite)` | remote moved; add `--force` |
 | `fetch failed: branch not found on remote` | `dolt_pull` of a missing branch |
-| `cannot pull with uncommitted changes` | working or staged changes, other than an untracked table matched by `dolt_ignore`, on a fast-forward, a merge, or a pull that is already up to date. A local branch that is already ahead of the remote keeps those changes and the pull returns 0 |
+| `cannot merge with uncommitted changes` | working or staged changes, other than an untracked table matched by `dolt_ignore`, on a fast-forward, a merge, or a pull that is already up to date. A local branch that is already ahead of the remote keeps those changes and the pull returns 0 |
 | `database is not empty — clone into a fresh database` | `dolt_clone` into a database with tables or commits |
 | `clone failed` | source unreachable or not a DoltLite database |
 | `DoltLite remotes are disabled in this build` | built with `DOLTLITE_ENABLE_REMOTES=0` |
