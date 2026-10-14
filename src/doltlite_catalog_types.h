@@ -26,6 +26,8 @@ struct TableEntry {
   u8 nocaseNulMaskValid;
   u32 nocaseNulMask;
   ProllyHash nocaseNulRoot;
+  u8 numericDescState;
+  ProllyHash numericDescRoot;
   char *zName;
   struct ProllyMutMap *pPending;
 };

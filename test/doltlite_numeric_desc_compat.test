@@ -1,0 +1,163 @@
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+
+db close
+forcedelete test.db
+file copy [file join $testdir format-corpus v12 numeric-desc-v0.50.14.db] test.db
+sqlite3 db test.db
+
+do_execsql_test numeric-desc-compat-legacy-read {
+  SELECT a,b,c FROM keyed WHERE a=1;
+  SELECT id,a,b FROM indexed INDEXED BY numeric_desc WHERE a=1;
+} {1 a base 1 1 a}
+do_execsql_test numeric-desc-compat-legacy-range {
+  SELECT a FROM keyed WHERE a BETWEEN 1 AND 2 ORDER BY a;
+  SELECT id FROM indexed INDEXED BY numeric_desc
+    WHERE a BETWEEN 1 AND 2 ORDER BY a;
+} {1 2 1 2}
+do_execsql_test numeric-desc-compat-legacy-mutate {
+  UPDATE keyed SET c='new' WHERE a=1;
+  SELECT changes();
+  DELETE FROM keyed WHERE a=2;
+  SELECT changes();
+  UPDATE indexed SET b='new' WHERE id=1;
+  DELETE FROM indexed WHERE id=2;
+} {1 1}
+do_catchsql_test numeric-desc-compat-legacy-duplicate {
+  INSERT INTO keyed VALUES(1,'a','duplicate');
+} {1 {UNIQUE constraint failed: keyed.a, keyed.b}}
+db close
+sqlite3 db test.db
+do_execsql_test numeric-desc-compat-legacy-reopen {
+  SELECT a,b,c FROM keyed ORDER BY a;
+  SELECT id,a,b FROM indexed INDEXED BY numeric_desc ORDER BY a;
+  PRAGMA integrity_check;
+} {1 a new 4 d main 1 1 new 4 4 d ok}
+do_execsql_test numeric-desc-compat-legacy-history {
+  SELECT a,b,c FROM dolt_at_keyed('numeric-base') ORDER BY a;
+  SELECT a,b,c FROM dolt_at_keyed('feature') ORDER BY a;
+} {1 a base 2 b base 1 a base 2 b base 3 c feature}
+do_execsql_test numeric-desc-compat-legacy-workspace {
+  SELECT dolt_checkout('workspace');
+  SELECT a,c FROM keyed WHERE a>=5 ORDER BY a;
+  SELECT a,c FROM dolt_at_keyed('STAGED') WHERE a>=5 ORDER BY a;
+} {0 5 staged 6 working 5 staged}
+do_execsql_test numeric-desc-compat-legacy-extremes {
+  SELECT a FROM extremes ORDER BY a;
+  SELECT a FROM extremes WHERE a BETWEEN 9007199254740992 AND 9007199254740993
+    ORDER BY a;
+  SELECT a FROM extremes WHERE a=-9223372036854775808;
+} {-9223372036854775808 -9223372036854775807 -9007199254740993 -9007199254740992 9007199254740992 9007199254740993 9223372036854775806 9223372036854775807 9007199254740992 9007199254740993 -9223372036854775808}
+do_execsql_test numeric-desc-compat-legacy-commit {
+  SELECT dolt_checkout('main');
+  SELECT length(dolt_commit('-Am','compatible update'));
+  PRAGMA integrity_check;
+} {0 40 ok}
+do_test numeric-desc-compat-legacy-gc {
+  db eval {SELECT dolt_gc()}
+  db close
+  sqlite3 db test.db
+  db eval {
+    SELECT a,b,c FROM dolt_at_keyed('numeric-base') ORDER BY a;
+    SELECT a,c FROM keyed ORDER BY a;
+    PRAGMA integrity_check;
+  }
+} {1 a base 2 b base 1 new 4 main ok}
+
+reset_db
+do_execsql_test numeric-desc-compat-prepared-small {
+  CREATE TABLE t(id INTEGER PRIMARY KEY DESC,a INTEGER UNIQUE,b TEXT);
+  INSERT INTO t VALUES(1,10,'small');
+  SELECT a FROM t WHERE a=10;
+} {10}
+do_execsql_test numeric-desc-compat-prepared-wide {
+  INSERT INTO t VALUES(2,9007199254740994,'exact'),(3,9007199254740995,'inexact');
+  SELECT a FROM t WHERE a=10;
+  SELECT a FROM t ORDER BY a;
+} {10 10 9007199254740994 9007199254740995}
+do_catchsql_test numeric-desc-compat-wide-unique {
+  INSERT INTO t VALUES(4,9007199254740994,'duplicate');
+} {1 {UNIQUE constraint failed: t.a}}
+do_execsql_test numeric-desc-compat-wide-update {
+  UPDATE t SET b='updated' WHERE a=9007199254740994;
+  SELECT changes();
+  DELETE FROM t WHERE a=9007199254740995;
+  SELECT changes();
+  SELECT a,b FROM t ORDER BY a;
+  PRAGMA integrity_check;
+} {1 1 10 small 9007199254740994 updated ok}
+
+do_execsql_test numeric-desc-compat-wide-foreign-key {
+  PRAGMA foreign_keys=ON;
+  CREATE TABLE child(id INTEGER PRIMARY KEY,a INTEGER REFERENCES t(a));
+  INSERT INTO child VALUES(1,9007199254740994);
+  SELECT a FROM child;
+} {9007199254740994}
+do_catchsql_test numeric-desc-compat-wide-foreign-key-missing {
+  INSERT INTO child VALUES(2,9007199254740995);
+} {1 {FOREIGN KEY constraint failed}}
+
+reset_db
+do_execsql_test numeric-desc-compat-trigger {
+  CREATE TABLE t(k INTEGER PRIMARY KEY DESC,a INTEGER);
+  CREATE INDEX ta ON t(a);
+  CREATE TABLE log(n INTEGER);
+  INSERT INTO t VALUES(1,1);
+  SELECT a FROM t WHERE a=1;
+  CREATE TRIGGER tr AFTER INSERT ON t BEGIN
+    INSERT INTO log SELECT count(*) FROM t
+      WHERE a BETWEEN 9007199254740994 AND 9007199254740995;
+  END;
+  INSERT INTO t VALUES(2,9007199254740994),(3,9007199254740995);
+  SELECT n FROM log ORDER BY rowid;
+} {1 1 2}
+do_execsql_test numeric-desc-compat-returning {
+  INSERT INTO t VALUES(4,9007199254740994)
+    RETURNING (SELECT count(*) FROM t WHERE a=9007199254740994);
+  PRAGMA integrity_check;
+} {2 ok}
+
+reset_db
+set values {-9223372036854775808 -9223372036854775807 -9007199254740995
+  -9007199254740994 -9007199254740993 -9007199254740992 -1 0 1
+  9007199254740992 9007199254740993 9007199254740994 9007199254740995
+  18014398509481984 18014398509481985 9223372036854775806 9223372036854775807}
+db eval {
+  CREATE TABLE w(a INTEGER,b TEXT,PRIMARY KEY(a,b DESC)) WITHOUT ROWID;
+  CREATE TABLE s(id INTEGER PRIMARY KEY DESC,a INTEGER,b TEXT);
+  CREATE INDEX si ON s(a,b DESC);
+  BEGIN;
+}
+set id 0
+foreach a $values {
+  foreach b {a b} {
+    incr id
+    db eval {INSERT INTO w VALUES($a,$b); INSERT INTO s VALUES($id,$a,$b)}
+  }
+}
+foreach phase {pending reopened} {
+  if {$phase eq "reopened"} {
+    db eval {COMMIT}
+    db close
+    sqlite3 db test.db
+  }
+  foreach {table source} {primary w secondary {s INDEXED BY si}} {
+    foreach bound $values {
+      foreach {sqlop tclop} {= == < < <= <= > > >= >=} {
+        set expected {}
+        foreach value $values {
+          if {[expr "$value $tclop $bound"]} {
+            lappend expected $value a $value b
+          }
+        }
+        do_execsql_test numeric-desc-compat-$phase-$table-$sqlop-$bound \
+          "SELECT a,b FROM $source WHERE a $sqlop $bound ORDER BY a,b" $expected
+      }
+    }
+  }
+  do_execsql_test numeric-desc-compat-$phase-integrity {
+    PRAGMA integrity_check;
+  } {ok}
+}
+
+finish_test

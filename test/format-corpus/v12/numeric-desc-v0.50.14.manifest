@@ -1,0 +1,7 @@
+chunk_store_version=12
+writer_release=v0.50.14
+writer_commit=73628b4358b73470796658acf55487c183ee962e
+sha256=4a658dea10b0540b119af5411167de869a83feb95ea475ee39b8f45f13e7e016
+sql=numeric-desc.sql
+file=numeric-desc-v0.50.14.db
+recipe=generate-numeric-desc.sh

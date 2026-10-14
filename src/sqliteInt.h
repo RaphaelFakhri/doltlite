@@ -2891,9 +2891,9 @@ struct Index {
                            ** expression, or a reference to a VIRTUAL column */
 #ifdef DOLTLITE_PROLLY
   unsigned bNocaseNul:1;
-  /* bUnordered was set because of bNocaseNul rather than by ANALYZE, so
-  ** clearing it again is ours to do. */
-  unsigned bNocaseNulUnordered:1;
+  unsigned bNumericDesc:1;
+  /* Only undo bUnordered when the storage guard, not ANALYZE, set it. */
+  unsigned bProllyUnordered:1;
 #endif
 #ifdef SQLITE_ENABLE_STAT4
   int nSample;             /* Number of elements in aSample[] */

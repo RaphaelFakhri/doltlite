@@ -92,6 +92,14 @@ EOF
   if [ -n "$cur_first" ] && [ "$cur_first" != "$cur_last" ]; then
     out="$out $cur_first"
   fi
+  for t in v0.50.0 v0.50.14; do
+    if git -C "$REPO_ROOT" rev-parse --verify "$t" >/dev/null 2>&1; then
+      case " $out " in
+        *" $t "*) ;;
+        *) out="$out $t" ;;
+      esac
+    fi
+  done
   printf '%s' "$out"
 }
 
@@ -283,6 +291,12 @@ for tag in $TAGS; do
   if [ "$old_sig" = "$cur_sig" ]; then
     smoke_current "$db" "$tag"
     old_reads_current "$bin" "$db" "$tag"
+    if ! git -C "$REPO_ROOT" show "$tag:src/sortkey.c" | grep 'finishAscNumeric' >/dev/null; then
+      python3 "$SCRIPT_DIR/numeric_desc_compat.py" "$DOLTLITE" "$bin"
+      check "$tag: numeric/DESC compatibility in both directions" "$?"
+    else
+      echo "$tag: ASC numeric/DESC keys are incompatible with the restored v12 encoding"
+    fi
   else
     assert_refused "$db" "$tag"
   fi

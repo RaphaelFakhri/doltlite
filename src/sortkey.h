@@ -115,5 +115,6 @@ void sortKeyFieldCopy(const SortKeyField *pField, u8 *pOut);
 int sortKeyFieldOffset(
   const u8 *pSortKey, int nSortKey, const KeyInfo *pKeyInfo, int iField
 );
+int sortKeyHasWideNumericDesc(const u8*, int, int*);
 
 #endif

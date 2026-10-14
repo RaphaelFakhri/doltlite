@@ -157,6 +157,52 @@ int doltliteBtreeNocaseNulInsert(BtCursor *pCur, const u8 *pRec, int nRec){
   return rc;
 }
 
+int sqlite3BtreeProllyIndexHasWideNumericDesc(
+  Btree *pBtree,
+  Pgno iTable,
+  int *pHas
+){
+  struct TableEntry *pTE = findTable(pBtree, iTable);
+  ProllyMutMap *pMap;
+  ProllyCursor cur;
+  int i;
+  int rc;
+  int res;
+  *pHas = 0;
+  if( !pTE ) return SQLITE_CORRUPT;
+  pMap = (ProllyMutMap*)pTE->pPending;
+  if( pMap ){
+    for(i=0; i<pMap->nEntries; i++){
+      ProllyMutMapEntry *pEntry = &pMap->aEntries[i];
+      if( pEntry->op!=PROLLY_EDIT_INSERT ) continue;
+      rc = sortKeyHasWideNumericDesc(pEntry->pKey, pEntry->nKey, pHas);
+      if( rc!=SQLITE_OK || *pHas ) return rc;
+    }
+  }
+  if( pTE->numericDescState
+   && prollyHashCompare(&pTE->numericDescRoot, &pTE->root)==0 ){
+    *pHas = pTE->numericDescState==2;
+    return SQLITE_OK;
+  }
+  prollyCursorInit(
+      &cur, &pBtree->pBt->store, &pBtree->pBt->cache, &pTE->root, pTE->flags);
+  rc = prollyCursorFirst(&cur, &res);
+  while( rc==SQLITE_OK && res==0 && prollyCursorIsValid(&cur) ){
+    const u8 *pKey;
+    int nKey;
+    prollyCursorKey(&cur, &pKey, &nKey);
+    rc = sortKeyHasWideNumericDesc(pKey, nKey, pHas);
+    if( rc!=SQLITE_OK || *pHas ) break;
+    rc = prollyCursorNext(&cur);
+  }
+  prollyCursorClose(&cur);
+  if( rc==SQLITE_OK ){
+    pTE->numericDescRoot = pTE->root;
+    pTE->numericDescState = *pHas ? 2 : 1;
+  }
+  return rc;
+}
+
 int sqlite3BtreeProllyIndexHasNocaseNul(
   Btree *pBtree,
   Pgno iTable,

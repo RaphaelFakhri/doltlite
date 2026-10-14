@@ -358,6 +358,7 @@ int sqlite3BtreePrevious(BtCursor*, int flags);
 i64 sqlite3BtreeIntegerKey(BtCursor*);
 #ifdef DOLTLITE_PROLLY
 i64 sqlite3BtreeSqlRowid(BtCursor*);
+int sqlite3BtreeProllyIndexHasWideNumericDesc(Btree*, Pgno, int*);
 int sqlite3BtreeProllyIndexHasNocaseNul(
   Btree*, Pgno, int, const char *const*, int*
 );

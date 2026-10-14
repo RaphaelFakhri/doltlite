@@ -66,18 +66,6 @@ static void invertSortKeyBytes(u8 *p, int n){
   for(i=0; i<n; i++) p[i] = (u8)~p[i];
 }
 
-/* A 9-byte ASC numeric has no tail, so memcmp orders it by the next byte.
-** The 18-byte form of an inexact integer puts 0x80 there. A DESC field
-** starts with an inverted tag above 0x80, and the short integer then sorts
-** after that larger neighbour. 0x00 sorts first; the reader already treats
-** it as the end of a short numeric. */
-static int finishAscNumeric(u8 *pOut, int nNum, const KeyInfo *pKeyInfo,
-                            int iField){
-  if( nNum!=9 || !descFromKeyInfo(pKeyInfo, iField+1) ) return nNum;
-  if( pOut ) pOut[nNum] = SORTKEY_NUM_DESC_END;
-  return 10;
-}
-
 static u32 collTextLen(int coll, const u8 *pData, u32 nData){
   if( coll==SORTKEY_COLL_RTRIM ){
     while( nData > 0 && pData[nData - 1] == 0x20 ) nData--;
@@ -326,11 +314,8 @@ static int sortKeyEncode(const u8 *pRec, int nRec, u8 *pOut, int nMaxFields,
           pOut[outPos++] = SORTKEY_NULL;
           break;
         case SORTKEY_NUM:
-          outPos += finishAscNumeric(
-              pOut + outPos,
-              encodeNumeric(pOut + outPos, serialType, pField, fieldLen,
-                            descFromKeyInfo(pKeyInfo, nField)),
-              pKeyInfo, nField);
+          outPos += encodeNumeric(pOut + outPos, serialType, pField, fieldLen,
+                                  descFromKeyInfo(pKeyInfo, nField));
           break;
         case SORTKEY_TEXT:
           outPos += encodeText(pOut + outPos, pField, fieldLen, coll);
@@ -348,9 +333,6 @@ static int sortKeyEncode(const u8 *pRec, int nRec, u8 *pOut, int nMaxFields,
     }else{
       sqlite3_int64 nFieldSize = encodedFieldSize(
           serialType, pField, fieldLen, coll, descFromKeyInfo(pKeyInfo, nField));
-      if( serialTypeTag(serialType)==SORTKEY_NUM ){
-        nFieldSize = finishAscNumeric(0, (int)nFieldSize, pKeyInfo, nField);
-      }
       if( nFieldSize > INT_MAX || outSize > INT_MAX - nFieldSize ){
         return -2;
       }
@@ -566,11 +548,8 @@ static int sortKeyEncodeMemArray(
           pOut[outPos++] = SORTKEY_NULL;
           break;
         case SORTKEY_NUM:
-          outPos += finishAscNumeric(
-              pOut + outPos,
-              encodeNumeric(pOut + outPos, serialType, pField, fieldLen,
-                            descFromKeyInfo(pKeyInfo, i)),
-              pKeyInfo, i);
+          outPos += encodeNumeric(pOut + outPos, serialType, pField, fieldLen,
+                                  descFromKeyInfo(pKeyInfo, i));
           break;
         case SORTKEY_TEXT:
           outPos += encodeText(pOut + outPos, pField, fieldLen, coll);
@@ -588,9 +567,6 @@ static int sortKeyEncodeMemArray(
     }else{
       sqlite3_int64 nFieldSize = encodedFieldSize(
           serialType, pField, fieldLen, coll, descFromKeyInfo(pKeyInfo, i));
-      if( serialTypeTag(serialType)==SORTKEY_NUM ){
-        nFieldSize = finishAscNumeric(0, (int)nFieldSize, pKeyInfo, i);
-      }
       if( nFieldSize > INT_MAX || outSize > INT_MAX - nFieldSize ){
         return -2;
       }
@@ -919,6 +895,30 @@ static int sortKeyFieldParse(
     return pos;
   }
   return -1;
+}
+
+/* V12 short ASC numerics sort after their extended neighbours when the
+** next tag is DESC. Keep the bytes and decline SQL ordering shortcuts. */
+int sortKeyHasWideNumericDesc(const u8 *pKey, int nKey, int *pHas){
+  int pos = 0;
+  *pHas = 0;
+  while( pos<nKey ){
+    SortKeyField field;
+    int desc = pKey[pos]>0x80;
+    int end = sortKeyFieldParse(pKey, nKey, pos, desc, 1, &field, 0);
+    if( end<0 ) return SQLITE_CORRUPT;
+    if( !desc && field.eType==SORTKEY_NUM && end<nKey
+     && pKey[end]>0x80
+     && (field.isReal
+          ? field.rVal>=9007199254740992.0 || field.rVal<=-9007199254740992.0
+          : field.iVal>=9007199254740992LL || field.iVal<=-9007199254740992LL)
+    ){
+      *pHas = 1;
+      return SQLITE_OK;
+    }
+    pos = end;
+  }
+  return SQLITE_OK;
 }
 
 /* A record serial type of the field's class: enough for OP_IsType, which
