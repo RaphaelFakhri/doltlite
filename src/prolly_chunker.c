@@ -119,6 +119,60 @@ static int finishFlushLevel(ProllyChunker *ch, int level,
   return SQLITE_OK;
 }
 
+/* Read a node's level, item count and first child hash. */
+static int chunkerPeekNode(ProllyChunker *ch, const ProllyHash *pHash,
+                           int *pLevel, int *pnItems, ProllyHash *pChild){
+  ProllyCacheEntry *pEntry = ch->pCache ? prollyCacheGet(ch->pCache, pHash) : 0;
+  ProllyNode node;
+  u8 *pData = 0;
+  int nData = 0;
+  int rc = SQLITE_OK;
+  if( pEntry ){
+    *pLevel = pEntry->node.level;
+    *pnItems = pEntry->node.nItems;
+    if( *pLevel>0 && *pnItems>0 ) prollyNodeChildHash(&pEntry->node, 0, pChild);
+    prollyCacheRelease(ch->pCache, pEntry);
+    return SQLITE_OK;
+  }
+  rc = chunkStoreGet(ch->pStore, pHash, &pData, &nData);
+  if( rc!=SQLITE_OK ) return rc;
+  rc = prollyNodeParse(&node, pData, nData);
+  if( rc==SQLITE_OK ){
+    *pLevel = node.level;
+    *pnItems = node.nItems;
+    if( *pLevel>0 && *pnItems>0 ) prollyNodeChildHash(&node, 0, pChild);
+  }
+  sqlite3_free(pData);
+  return rc;
+}
+
+/* Dolt getCanonicalRoot(): a single-entry internal level is replaced by the
+** first descendant that is a leaf or has more than one child. */
+static int canonicalRootFromSingleChild(ProllyChunker *ch,
+                                        ProllyNodeBuilder *b,
+                                        ProllyHash *pRoot){
+  ProllyHash cur;
+  int depth;
+  assert( b->level>0 && b->nItems==1 );
+  if( (int)(b->aValOff[1] - b->aValOff[0])!=PROLLY_HASH_SIZE ){
+    return SQLITE_CORRUPT;
+  }
+  memcpy(cur.data, b->pValBuf + b->aValOff[0], PROLLY_HASH_SIZE);
+  for(depth = 0; depth < PROLLY_CURSOR_MAX_DEPTH; depth++){
+    int level = 0, nItems = 0, rc;
+    ProllyHash child;
+    rc = chunkerPeekNode(ch, &cur, &level, &nItems, &child);
+    if( rc!=SQLITE_OK ) return rc;
+    if( level==0 || nItems>1 ){
+      memcpy(pRoot, &cur, sizeof(ProllyHash));
+      return SQLITE_OK;
+    }
+    if( nItems==0 ) return SQLITE_CORRUPT;
+    memcpy(&cur, &child, sizeof(ProllyHash));
+  }
+  return SQLITE_CORRUPT;
+}
+
 static int hasPendingAncestorLevels(const ProllyChunker *ch, int level){
   int k;
   for( k = level + 1; k < ch->nLevels; k++ ){
@@ -272,6 +326,21 @@ int prollyChunkerFinish(ProllyChunker *ch){
       } else {
 
         ProllyHash hash;
+
+        if( level>0 && pLevel->builder.nItems==1 ){
+          /* An internal level holding one child is not a canonical root.
+          ** Like Dolt's getCanonicalRoot(), never write it: descend to the
+          ** first leaf or multi-child internal node. Without this the root
+          ** of identical content depends on edit order. */
+          rc = canonicalRootFromSingleChild(ch, &pLevel->builder, &hash);
+          if( rc!=SQLITE_OK ) return rc;
+          memcpy(&ch->root, &hash, sizeof(ProllyHash));
+          prollyNodeBuilderReset(&pLevel->builder);
+          pLevel->nItems = 0;
+          pLevel->nBytes = 0;
+          pLevel->subtreeCount = 0;
+          return SQLITE_OK;
+        }
 
         rc = finishFlushLevel(ch, level, &hash);
         if( rc!=SQLITE_OK ) return rc;
