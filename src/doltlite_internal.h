@@ -1859,6 +1859,9 @@ int doltliteClearSessionRebaseState(sqlite3 *db);
 void doltliteGetSessionRebaseEditCommit(sqlite3 *db, ProllyHash *pCommit);
 void doltliteSetSessionRebaseEditCommit(sqlite3 *db, const ProllyHash *pCommit);
 int doltliteBranchWorkingSetRebaseFlags(sqlite3 *db, const char *zBranch, u8 *pFlags);
+int doltliteBranchWorkingSetRebaseOrig(sqlite3 *db, const char *zBranch,
+                                     u8 *pFlags, char **pzOrig,
+                                     char **pzReturn);
 int doltliteClearBranchRebaseMetadata(sqlite3 *db, const char *zBranch);
 int doltliteWriteBranchRebaseMetadata(sqlite3*, const char*, u8,
                                       const ProllyHash*, const ProllyHash*,

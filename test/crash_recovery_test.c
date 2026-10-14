@@ -2098,18 +2098,19 @@ static void test_34_rebase_start_crash(void){
 
   printf("--- Test 34: a crashed rebase can be aborted and retried ---\n");
   check("test_34: tracking vfs registered", duraRegister()==SQLITE_OK);
-  for(interactive=0; interactive<2; interactive++){
+  for(interactive=0; interactive<3; interactive++){
     int before;
     for(before=0; before<2; before++){
       int at;
-      for(at=1; at<=12; at++){
+      for(at=1; at<=16; at++){
         const char *dbpath = fresh_db();
         char featPath[600], head[64], label[64], desc[160];
         sqlite3 *db = 0;
         pid_t pid;
         int status = 0, crashed, leftover;
         snprintf(label, sizeof(label), "rebase_%s_%s_sync_%d",
-                 interactive ? "i" : "plain", before ? "before" : "after", at);
+                 interactive==2 ? "continue" : interactive ? "i" : "plain",
+                 before ? "before" : "after", at);
         snprintf(featPath, sizeof(featPath), "%s/feat", dbpath);
         check("test_34: setup open", sqlite3_open(dbpath, &db)==SQLITE_OK);
         check("test_34: setup", execSql(db,
@@ -2132,11 +2133,16 @@ static void test_34_rebase_start_crash(void){
           int rc;
           if( sqlite3_open_v2(featPath, &db,
                 SQLITE_OPEN_READWRITE, "dura-track")!=SQLITE_OK ) _exit(10);
+          if( interactive==2
+           && execSql(db, "SELECT dolt_rebase('-i','main')")!=SQLITE_OK ){
+            _exit(12);
+          }
           gDuraCrashAt = at;
           gDuraSyncCount = 0;
           gDuraCrashBefore = before;
-          rc = execSql(db, interactive ? "SELECT dolt_rebase('-i','main')"
-                                       : "SELECT dolt_rebase('main')");
+          rc = execSql(db, interactive==2 ? "SELECT dolt_rebase('--continue')"
+                         : interactive ? "SELECT dolt_rebase('-i','main')"
+                         : "SELECT dolt_rebase('main')");
           gDuraCrashAt = 0;
           _exit(rc==SQLITE_OK ? 0 : 11);
         }
@@ -2152,7 +2158,7 @@ static void test_34_rebase_start_crash(void){
         check("test_34: recovery open", sqlite3_open(featPath, &db)==SQLITE_OK);
         leftover = queryScalarInt(db,
             "SELECT count(*) FROM dolt_branches WHERE name='dolt_rebase_feat'", -1);
-        if( leftover && !interactive ){
+        if( leftover && interactive!=1 ){
           execSql(db, "SELECT dolt_rebase('--continue')");
           snprintf(desc, sizeof(desc), "%s: failed continue keeps branch", label);
           check(desc, strcmp(queryScalarText(db, "SELECT active_branch()"),
@@ -2161,11 +2167,16 @@ static void test_34_rebase_start_crash(void){
         if( leftover ){
           snprintf(desc, sizeof(desc), "%s: abort finds the rebase", label);
           check(desc, execSql(db, "SELECT dolt_rebase('--abort')")==SQLITE_OK);
+          /* A crash past the commit point leaves feat rebased; abort then
+          ** only discards the leftover working branch. */
           snprintf(desc, sizeof(desc), "%s: abort restores the branch", label);
           check(desc, strcmp(queryScalarText(db, "SELECT active_branch()"),
                              "feat")==0
-                   && strcmp(queryScalarText(db, "SELECT dolt_hashof('feat')"),
-                             head)==0);
+                   && (strcmp(queryScalarText(db, "SELECT dolt_hashof('feat')"),
+                              head)==0
+                    || strcmp(queryScalarText(db,
+                         "SELECT group_concat(id) FROM (SELECT id FROM t ORDER BY id)"),
+                         "1,2,3,4,10,11")==0));
         }
         snprintf(desc, sizeof(desc), "%s: no working branch left", label);
         check(desc, queryScalarInt(db,

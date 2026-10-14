@@ -1232,6 +1232,31 @@ int doltliteBranchWorkingSetRebaseFlags(
   return rc;
 }
 
+/* *pzOrig is the original-branch field, set even when the flags are clear:
+** a continue's claim clears the flags but keeps the fields. */
+int doltliteBranchWorkingSetRebaseOrig(
+  sqlite3 *db,
+  const char *zBranch,
+  u8 *pFlags,
+  char **pzOrig,
+  char **pzReturn
+){
+  ChunkStore *cs = doltliteGetChunkStore(db);
+  int rc;
+
+  *pFlags = 0;
+  *pzOrig = 0;
+  if( pzReturn ) *pzReturn = 0;
+  if( !cs || !zBranch || !zBranch[0] ) return SQLITE_OK;
+  rc = btreeLoadWorkingSetBlob(cs, zBranch, 0, 0, 0, 0, 0, 0,
+                               pFlags, 0, 0, pzOrig, pzReturn, 0);
+  if( rc==SQLITE_EMPTY ){
+    *pFlags = 0;
+    return SQLITE_OK;
+  }
+  return rc;
+}
+
 int doltliteClearBranchRebaseMetadata(sqlite3 *db, const char *zBranch){
   ChunkStore *cs = doltliteGetChunkStore(db);
   if( !cs ) return SQLITE_ERROR;
