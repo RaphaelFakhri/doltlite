@@ -33,6 +33,12 @@ void doltliteTestSetMergeInstallHook(void (*xHook)(void*), void *pArg){
   pTestMergeInstallArg = pArg;
 }
 
+static int nTestFailAddColumnAt = 0;
+
+void doltliteTestFailMergeAddColumnAt(int n){
+  nTestFailAddColumnAt = n;
+}
+
 static int mergeStoreCatalog(
   sqlite3 *db,
   struct TableEntry *aCatalog,
@@ -1063,7 +1069,7 @@ static char *mergeQuotedIfNeeded(const char *zName){
                 : sqlite3_mprintf("\"%w\"", zName);
 }
 
-int doltliteApplyMergeSchemaActions(
+static int mergeApplySchemaActionsInTxn(
   sqlite3 *db,
   const ProllyHash *pAncCatHash,
   const ProllyHash *pTheirCatHash,
@@ -1107,7 +1113,12 @@ int doltliteApplyMergeSchemaActions(
                                       aSchemaActions[si].azAddColumns[sj]);
       if( !zAlter ) return SQLITE_NOMEM;
       db->mDbFlags |= DBFLAG_MergeSchemaAdd;
-      rc = sqlite3_exec(db, zAlter, 0, 0, &zErr);
+      if( nTestFailAddColumnAt>0 && --nTestFailAddColumnAt==0 ){
+        rc = SQLITE_BUSY;
+        zErr = sqlite3_mprintf("%s", sqlite3ErrStr(rc));
+      }else{
+        rc = sqlite3_exec(db, zAlter, 0, 0, &zErr);
+      }
       if( !bWasSet ) db->mDbFlags &= ~DBFLAG_MergeSchemaAdd;
       sqlite3_free(zAlter);
       if( rc!=SQLITE_OK ) break;
@@ -1151,6 +1162,52 @@ int doltliteApplyMergeSchemaActions(
         "cannot merge: schema change could not be applied: %s", zErr);
     sqlite3_free(zErr);
     if( !*pzErr ) rc = SQLITE_NOMEM;
+  }
+  return rc;
+}
+
+int doltliteApplyMergeSchemaActions(
+  sqlite3 *db,
+  const ProllyHash *pAncCatHash,
+  const ProllyHash *pTheirCatHash,
+  SchemaMergeAction *aSchemaActions,
+  int nSchemaActions,
+  ProllyHash *pMergedCatHash,
+  char **pzErr
+){
+  int rc = SQLITE_OK;
+  int bBegan = 0;
+
+  /* In autocommit each ALTER commits and publishes on its own: a peer would
+  ** see a half-applied merge schema, and a later ALTER that fails leaves it
+  ** on disk. */
+  if( db->autoCommit && db->nVdbeWrite==0 ){
+    rc = sqlite3_exec(db, "BEGIN IMMEDIATE", 0, 0, 0);
+    bBegan = !db->autoCommit;
+  }
+  if( rc==SQLITE_OK ){
+    rc = mergeApplySchemaActionsInTxn(db, pAncCatHash, pTheirCatHash,
+                                      aSchemaActions, nSchemaActions,
+                                      pMergedCatHash, pzErr);
+  }else if( !*pzErr ){
+    *pzErr = sqlite3_mprintf(
+        "cannot merge: schema change could not be applied: %s",
+        sqlite3_errmsg(db));
+  }
+  if( bBegan && rc==SQLITE_OK ){
+    rc = sqlite3_exec(db, "COMMIT", 0, 0, 0);
+  }
+  if( bBegan && rc!=SQLITE_OK && !db->autoCommit ){
+    int rc2;
+    db->nVcInterruptMask++;
+    rc2 = sqlite3_exec(db, "ROLLBACK", 0, 0, 0);
+    if( rc2!=SQLITE_OK ){
+      sqlite3RollbackAll(db, SQLITE_OK);
+      sqlite3CloseSavepoints(db);
+      db->autoCommit = 1;
+      rc = rc2;
+    }
+    db->nVcInterruptMask--;
   }
   return rc;
 }
