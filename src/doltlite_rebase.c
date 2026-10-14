@@ -1875,10 +1875,11 @@ static int rebaseUnclaimActiveEnd(
 static int rebaseLiveLockTake(sqlite3 *db, sqlite3_file **ppFile){
   const char *zDb = sqlite3_db_filename(db, "main");
   sqlite3_vfs *pVfs = db->pVfs;
-  sqlite3_file *pFile = 0;
+  sqlite3_file *pFile;
   const char *zBase;
   char *zRaw;
-  char *zLock = 0;
+  char *zLock;
+  int nRaw;
   int rc;
 
   *ppFile = 0;
@@ -1888,20 +1889,31 @@ static int rebaseLiveLockTake(sqlite3 *db, sqlite3_file **ppFile){
       ? sqlite3_mprintf("%.*s/.%s-rebase-lock", (int)(zBase-zDb), zDb, zBase+1)
       : sqlite3_mprintf(".%s-rebase-lock", zDb);
   if( !zRaw ) return SQLITE_NOMEM;
-  rc = chunkStoreDupFilenameDoubleNul(zRaw, &zLock);
+  nRaw = sqlite3Strlen30(zRaw);
+  /* The VFS keeps the name pointer until close, so it lives in the same
+  ** allocation as the handle; the zeroed tail double-nul terminates it. */
+  pFile = sqlite3MallocZero(pVfs->szOsFile + nRaw + 4);
+  if( !pFile ){
+    sqlite3_free(zRaw);
+    return SQLITE_NOMEM;
+  }
+  zLock = ((char*)pFile) + pVfs->szOsFile;
+  memcpy(zLock, zRaw, nRaw);
   sqlite3_free(zRaw);
-  if( rc!=SQLITE_OK ) return rc;
-  rc = sqlite3OsOpenMalloc(pVfs, zLock, &pFile,
+  rc = sqlite3OsOpen(pVfs, zLock, pFile,
       SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_MAIN_DB, 0);
-  sqlite3_free(zLock);
-  if( rc!=SQLITE_OK ) return rc;
+  if( rc!=SQLITE_OK ){
+    sqlite3_free(pFile);
+    return rc;
+  }
   do {
     rc = sqlite3OsLock(pFile, SQLITE_LOCK_SHARED);
     if( rc==SQLITE_OK ) rc = sqlite3OsLock(pFile, SQLITE_LOCK_EXCLUSIVE);
     if( rc!=SQLITE_OK ) sqlite3OsUnlock(pFile, SQLITE_LOCK_NONE);
   }while( rc==SQLITE_BUSY && sqlite3InvokeBusyHandler(&db->busyHandler) );
   if( rc!=SQLITE_OK ){
-    sqlite3OsCloseFree(pFile);
+    sqlite3OsClose(pFile);
+    sqlite3_free(pFile);
     return rc;
   }
   *ppFile = pFile;
@@ -1922,7 +1934,8 @@ static int rebaseRefreshStore(sqlite3 *db){
 static void rebaseLiveLockRelease(sqlite3_file *pFile){
   if( !pFile ) return;
   sqlite3OsUnlock(pFile, SQLITE_LOCK_NONE);
-  sqlite3OsCloseFree(pFile);
+  sqlite3OsClose(pFile);
+  sqlite3_free(pFile);
 }
 
 /* The working branch and original branch for the session: on the working
