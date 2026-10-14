@@ -5,6 +5,7 @@
 #include "prolly_hash.h"
 #include "prolly_xxhash.h"
 #include "prolly_chunker.h"
+#include "prolly_mutate.h"
 #include "prolly_node.h"
 #include "chunk_store.h"
 #include "lib/test_tmpdir.h"
@@ -1384,6 +1385,66 @@ static void test_sparse_canonical_root(void){
   }
 }
 
+static void test_append_history(void){
+  int largeCache, intKey;
+  for(largeCache=0; largeCache<2; largeCache++){
+    for(intKey=0; intKey<2; intKey++){
+      ChunkStore cs;
+      ProllyCache cache;
+      ProllyHash root = {{0}};
+      u8 key[2048], val[1004];
+      u8 flags = PROLLY_NODE_SUBTREE_COUNTS;
+      int nKey = intKey ? 8 : (int)sizeof(key);
+      int n, rc;
+      flags |= intKey ? PROLLY_NODE_INTKEY : PROLLY_NODE_BLOBKEY;
+      memset(&cs, 0, sizeof(cs));
+      memset(key, 'k', sizeof(key));
+      memset(val, 'x', sizeof(val));
+      val[0] = 4;
+      val[1] = 0;
+      val[2] = 0x8f;
+      val[3] = 0x5d;
+      rc = chunkStoreOpen(&cs, sqlite3_vfs_find(0), ":memory:",
+                          SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
+                          | SQLITE_OPEN_MAIN_DB);
+      check("append history: open", rc==SQLITE_OK);
+      if( rc!=SQLITE_OK ) continue;
+      rc = prollyCacheInit(&cache, largeCache ? 1024*1024 : 4096);
+      check("append history: cache", rc==SQLITE_OK);
+      if( rc!=SQLITE_OK ){
+        chunkStoreClose(&cs);
+        continue;
+      }
+      for(n=1; n<=600; n++){
+        ProllyChunker ch;
+        ProllyHash want;
+        char zTest[100];
+        int k;
+        encodeIntKey(n, key+nKey-8);
+        key[nKey-8] ^= 0x80;
+        rc = prollyMutateInsert(&cs, &cache, &root, flags,
+                                key, nKey, n, val, sizeof(val), &root);
+        prollyChunkerInit(&ch, &cs, flags);
+        for(k=1; rc==SQLITE_OK && k<=n; k++){
+          encodeIntKey(k, key+nKey-8);
+          key[nKey-8] ^= 0x80;
+          rc = prollyChunkerAdd(&ch, key, nKey, val, sizeof(val));
+        }
+        if( rc==SQLITE_OK ) rc = prollyChunkerFinish(&ch);
+        prollyChunkerGetRoot(&ch, &want);
+        prollyChunkerFree(&ch);
+        sqlite3_snprintf(sizeof(zTest), zTest,
+                         "append history: large-cache=%d intkey=%d prefix=%d",
+                         largeCache, intKey, n);
+        check(zTest, rc==SQLITE_OK && prollyHashCompare(&root, &want)==0);
+        if( rc!=SQLITE_OK ) break;
+      }
+      prollyCacheFree(&cache);
+      chunkStoreClose(&cs);
+    }
+  }
+}
+
 int main(void){
   sqlite3_initialize();
   printf("Prolly chunker boundary golden tests\n");
@@ -1395,6 +1456,7 @@ int main(void){
   test_chunker_repeatable();
   test_canonical_root_chain();
   test_sparse_canonical_root();
+  test_append_history();
 
   printf("\n%d passed, %d failed\n", nPass, nFail);
   return nFail>0 ? 1 : 0;

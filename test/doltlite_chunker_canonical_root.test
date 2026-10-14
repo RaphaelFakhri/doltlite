@@ -60,4 +60,48 @@ do_execsql_test 3.2 {
 do_execsql_test 3.3 { SELECT id, length(v) FROM t ORDER BY id; } {1 4000 2 4000}
 do_execsql_test 3.4 { PRAGMA integrity_check; } {ok}
 
+reset_db
+execsql {
+  CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);
+  WITH RECURSIVE s(i) AS (
+    VALUES(1) UNION ALL SELECT i+1 FROM s WHERE i<338
+  ) INSERT INTO t SELECT i, printf('%.*c', 1000, 'x') FROM s;
+  SELECT dolt_commit('-Am', 'bulk rows');
+  SELECT dolt_branch('bulk');
+  DELETE FROM t;
+  WITH RECURSIVE s(i) AS (
+    VALUES(1) UNION ALL SELECT i+1 FROM s WHERE i<337
+  ) INSERT INTO t SELECT i, printf('%.*c', 1000, 'x') FROM s;
+  INSERT INTO t VALUES(338, printf('%.*c', 1000, 'x'));
+}
+
+do_execsql_test 4.1 {
+  SELECT dolt_hashof_table('t') = dolt_hashof_table('t', 'HEAD');
+} {1}
+do_execsql_test 4.2 {
+  SELECT count(*) FROM dolt_diff_t('HEAD', 'WORKING');
+} {0}
+do_execsql_test 4.3 { SELECT count(*) FROM dolt_status; } {0}
+set head [db one {SELECT dolt_hashof('HEAD')}]
+do_catchsql_test 4.4 {
+  SELECT dolt_commit('-am', 'identical appended rows');
+} {1 {nothing to commit, working tree clean (use dolt_add to stage changes)}}
+do_test 4.5 {
+  expr {[db one {SELECT dolt_hashof('HEAD')}] eq $head}
+} {1}
+
+db close
+sqlite3 db test.db
+foreach stage {reopen gc} {
+  if {$stage eq "gc"} { execsql { SELECT dolt_gc(); } }
+  do_execsql_test 5.$stage.hash {
+    SELECT dolt_hashof_table('t') = dolt_hashof_table('t', 'bulk');
+  } {1}
+  do_execsql_test 5.$stage.rows {
+    SELECT count(*), sum(id), sum(length(v)),
+           count(*) FILTER (WHERE v != printf('%.*c', 1000, 'x')) FROM t;
+  } {338 57291 338000 0}
+  do_execsql_test 5.$stage.integrity { PRAGMA integrity_check; } {ok}
+}
+
 finish_test

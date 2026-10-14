@@ -939,7 +939,7 @@ static int tryAppendSingleNoSplit(ProllyMutator *pMut){
                     &leafEndsAtBoundary, &leafWouldSplit);
     if( leafEndsAtBoundary ){
       int j;
-      for(j=1; j<level; j++){
+      for(j=0; j<level; j++){
         if( nodeEndsAtChunkBoundary(&cur.aLevel[j].pEntry->node) ){
           prollyCursorClose(&cur);
           return SQLITE_NOTFOUND;

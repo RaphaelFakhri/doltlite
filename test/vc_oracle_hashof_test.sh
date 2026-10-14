@@ -668,4 +668,23 @@ shape "hashof_table_shape" "$H_T"
 shape "hashof_db_shape"    "$H_D"
 shape "hashof_ref_shape"   "$H_R"
 
+DB="append_root_boundary"
+APPEND_PAD=$(printf '%01000d' 0 | tr '0' 'x')
+setup_pair "$DB" "
+CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);
+INSERT INTO t WITH RECURSIVE s(i) AS (
+  SELECT 1 UNION ALL SELECT i+1 FROM s WHERE i<338
+) SELECT i, '$APPEND_PAD' FROM s;
+"
+H_BULK=$(run_hash_on "$DB" "SELECT dolt_hashof_table('t');")
+exec_pair "$DB" "
+DELETE FROM t;
+INSERT INTO t WITH RECURSIVE s(i) AS (
+  SELECT 1 UNION ALL SELECT i+1 FROM s WHERE i<337
+) SELECT i, '$APPEND_PAD' FROM s;
+INSERT INTO t VALUES(338, '$APPEND_PAD');
+"
+H_APPEND=$(run_hash_on "$DB" "SELECT dolt_hashof_table('t');")
+same "append_at_completed_internal_root_preserves_table_hash" "$H_BULK" "$H_APPEND"
+
 vc_oracle_finish
