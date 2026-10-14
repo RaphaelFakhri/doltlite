@@ -316,6 +316,7 @@ int applyMergedCatalogAndCommit(
   ProllyHash wsBasis;
   char *zMergeErr = 0;
   int graphLocked = 0;
+  int bInstallTxn = 0;
   const char *zOpLabel;
   const char *zBranch;
   int rc;
@@ -388,6 +389,9 @@ int applyMergedCatalogAndCommit(
     if( rc==SQLITE_OK ){
       rc = doltlitePrimeSchemaCache(db);
     }
+    if( rc==SQLITE_OK && (nReindex>0 || nSchemaActions>0 || nRebuild>0) ){
+      rc = doltliteMergeAutocommitTxnBegin(db, &bInstallTxn);
+    }
     if( rc==SQLITE_OK && nReindex>0 ){
       rc = doltliteReindexNamedIndexes(db, azReindex, nReindex, 0);
     }
@@ -409,6 +413,7 @@ int applyMergedCatalogAndCommit(
     if( rc==SQLITE_OK && nRebuild>0 ){
       rc = doltliteRebuildVirtualTables(db, azRebuild, nRebuild);
     }
+    rc = doltliteMergeAutocommitTxnEnd(db, bInstallTxn, rc);
     doltliteFreeNameList(azReindex, nReindex);
     doltliteFreeNameList(azRebuild, nRebuild);
     freeSchemaMergeActions(aSchemaActions, nSchemaActions);

@@ -1316,7 +1316,8 @@ int doltliteReindexNamedIndexes(sqlite3 *db, char **az, int n,
     zSql = sqlite3_mprintf("REINDEX \"%w\"", az[i]);
     if( !zSql ) return SQLITE_NOMEM;
     if( pIdx ) pIdx->onError = OE_None;
-    rc = sqlite3_exec(db, zSql, 0, 0, 0);
+    rc = doltliteMergeInstallStepFails() ? SQLITE_BUSY
+                                          : sqlite3_exec(db, zSql, 0, 0, 0);
     sqlite3_free(zSql);
     if( suppressed ){
       /* Re-find: a failed exec can reset the schema and free the Index. */

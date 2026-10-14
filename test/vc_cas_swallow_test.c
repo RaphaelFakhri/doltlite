@@ -536,9 +536,9 @@ static void test_merge_schema_actions_all_or_nothing(void){
     "INSERT INTO t VALUES(4,'d','z');"
     "SELECT dolt_commit('-Am','main col');")==SQLITE_OK);
   zBefore = queryText(db, "SELECT sql FROM sqlite_master WHERE name='t'");
-  doltliteTestFailMergeAddColumnAt(2);
+  doltliteTestFailMergeInstallStepAt(2);
   rc = execQuiet(db, "SELECT dolt_merge('--no-ff','feat')", &zErr);
-  doltliteTestFailMergeAddColumnAt(0);
+  doltliteTestFailMergeInstallStepAt(0);
   check("schemaact: merge fails", rc!=SQLITE_OK);
   sqlite3_free(zErr);
   zErr = 0;
@@ -555,6 +555,108 @@ static void test_merge_schema_actions_all_or_nothing(void){
   check("schemaact: retry merges",
         execQuiet(db, "SELECT dolt_merge('--no-ff','feat')", &zErr)==SQLITE_OK);
   sqlite3_free(zErr);
+  sqlite3_free(zBefore);
+  sqlite3_free(zAfter);
+  sqlite3_free(zIntegrity);
+  closeRm(db, zPath);
+}
+
+/* feat's index covers only feat's rows, so the merge rebuilds it after
+** replaying feat's column. A failed rebuild must not leave the merged table
+** published under that stale index. */
+static void test_merge_install_reindex_all_or_nothing(void){
+  char zPath[256];
+  sqlite3 *db, *db2 = 0;
+  char *zErr = 0, *zBefore = 0, *zAfter = 0, *zIntegrity = 0;
+  int rc;
+
+  snprintf(zPath, sizeof(zPath), DOLTLITE_TEST_TMPDIR "/cas_swallow_reindex_%d.db", (int)getpid());
+  db = openDb(zPath);
+  check("reindex: open", db!=0);
+  if( !db ) return;
+  doltliteTestClearFaults();
+  check("reindex: setup", exec(db,
+    "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);"
+    "INSERT INTO t VALUES(1,'a'),(2,'b');"
+    "SELECT dolt_commit('-Am','base');"
+    "SELECT dolt_branch('feat');"
+    "SELECT dolt_checkout('feat');"
+    "CREATE INDEX tv ON t(v);"
+    "ALTER TABLE t ADD COLUMN a TEXT;"
+    "INSERT INTO t VALUES(3,'c','x');"
+    "SELECT dolt_commit('-Am','feat index');"
+    "SELECT dolt_checkout('main');"
+    "ALTER TABLE t ADD COLUMN m TEXT;"
+    "INSERT INTO t VALUES(4,'d','z'),(5,'e','y');"
+    "SELECT dolt_commit('-Am','main rows');")==SQLITE_OK);
+  zBefore = queryText(db, "SELECT group_concat(name,',') FROM sqlite_master");
+  doltliteTestFailMergeInstallStepAt(2);
+  rc = execQuiet(db, "SELECT dolt_merge('--no-ff','feat')", &zErr);
+  doltliteTestFailMergeInstallStepAt(0);
+  check("reindex: merge fails", rc!=SQLITE_OK);
+  sqlite3_free(zErr);
+  zErr = 0;
+  check("reindex: peer open", sqlite3_open(zPath, &db2)==SQLITE_OK);
+  zAfter = queryText(db2, "SELECT group_concat(name,',') FROM sqlite_master");
+  check("reindex: nothing published",
+        zBefore && zAfter && strcmp(zBefore, zAfter)==0);
+  zIntegrity = queryText(db2, "PRAGMA integrity_check");
+  check("reindex: integrity ok", zIntegrity && strcmp(zIntegrity, "ok")==0);
+  sqlite3_free(zIntegrity);
+  sqlite3_close(db2);
+  check("reindex: retry merges",
+        execQuiet(db, "SELECT dolt_merge('--no-ff','feat')", &zErr)==SQLITE_OK);
+  zIntegrity = queryText(db, "PRAGMA integrity_check");
+  check("reindex: integrity ok after merge",
+        zIntegrity && strcmp(zIntegrity, "ok")==0);
+  sqlite3_free(zErr);
+  sqlite3_free(zBefore);
+  sqlite3_free(zAfter);
+  sqlite3_free(zIntegrity);
+  closeRm(db, zPath);
+}
+
+/* Cherry-pick rebuilds the adopted index, then replays the picked column.
+** A failed replay must not leave the rebuilt index published over rows the
+** schema cannot read. */
+static void test_cherry_pick_install_all_or_nothing(void){
+  char zPath[256];
+  sqlite3 *db, *db2 = 0;
+  char *zErr = 0, *zBefore = 0, *zAfter = 0, *zIntegrity = 0;
+  int rc;
+
+  snprintf(zPath, sizeof(zPath), DOLTLITE_TEST_TMPDIR "/cas_swallow_cpinstall_%d.db", (int)getpid());
+  db = openDb(zPath);
+  check("cpinstall: open", db!=0);
+  if( !db ) return;
+  doltliteTestClearFaults();
+  check("cpinstall: setup", exec(db,
+    "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);"
+    "INSERT INTO t VALUES(1,'a'),(2,'b');"
+    "SELECT dolt_commit('-Am','base');"
+    "SELECT dolt_branch('feat');"
+    "SELECT dolt_checkout('feat');"
+    "CREATE INDEX tv ON t(v);"
+    "ALTER TABLE t ADD COLUMN a TEXT;"
+    "INSERT INTO t VALUES(3,'c','x');"
+    "SELECT dolt_commit('-Am','feat index');"
+    "SELECT dolt_checkout('main');"
+    "ALTER TABLE t ADD COLUMN m TEXT;"
+    "INSERT INTO t VALUES(4,'d','z'),(5,'e','y');"
+    "SELECT dolt_commit('-Am','main rows');")==SQLITE_OK);
+  zBefore = queryText(db, "SELECT group_concat(name,',') FROM sqlite_master");
+  doltliteTestFailMergeInstallStepAt(2);
+  rc = execQuiet(db, "SELECT dolt_cherry_pick('feat')", &zErr);
+  doltliteTestFailMergeInstallStepAt(0);
+  check("cpinstall: cherry-pick fails", rc!=SQLITE_OK);
+  sqlite3_free(zErr);
+  check("cpinstall: peer open", sqlite3_open(zPath, &db2)==SQLITE_OK);
+  zAfter = queryText(db2, "SELECT group_concat(name,',') FROM sqlite_master");
+  check("cpinstall: nothing published",
+        zBefore && zAfter && strcmp(zBefore, zAfter)==0);
+  zIntegrity = queryText(db2, "PRAGMA integrity_check");
+  check("cpinstall: integrity ok", zIntegrity && strcmp(zIntegrity, "ok")==0);
+  sqlite3_close(db2);
   sqlite3_free(zBefore);
   sqlite3_free(zAfter);
   sqlite3_free(zIntegrity);
@@ -623,6 +725,8 @@ int main(void){
   test_merge_install_unlock_window();
   test_merge_install_peer_write_kept();
   test_merge_schema_actions_all_or_nothing();
+  test_merge_install_reindex_all_or_nothing();
+  test_cherry_pick_install_all_or_nothing();
   test_ff_interrupt_after_advance();
   printf("vc_cas_swallow_test: %d passed, %d failed\n", nPass, nFail);
   return nFail ? 1 : 0;
