@@ -3850,6 +3850,51 @@ COMMIT;
 CREATE TABLE t(id INTEGER PRIMARY KEY, v BLOB);
 "
 
+echo "--- one-child root collapse (last row ends a chunk) ---"
+
+# When the final row closes a leaf, the chunker must not keep a one-child
+# internal node as the root; the same rows reached incrementally end in a
+# plain leaf root. Large values make the boundary land on the last row.
+assert_table_hash_pair \
+  "large_two_rows_reverse_insert" \
+  "
+CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);
+INSERT INTO t VALUES (1, printf('%.*c', 4000, 'p')), (2, printf('%.*c', 4000, 'q'));
+" \
+  "
+CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);
+INSERT INTO t VALUES (2, printf('%.*c', 4000, 'q'));
+INSERT INTO t VALUES (1, printf('%.*c', 4000, 'p'));
+"
+
+assert_table_hash_pair \
+  "large_rows_insert_then_delete" \
+  "
+CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);
+INSERT INTO t VALUES (1, printf('%.*c', 4000, 'p')), (2, printf('%.*c', 4000, 'q'));
+" \
+  "
+CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);
+INSERT INTO t VALUES (2, printf('%.*c', 4000, 'q'));
+INSERT INTO t VALUES (1, printf('%.*c', 4000, 'p'));
+INSERT INTO t VALUES (3, printf('%.*c', 4000, 'r'));
+DELETE FROM t WHERE id = 3;
+"
+
+for n in 2 3 4 5 6 8 11; do
+  for len in 1500 2600 3100 3900; do
+    bulk="CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);
+WITH RECURSIVE c(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM c WHERE i<$n)
+INSERT INTO t SELECT i, printf('%.*c', $len + i * 7, char(96 + i)) FROM c;"
+    reverse="CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);"
+    for ((i = n; i >= 1; i--)); do
+      reverse="$reverse
+INSERT INTO t VALUES ($i, printf('%.*c', $len + $i * 7, char(96 + $i)));"
+    done
+    assert_table_hash_pair "reverse_rows_${n}_len_${len}" "$bulk" "$reverse"
+  done
+done
+
 echo "======================================="
 echo "Results: $PASS passed, $FAIL failed"
 echo "======================================="
