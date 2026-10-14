@@ -1883,6 +1883,9 @@ void prollyBtreeGetMeta(Btree *p, int idx, u32 *pValue){
     }
   } else {
     *pValue = p->aMeta[idx];
+    if( idx==BTREE_SCHEMA_VERSION && p->db->init.busy ){
+      (void)sqlite3FaultSim(964);
+    }
   }
 }
 void sqlite3BtreeGetMeta(Btree *p, int idx, u32 *pValue){
