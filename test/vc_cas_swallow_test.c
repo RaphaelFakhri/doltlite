@@ -507,6 +507,60 @@ static void test_merge_install_peer_write_kept(void){
   closeRm(db1, zPath);
 }
 
+/* The merge replays feat's columns onto main's schema one ALTER at a time.
+** A later ALTER that fails must leave none of them on disk. */
+static void test_merge_schema_actions_all_or_nothing(void){
+  char zPath[256];
+  sqlite3 *db, *db2 = 0;
+  char *zErr = 0, *zBefore = 0, *zAfter = 0, *zIntegrity = 0;
+  int nIdx = -1, rc;
+
+  snprintf(zPath, sizeof(zPath), DOLTLITE_TEST_TMPDIR "/cas_swallow_schema_%d.db", (int)getpid());
+  db = openDb(zPath);
+  check("schemaact: open", db!=0);
+  if( !db ) return;
+  doltliteTestClearFaults();
+  check("schemaact: setup", exec(db,
+    "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);"
+    "CREATE INDEX tv ON t(v);"
+    "INSERT INTO t VALUES(1,'a'),(2,'b');"
+    "SELECT dolt_commit('-Am','base');"
+    "SELECT dolt_branch('feat');"
+    "SELECT dolt_checkout('feat');"
+    "ALTER TABLE t ADD COLUMN a TEXT;"
+    "ALTER TABLE t ADD COLUMN b TEXT;"
+    "INSERT INTO t VALUES(3,'c','x','y');"
+    "SELECT dolt_commit('-Am','feat cols');"
+    "SELECT dolt_checkout('main');"
+    "ALTER TABLE t ADD COLUMN m TEXT;"
+    "INSERT INTO t VALUES(4,'d','z');"
+    "SELECT dolt_commit('-Am','main col');")==SQLITE_OK);
+  zBefore = queryText(db, "SELECT sql FROM sqlite_master WHERE name='t'");
+  doltliteTestFailMergeAddColumnAt(2);
+  rc = execQuiet(db, "SELECT dolt_merge('--no-ff','feat')", &zErr);
+  doltliteTestFailMergeAddColumnAt(0);
+  check("schemaact: merge fails", rc!=SQLITE_OK);
+  sqlite3_free(zErr);
+  zErr = 0;
+  check("schemaact: peer open", sqlite3_open(zPath, &db2)==SQLITE_OK);
+  zAfter = queryText(db2, "SELECT sql FROM sqlite_master WHERE name='t'");
+  check("schemaact: no column published",
+        zBefore && zAfter && strcmp(zBefore, zAfter)==0);
+  zIntegrity = queryText(db2, "PRAGMA integrity_check");
+  check("schemaact: integrity ok", zIntegrity && strcmp(zIntegrity, "ok")==0);
+  check("schemaact: index read after failed merge",
+        queryInt(db2, "SELECT count(*) FROM t WHERE v='d'", &nIdx)==SQLITE_OK
+        && nIdx==1);
+  sqlite3_close(db2);
+  check("schemaact: retry merges",
+        execQuiet(db, "SELECT dolt_merge('--no-ff','feat')", &zErr)==SQLITE_OK);
+  sqlite3_free(zErr);
+  sqlite3_free(zBefore);
+  sqlite3_free(zAfter);
+  sqlite3_free(zIntegrity);
+  closeRm(db, zPath);
+}
+
 /* A fast-forward becomes irreversible once the branch ref moves. An interrupt
 ** that arrives after that point cannot be honoured, and reporting it would
 ** describe a merge that did happen as one that did not. */
@@ -568,6 +622,7 @@ int main(void){
   test_branch_move_ws_read_failure();
   test_merge_install_unlock_window();
   test_merge_install_peer_write_kept();
+  test_merge_schema_actions_all_or_nothing();
   test_ff_interrupt_after_advance();
   printf("vc_cas_swallow_test: %d passed, %d failed\n", nPass, nFail);
   return nFail ? 1 : 0;
