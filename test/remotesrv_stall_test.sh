@@ -46,7 +46,7 @@ start_server() {
 
 stop_server_with_stalled_clients() {
   local port="$1"
-  python3 - "$port" <<'PY' &
+  python3 - "$port" "${2:-header}" <<'PY' &
 import socket
 import sys
 import time
@@ -55,7 +55,11 @@ sockets = []
 for _ in range(24):
     try:
         s = socket.create_connection(("127.0.0.1", int(sys.argv[1])))
-        s.sendall(b"G")
+        payload = b"G" if sys.argv[2]=="header" else (
+            b"POST /repo.db/chunks HTTP/1.1\r\n"
+            b"Host: x\r\nContent-Length: 1000\r\n\r\nx"
+        )
+        s.sendall(payload)
         sockets.append(s)
     except OSError:
         pass
@@ -78,6 +82,98 @@ PY
   wait "$CLIENT_PID" 2>/dev/null || true
   CLIENT_PID=""
   echo "  PASS: shutdown interrupts active and queued stalled clients"
+}
+
+check_stalled_bodies() {
+  python3 - "$PORT" "$DOLTLITE" "$1" "${2:-}" <<'PY'
+import os
+import socket
+import ssl
+import subprocess
+import sys
+import time
+
+port = int(sys.argv[1])
+doltlite = sys.argv[2]
+clone_db = sys.argv[3]
+cert = sys.argv[4]
+context = ssl.create_default_context(cafile=cert) if cert else None
+scheme = "https" if cert else "http"
+url = "%s://127.0.0.1:%d/repo.db" % (scheme, port)
+env = os.environ.copy()
+if cert:
+    env["DOLTLITE_CA_FILE"] = cert
+
+def connect():
+    sock = socket.create_connection(("127.0.0.1", port), timeout=2)
+    return context.wrap_socket(sock, server_hostname="localhost") if context else sock
+payload = (
+    b"POST /repo.db/chunks HTTP/1.1\r\n"
+    b"Host: x\r\nContent-Length: 1000\r\n\r\n"
+    b"0123456789"
+)
+
+stalls = []
+for _ in range(4):
+    stalled = connect()
+    stalled.sendall(payload)
+    stalls.append(stalled)
+time.sleep(0.5)
+
+start = time.monotonic()
+try:
+    result = subprocess.run(
+        [doltlite, clone_db, "SELECT dolt_clone('%s');" % url],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=15,
+        env=env,
+    )
+except subprocess.TimeoutExpired as exc:
+    raise AssertionError("clone waited out the stalled bodies") from exc
+elapsed = time.monotonic() - start
+assert result.returncode == 0, result.stdout
+assert elapsed < 1.0, elapsed
+
+for stalled in stalls:
+    stalled.settimeout(0.01)
+    try:
+        data = stalled.recv(1)
+    except socket.timeout:
+        pass
+    else:
+        raise AssertionError("clone waited until a stalled body was closed: %r" % data)
+
+body = b"\0" * (20 * 8192)
+with connect() as healthy:
+    head = (
+        "POST /repo.db/has-chunks HTTP/1.1\r\n"
+        "Host: localhost\r\nContent-Length: %d\r\n\r\n" % len(body)
+    ).encode()
+    healthy.sendall(head + body[:7])
+    time.sleep(0.02)
+    healthy.sendall(body[7:])
+    response = b""
+    while True:
+        data = healthy.recv(16384)
+        if not data:
+            break
+        response += data
+    header, _, result_body = response.partition(b"\r\n\r\n")
+    assert header.startswith(b"HTTP/1.1 200 "), header
+    assert result_body == b"\0" * 8192, len(result_body)
+print("  PASS: fragmented request body completes while four other bodies are stalled")
+
+deadline = time.monotonic() + 6
+for stalled in stalls:
+    stalled.settimeout(6)
+    while stalled.recv(4096):
+        if time.monotonic() > deadline:
+            raise AssertionError("stalled body was not closed within the short budget")
+    stalled.close()
+print("  PASS: four stalled bodies leave clone immediate (%.2fs)" % elapsed)
+PY
+
 }
 
 echo "=== stalled remote server ==="
@@ -518,53 +614,8 @@ CREATE TABLE t(x INT PRIMARY KEY);
 INSERT INTO t VALUES (1);
 SELECT dolt_commit('-A','-m','b');
 SQL
-python3 - "$PORT" "$DOLTLITE" "$TMP/body-clone.db" <<'PY'
-import socket
-import subprocess
-import sys
-import time
-
-port = int(sys.argv[1])
-doltlite = sys.argv[2]
-clone_db = sys.argv[3]
-url = "http://127.0.0.1:%d/repo.db" % port
-payload = (
-    b"POST /repo.db/chunks HTTP/1.1\r\n"
-    b"Host: x\r\nContent-Length: 1000\r\n\r\n"
-    b"0123456789"
-)
-
-stalls = []
-for _ in range(4):
-    stalled = socket.create_connection(("127.0.0.1", port), timeout=2)
-    stalled.sendall(payload)
-    stalls.append(stalled)
-time.sleep(0.5)
-
-start = time.monotonic()
-try:
-    result = subprocess.run(
-        [doltlite, clone_db, "SELECT dolt_clone('%s');" % url],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=15,
-    )
-except subprocess.TimeoutExpired as exc:
-    raise AssertionError("clone waited out the stalled bodies") from exc
-elapsed = time.monotonic() - start
-assert result.returncode == 0, result.stdout
-assert elapsed < 8.0, elapsed
-
-deadline = time.monotonic() + 6
-for stalled in stalls:
-    stalled.settimeout(6)
-    while stalled.recv(4096):
-        if time.monotonic() > deadline:
-            raise AssertionError("stalled body was not closed within the short budget")
-    stalled.close()
-print("  PASS: four stalled bodies leave clone immediate (%.2fs)" % elapsed)
-PY
-stop_server_with_stalled_clients "$PORT"
+check_stalled_bodies "$TMP/body-clone.db"
+stop_server_with_stalled_clients "$PORT" body
 
 if ! command -v openssl >/dev/null 2>&1; then
   echo "SKIP: openssl not available; TLS stall checks skipped"
@@ -609,4 +660,15 @@ stalled.close()
 print("  PASS: stalled TLS handshake does not block healthy requests")
 print("  PASS: TLS handshake deadline closes stalled clients")
 PY
+stop_server_with_stalled_clients "$PORT"
+
+
+echo "=== TLS stalled request bodies ==="
+"$DOLTLITE" "$TMP/srv/repo.db" <<SQL >/dev/null
+CREATE TABLE t(x INT PRIMARY KEY);
+INSERT INTO t VALUES (1);
+SELECT dolt_commit('-A','-m','b');
+SQL
+start_server "$TMP/tls-body.log" 30000 --cert "$TMP/cert.pem" --key "$TMP/key.pem"
+check_stalled_bodies "$TMP/tls-body-clone.db" "$TMP/cert.pem"
 stop_server_with_stalled_clients "$PORT"

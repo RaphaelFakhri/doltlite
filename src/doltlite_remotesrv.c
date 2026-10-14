@@ -24,7 +24,7 @@ int doltliteServerPort(DoltliteServer *s){ (void)s; return 0; }
 #include <pthread.h>
 #include <errno.h>
 
-/* Workers run only after the request header has arrived. Idle connections
+/* Workers run only after the request has arrived. Idle connections
 ** stay on the accept thread, so they cannot fill the pool. */
 #define SERVER_WORKERS 4
 #define SERVER_QUEUE_SIZE 16
@@ -44,9 +44,13 @@ struct ServerJob {
   char *zPrefix;
   int nPrefix;
   int nHeader;
+  u8 *pBody;
+  int nBody;
+  i64 nBodyAlloc;
+  int requestStatus;
 };
 
-/* Header bytes collected before a worker is taken. conn is set for TLS. */
+/* Request bytes collected before a worker is taken. conn is set for TLS. */
 struct PendingConn {
   int fd;
   DoltliteConn *conn;
@@ -55,6 +59,13 @@ struct PendingConn {
   int nBuf;
   int bHandshake;
   int bWantWrite;
+  int nHeader;
+  int contentLength;
+  u8 *pBody;
+  int nBody;
+  i64 nBodyAlloc;
+  int requestStatus;
+  int bReadAgain;
 };
 
 struct DoltliteWorkerArg {
@@ -96,6 +107,7 @@ struct DoltliteServer {
   int activeFd[SERVER_WORKERS];
   int timeoutMs;
   PendingConn *aPending;
+  i64 nBodyAlloc;
 
   DoltliteTlsServer *tls;
   char *authKeysDir;
@@ -329,10 +341,8 @@ static int remoteSrvCommitPending(ChunkStore *pStore){
 #define MAX_REQUEST_BYTES  MAX_CHUNK_BYTES
 #define MAX_RESPONSE_BYTES MAX_REQUEST_BYTES
 
-/* After the header budget, the body must sustain BODY_MIN_RATE. A stall
-** during that budget must not hold a worker for the whole --timeout-ms.
-** timeoutMs still caps the read. */
 #define SERVER_BODY_MIN_RATE     (64 * 1024)
+#define SERVER_BODY_BUFFER_MAX   (MAX_REQUEST_BYTES * SERVER_WORKERS)
 
 static i64 monotonicMs(void){
   struct timespec ts;
@@ -363,26 +373,6 @@ static int remoteSrvGrowBuf(u8 **pp, i64 *pnAlloc, i64 need){
   *pp = pTmp;
   *pnAlloc = nNew;
   return SQLITE_OK;
-}
-
-static int readExact(DoltliteConn *fd, u8 *pBuf, int nBytes,
-                     i64 startMs, int graceMs, int timeoutMs){
-  int nRead = 0;
-  while( nRead < nBytes ){
-    i64 elapsed = monotonicMs() - startMs;
-    i64 allow = (i64)graceMs + (i64)nRead * 1000 / SERVER_BODY_MIN_RATE;
-    i64 leftRate = allow - elapsed;
-    i64 leftOverall = (i64)timeoutMs - elapsed;
-    i64 left = leftRate<leftOverall ? leftRate : leftOverall;
-    int n;
-    if( left<=0 ) return -1;
-    if( left>0x7fffffff ) left = 0x7fffffff;
-    if( doltliteConnSetTimeout(fd, (int)left)!=0 ) return -1;
-    n = doltliteConnRead(fd, pBuf + nRead, nBytes - nRead);
-    if( n<=0 ) return -1;
-    nRead += n;
-  }
-  return 0;
 }
 
 static int headerNameEquals(
@@ -515,49 +505,26 @@ static int parseRequestHeaders(
   return 0;
 }
 
-/* Allocate and read Content-Length. Bytes already sitting past the header
-** in zPrefix count toward that length. */
-static int readRequestBody(
-  DoltliteConn *fd,
+static int requestHeaderStatus(
+  DoltliteServer *pSrv,
   const char *zPrefix, int nPrefix, int nHeader,
-  int contentLength,
-  int timeoutMs,
-  u8 **ppBody, int *pnBody
+  int *pContentLength
 ){
-  int nHave;
-  const u8 *pHave;
-  u8 *pBody;
-  int nCopy;
+  char zMethod[16], zPath[512], zAuth[1024];
+  int contentRc;
+  int rc;
 
-  *ppBody = 0;
-  *pnBody = 0;
-  if( contentLength<=0 ) return 0;
-  nHave = nPrefix - nHeader;
-  if( nHave<0 ) return -1;
-  pHave = (const u8 *)(zPrefix + nHeader);
-  pBody = (u8*)sqlite3_malloc(contentLength);
-  if( !pBody ) return -1;
-  nCopy = nHave;
-  if( nCopy>contentLength ) nCopy = contentLength;
-  if( nCopy>0 ) memcpy(pBody, pHave, (size_t)nCopy);
-  if( nCopy<contentLength ){
-    int grace = timeoutMs;
-    if( grace>SERVER_HEADER_TIMEOUT_MS ) grace = SERVER_HEADER_TIMEOUT_MS;
-    if( readExact(fd, pBody + nCopy, contentLength - nCopy,
-                  monotonicMs(), grace, timeoutMs)!=0 ){
-      sqlite3_free(pBody);
-      return -1;
-    }
-    /* The body read shortens the socket deadline. The response uses the
-    ** caller's timeout again. */
-    if( doltliteConnSetTimeout(fd, timeoutMs)!=0 ){
-      sqlite3_free(pBody);
-      return -1;
-    }
+  rc = parseRequestHeaders(zPrefix, nPrefix, nHeader,
+                           zMethod, sizeof(zMethod), zPath, sizeof(zPath),
+                           zAuth, sizeof(zAuth), pContentLength, &contentRc);
+  if( rc!=0 ) return 400;
+  if( pSrv->authKeysDir
+   && doltliteCredsVerifyBearer(zAuth, pSrv->audience, pSrv->authKeysDir,
+                               (long)time(NULL), 0)!=0 ){
+    return 401;
   }
-  *ppBody = pBody;
-  *pnBody = contentLength;
-  return 0;
+  if( contentRc==-2 ) return 413;
+  return contentRc==0 ? 200 : 400;
 }
 
 static int parsePath(
@@ -1295,15 +1262,15 @@ static void handleRequest(
   DoltliteConn *fd,
   char *zPrefix,
   int nPrefix,
-  int nHeader
+  int nHeader,
+  u8 *pBody,
+  int nBody,
+  int requestStatus
 ){
   char zMethod[16];
   char zPath[512];
   char zDbName[256];
   char zEndpoint[256];
-  char zAuth[1024];
-  u8 *pBody = 0;
-  int nBody = 0;
   ChunkStore *pStore = 0;
   RemoteDbHandle *pHandle = 0;
   char zDbPath[1024];
@@ -1317,36 +1284,18 @@ static void handleRequest(
   sqlite3_vfs *pVfs;
   RemoteSrvPending pending;
 
+  if( requestStatus!=200 ){
+    if( requestStatus==401 ) sendUnauthorized(fd);
+    else if( requestStatus==413 ) sendPayloadTooLarge(fd);
+    else sendBadRequest(fd);
+    return;
+  }
   rc = parseRequestHeaders(zPrefix, nPrefix, nHeader,
                            zMethod, sizeof(zMethod),
                            zPath, sizeof(zPath),
-                           zAuth, sizeof(zAuth),
+                           0, 0,
                            &contentLength, &contentRc);
-  if( rc!=0 ){
-    sendBadRequest(fd);
-    return;
-  }
-
-  /* Content-Length may be a gigabyte. Decide auth before that allocation,
-  ** and before the declared body is read. */
-  if( pSrv->authKeysDir ){
-    if( doltliteCredsVerifyBearer(zAuth, pSrv->audience, pSrv->authKeysDir,
-                                  (long)time(NULL), 0)!=0 ){
-      sendUnauthorized(fd);
-      return;
-    }
-  }
-  if( contentRc==-2 ){
-    sendPayloadTooLarge(fd);
-    return;
-  }
-  if( contentRc!=0 ){
-    sendBadRequest(fd);
-    return;
-  }
-  rc = readRequestBody(fd, zPrefix, nPrefix, nHeader, contentLength,
-                       pSrv->timeoutMs, &pBody, &nBody);
-  if( rc!=0 ){
+  if( rc!=0 || contentRc!=0 || contentLength!=nBody ){
     sendBadRequest(fd);
     return;
   }
@@ -1354,12 +1303,10 @@ static void handleRequest(
   if( parsePath(zPath, zDbName, sizeof(zDbName),
                 zEndpoint, sizeof(zEndpoint))!=0 ){
     sendNotFound(fd);
-    sqlite3_free(pBody);
     return;
   }
   if( !isSafeDbName(zDbName) ){
     sendNotFound(fd);
-    sqlite3_free(pBody);
     return;
   }
 
@@ -1374,24 +1321,20 @@ static void handleRequest(
   rc = pVfs->xAccess(pVfs, zDbPath, SQLITE_ACCESS_EXISTS, &exists);
   if( rc!=SQLITE_OK ){
     sendSqliteError(fd, rc);
-    sqlite3_free(pBody);
     return;
   }
   if( !exists && isHasChunksEndpoint ){
     handleHasChunks(0, fd, pBody, nBody);
-    sqlite3_free(pBody);
     return;
   }
   if( !exists && isReadOnlyEndpoint ){
     sendNotFound(fd);
-    sqlite3_free(pBody);
     return;
   }
 
   rc = remoteDbAcquire(pSrv, zDbPath, !isReadOnlyEndpoint, &pHandle);
   if( rc!=SQLITE_OK ){
     sendSqliteError(fd, rc);
-    sqlite3_free(pBody);
     return;
   }
   pStore = &pHandle->store;
@@ -1435,7 +1378,6 @@ static void handleRequest(
 
   remotesrvPending = 0;
   remoteDbRelease(pSrv, pHandle);
-  sqlite3_free(pBody);
   if( pending.bFail ){
     sqlite3_free(pending.pMsg);
     sendSqliteError(fd, SQLITE_NOMEM);
@@ -1471,12 +1413,15 @@ static void *serverWorkerEntry(void *pArg){
 
     conn = job.conn ? job.conn : doltliteConnFromFd(job.fd);
     if( conn ){
-      handleRequest(pSrv, conn, job.zPrefix, job.nPrefix, job.nHeader);
+      handleRequest(pSrv, conn, job.zPrefix, job.nPrefix, job.nHeader,
+                    job.pBody, job.nBody, job.requestStatus);
       doltliteConnClose(conn);
     }
     sqlite3_free(job.zPrefix);
+    sqlite3_free(job.pBody);
 
     pthread_mutex_lock(&pSrv->mutex);
+    pSrv->nBodyAlloc -= job.nBodyAlloc;
     pSrv->activeFd[pWorker->index] = -1;
     pthread_mutex_unlock(&pSrv->mutex);
   }
@@ -1517,6 +1462,8 @@ static void serverRequestStop(DoltliteServer *pSrv){
     if( job.conn ) doltliteConnClose(job.conn);
     else if( job.fd>=0 ) doltliteCloseSocket(job.fd);
     sqlite3_free(job.zPrefix);
+    sqlite3_free(job.pBody);
+    pSrv->nBodyAlloc -= job.nBodyAlloc;
   }
   /* shutdown() wakes blocking I/O without descriptor reuse. */
   for(i=0; i<pSrv->nWorkers; i++){
@@ -1675,12 +1622,17 @@ static int serverHeaderBudget(const DoltliteServer *pSrv){
   return SERVER_HEADER_TIMEOUT_MS;
 }
 
-static int pendingBudget(const DoltliteServer *pSrv, const PendingConn *p){
+static i64 pendingBudget(const DoltliteServer *pSrv, const PendingConn *p){
+  i64 budget;
   if( p->bHandshake ) return pSrv->timeoutMs;
+  if( p->nHeader ){
+    budget = serverHeaderBudget(pSrv) + (i64)p->nBody * 1000 / SERVER_BODY_MIN_RATE;
+    return budget<pSrv->timeoutMs ? budget : pSrv->timeoutMs;
+  }
   return serverHeaderBudget(pSrv);
 }
 
-static void pendingClose(PendingConn *p){
+static void pendingClose(DoltliteServer *pSrv, PendingConn *p){
   if( p->conn ){
     doltliteConnClose(p->conn);
     p->conn = 0;
@@ -1692,6 +1644,41 @@ static void pendingClose(PendingConn *p){
   p->nBuf = 0;
   p->bHandshake = 0;
   p->bWantWrite = 0;
+  sqlite3_free(p->pBody);
+  p->pBody = 0;
+  pthread_mutex_lock(&pSrv->mutex);
+  pSrv->nBodyAlloc -= p->nBodyAlloc;
+  pthread_mutex_unlock(&pSrv->mutex);
+  p->nBodyAlloc = 0;
+}
+
+static int pendingAppendBody(DoltliteServer *pSrv, PendingConn *p,
+                             const u8 *aData, int nData){
+  i64 need = (i64)p->nBody + nData;
+  i64 nAlloc = p->nBodyAlloc;
+  int rc;
+
+  if( need>nAlloc ){
+    if( nAlloc==0 ) nAlloc = 4096;
+    while( nAlloc<need ) nAlloc *= 2;
+    pthread_mutex_lock(&pSrv->mutex);
+    if( nAlloc-p->nBodyAlloc > SERVER_BODY_BUFFER_MAX-pSrv->nBodyAlloc ){
+      pthread_mutex_unlock(&pSrv->mutex);
+      return SQLITE_NOMEM;
+    }
+    pSrv->nBodyAlloc += nAlloc-p->nBodyAlloc;
+    pthread_mutex_unlock(&pSrv->mutex);
+    rc = remoteSrvGrowBuf(&p->pBody, &p->nBodyAlloc, nAlloc);
+    if( rc!=SQLITE_OK ){
+      pthread_mutex_lock(&pSrv->mutex);
+      pSrv->nBodyAlloc -= nAlloc-p->nBodyAlloc;
+      pthread_mutex_unlock(&pSrv->mutex);
+      return rc;
+    }
+  }
+  if( nData>0 ) memcpy(p->pBody+p->nBody, aData, (size_t)nData);
+  p->nBody += nData;
+  return SQLITE_OK;
 }
 
 static int pendingHeaderEnd(const char *aBuf, int nBuf){
@@ -1711,15 +1698,21 @@ static int enqueueJob(
   DoltliteConn *conn,
   char *zPrefix,
   int nPrefix,
-  int nHeader
+  int nHeader,
+  u8 *pBody,
+  int nBody,
+  i64 nBodyAlloc,
+  int requestStatus
 ){
   int idx;
   struct ServerJob *job;
 
   pthread_mutex_lock(&pSrv->mutex);
   if( !pSrv->running || pSrv->nQueue==SERVER_QUEUE_SIZE ){
+    pSrv->nBodyAlloc -= nBodyAlloc;
     pthread_mutex_unlock(&pSrv->mutex);
     sqlite3_free(zPrefix);
+    sqlite3_free(pBody);
     if( conn ) doltliteConnClose(conn);
     else if( fd>=0 ) doltliteCloseSocket(fd);
     return -1;
@@ -1731,13 +1724,17 @@ static int enqueueJob(
   job->zPrefix = zPrefix;
   job->nPrefix = nPrefix;
   job->nHeader = nHeader;
+  job->pBody = pBody;
+  job->nBody = nBody;
+  job->nBodyAlloc = nBodyAlloc;
+  job->requestStatus = requestStatus;
   pSrv->nQueue++;
   pthread_cond_signal(&pSrv->workReady);
   pthread_mutex_unlock(&pSrv->mutex);
   return 0;
 }
 
-/* Move a finished header onto the worker queue. 0 means this slot no longer
+/* Move a finished request onto the worker queue. 0 means this slot no longer
 ** owns the connection. -1 leaves it in place for the caller to close. */
 static int pendingPromote(
   DoltliteServer *pSrv,
@@ -1755,7 +1752,8 @@ static int pendingPromote(
   memcpy(zCopy, p->aBuf, (size_t)nPrefix);
   zCopy[nPrefix] = 0;
   if( doltliteSocketSetBlocking(p->fd, 1)!=0
-   || doltliteSocketSetTimeout(p->fd, pSrv->timeoutMs)!=0 ){
+   || (p->conn ? doltliteConnSetTimeout(p->conn, pSrv->timeoutMs)
+               : doltliteSocketSetTimeout(p->fd, pSrv->timeoutMs))!=0 ){
     sqlite3_free(zCopy);
     return -1;
   }
@@ -1766,7 +1764,10 @@ static int pendingPromote(
   p->nBuf = 0;
   p->bHandshake = 0;
   p->bWantWrite = 0;
-  enqueueJob(pSrv, fd, conn, zCopy, nPrefix, nHeader);
+  enqueueJob(pSrv, fd, conn, zCopy, nPrefix, nHeader,
+             p->pBody, p->nBody, p->nBodyAlloc, p->requestStatus);
+  p->pBody = 0;
+  p->nBodyAlloc = 0;
   return 0;
 }
 
@@ -1777,7 +1778,7 @@ static int pendingIngest(DoltliteServer *pSrv, PendingConn *p){
   if( p->bHandshake ){
     int step = doltliteConnHandshakeStep(p->conn);
     if( step<0 ){
-      pendingClose(p);
+      pendingClose(pSrv, p);
       return 1;
     }
     if( step==2 ){
@@ -1792,7 +1793,7 @@ static int pendingIngest(DoltliteServer *pSrv, PendingConn *p){
     p->bWantWrite = 0;
     p->startMs = monotonicMs();
   }
-  while( p->nBuf < MAX_HEADER_SIZE-1 ){
+  while( p->nHeader==0 && p->nBuf < MAX_HEADER_SIZE-1 ){
     int n;
     int space = MAX_HEADER_SIZE - 1 - p->nBuf;
     if( p->conn ){
@@ -1802,17 +1803,56 @@ static int pendingIngest(DoltliteServer *pSrv, PendingConn *p){
     }
     if( n==-2 ) return 0;
     if( n<=0 ){
-      pendingClose(p);
+      pendingClose(pSrv, p);
       return 1;
     }
     p->nBuf += n;
     nHeader = pendingHeaderEnd(p->aBuf, p->nBuf);
     if( nHeader ){
-      if( pendingPromote(pSrv, p, nHeader)!=0 ) pendingClose(p);
-      return 1;
+      int nCopy;
+      p->nHeader = nHeader;
+      p->requestStatus = requestHeaderStatus(
+          pSrv, p->aBuf, p->nBuf, nHeader, &p->contentLength);
+      if( p->requestStatus!=200 ){
+        if( pendingPromote(pSrv, p, nHeader)!=0 ) pendingClose(pSrv, p);
+        return 1;
+      }
+      nCopy = p->nBuf - nHeader;
+      if( nCopy>p->contentLength ) nCopy = p->contentLength;
+      if( pendingAppendBody(pSrv, p, (const u8*)p->aBuf+nHeader, nCopy)!=SQLITE_OK ){
+        pendingClose(pSrv, p);
+        return 1;
+      }
+      p->nBuf = nHeader;
+      p->startMs = monotonicMs();
     }
   }
-  pendingClose(p);
+  if( p->nHeader ){
+    u8 aData[8192];
+    int n;
+    int nRead = p->contentLength-p->nBody;
+    p->bReadAgain = 0;
+    if( monotonicMs()-p->startMs >= pendingBudget(pSrv, p) ){
+      p->requestStatus = 400;
+    }else if( nRead>0 ){
+      if( nRead>(int)sizeof(aData) ) nRead = sizeof(aData);
+      n = p->conn ? doltliteConnReadNonblock(p->conn, aData, nRead)
+                  : doltliteSocketRecv(p->fd, aData, nRead);
+      if( n==-2 ) return 0;
+      if( n<=0 ){
+        p->requestStatus = 400;
+      }else if( pendingAppendBody(pSrv, p, aData, n)!=SQLITE_OK ){
+        pendingClose(pSrv, p);
+        return 1;
+      }else if( p->nBody<p->contentLength ){
+        p->bReadAgain = 1;
+        return 0;
+      }
+    }
+    if( pendingPromote(pSrv, p, p->nHeader)!=0 ) pendingClose(pSrv, p);
+  }else{
+    pendingClose(pSrv, p);
+  }
   return 1;
 }
 
@@ -1859,6 +1899,7 @@ static void serverLoop(DoltliteServer *pSrv){
     int nReady;
     int nPolled;
     int clientFd;
+    int pollMs = 100;
 
     nPolled = nPending;
     aPoll[0].fd = pSrv->listenFd;
@@ -1869,8 +1910,9 @@ static void serverLoop(DoltliteServer *pSrv){
       aPoll[i+1].events = POLLIN;
       if( aPending[i].bWantWrite ) aPoll[i+1].events |= POLLOUT;
       aPoll[i+1].revents = 0;
+      if( aPending[i].bReadAgain ) pollMs = 0;
     }
-    nReady = doltlitePoll(aPoll, 1 + nPending, 100);
+    nReady = doltlitePoll(aPoll, 1 + nPending, pollMs);
     if( nReady<0 ) continue;
 
     if( (aPoll[0].revents & POLLIN)!=0 ){
@@ -1886,12 +1928,15 @@ static void serverLoop(DoltliteServer *pSrv){
       int remove = 0;
       int ready = aPoll[i+1].revents;
       PendingConn *p = &aPending[i];
-      if( (ready & (POLLIN|POLLERR|POLLHUP|POLLNVAL))!=0
+      if( p->bReadAgain || (ready & (POLLIN|POLLERR|POLLHUP|POLLNVAL))!=0
        || (p->bWantWrite && (ready & POLLOUT)!=0) ){
         remove = pendingIngest(pSrv, p);
       }
       if( !remove && monotonicMs() - p->startMs > pendingBudget(pSrv, p) ){
-        pendingClose(p);
+        p->requestStatus = 400;
+        if( !p->nHeader || pendingPromote(pSrv, p, p->nHeader)!=0 ){
+          pendingClose(pSrv, p);
+        }
         remove = 1;
       }
       if( remove ){
@@ -1900,7 +1945,7 @@ static void serverLoop(DoltliteServer *pSrv){
       }
     }
   }
-  for(i=0; i<nPending; i++) pendingClose(&aPending[i]);
+  for(i=0; i<nPending; i++) pendingClose(pSrv, &aPending[i]);
 }
 
 static void serverCleanup(DoltliteServer *pSrv){
