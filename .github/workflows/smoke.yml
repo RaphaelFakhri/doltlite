@@ -29,6 +29,46 @@ jobs:
         DOLTLITE_VC_STATEFUL_SECONDS=600 bash ../test/vc_stateful_fuzzer.sh ./doltlite
       timeout-minutes: 12
 
+  vc-model-stress:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        bash .github/scripts/install-apt-deps.sh zlib1g-dev gdb
+
+    - name: Download checked build
+      uses: actions/download-artifact@v4
+      with:
+        name: checked-build-ubuntu
+
+    - name: Extract checked build
+      run: tar -xzf checked-build-ubuntu.tar.gz
+
+    # A wedged worker is attached to by gdb from a sibling process.
+    - name: Allow stack capture of wedged workers
+      run: sudo sysctl -w kernel.yama.ptrace_scope=0
+
+    - name: Run multi-process version-control model stress
+      run: |
+        cd build
+        VCMODEL_SECONDS=600 VCMODEL_WEDGE_SEC=300 \
+        VCMODEL_OUT="$GITHUB_WORKSPACE/vc-model-stress" \
+          bash ../test/vc_model_stress.sh ./vc_model_stress_test
+      timeout-minutes: 22
+
+    - name: Upload failing runs
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: vc-model-stress-failures
+        path: vc-model-stress/
+        if-no-files-found: ignore
+        retention-days: 14
+
   # Single sequential job — these checks are short individually and we'd
   # rather not fan out runners. Crash → history-independence → fuzz, each
   # with its own out-of-tree build dir so they don't trip over each other.
