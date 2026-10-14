@@ -1510,6 +1510,7 @@ int doltliteMergeRef(
   char **azRebuildVtabs = 0;
   int nRebuildVtabs = 0;
   int nViolations = 0;
+  int bAutocommitLike = doltliteVcTxnMode(db)==DOLTLITE_VC_TXN_AUTOCOMMIT_LIKE;
   ProllyHash cleanWorkingSet;
 
   memset(&ourCommit, 0, sizeof(ourCommit));
@@ -1666,6 +1667,16 @@ int doltliteMergeRef(
     goto merge_fail;
   }
   if( rc!=SQLITE_OK ) goto merge_fail;
+  if( bAutocommitLike ){
+    /* Nested SQL since the dirty check can drop the write lock, letting a
+    ** peer write the working set this merge would replace. */
+    rc = doltliteConfirmWorkingSet(db, cs, &cleanWorkingSet);
+    if( rc!=SQLITE_OK ){
+      chunkStoreUnlock(cs);
+      bPeerBusy = rc==SQLITE_BUSY;
+      goto merge_fail;
+    }
+  }
   chunkStoreUnlock(cs);
 
   rc = doltliteSwitchCatalog(db, &mergedCatHash);
@@ -1795,6 +1806,12 @@ merge_fail:
   if( bHaveSaved ){
     if( bRestoreOnFail ){
       int restoreRc = doltliteRestoreTxnState(db, &savedState);
+      /* The saved state predates a peer write that landed in the lock gap;
+      ** keeping it would let the next write publish over the peer. */
+      if( restoreRc==SQLITE_OK && bAutocommitLike && !bPersistRestore
+       && doltliteConfirmWorkingSet(db, cs, &cleanWorkingSet)==SQLITE_BUSY ){
+        bPeerBusy = 1;
+      }
       if( restoreRc==SQLITE_OK && bPersistRestore ){
         restoreRc = doltliteRefreshAndConfirmHead(
             db, cs, &savedState.sessionHead);
