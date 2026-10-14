@@ -1932,7 +1932,10 @@ void doltliteTestFailPersistAtCall(int n);
 void doltliteTestClearFaults(void);
 void doltliteTestFailNextGetBranchWorkingSet(void);
 void doltliteTestSetMergeInstallHook(void (*xHook)(void*), void *pArg);
-void doltliteTestFailMergeAddColumnAt(int n);
+void doltliteTestFailMergeInstallStepAt(int n);
+int doltliteMergeInstallStepFails(void);
+int doltliteMergeAutocommitTxnBegin(sqlite3 *db, int *pbBegan);
+int doltliteMergeAutocommitTxnEnd(sqlite3 *db, int bBegan, int rc);
 void doltliteTestSetRebaseBeforeAdvanceHook(void (*xHook)(void));
 
 const char *doltliteGetAuthorName(sqlite3 *db);

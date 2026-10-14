@@ -33,10 +33,14 @@ void doltliteTestSetMergeInstallHook(void (*xHook)(void*), void *pArg){
   pTestMergeInstallArg = pArg;
 }
 
-static int nTestFailAddColumnAt = 0;
+static int nTestFailInstallStepAt = 0;
 
-void doltliteTestFailMergeAddColumnAt(int n){
-  nTestFailAddColumnAt = n;
+void doltliteTestFailMergeInstallStepAt(int n){
+  nTestFailInstallStepAt = n;
+}
+
+int doltliteMergeInstallStepFails(void){
+  return nTestFailInstallStepAt>0 && --nTestFailInstallStepAt==0;
 }
 
 static int mergeStoreCatalog(
@@ -1113,7 +1117,7 @@ static int mergeApplySchemaActionsInTxn(
                                       aSchemaActions[si].azAddColumns[sj]);
       if( !zAlter ) return SQLITE_NOMEM;
       db->mDbFlags |= DBFLAG_MergeSchemaAdd;
-      if( nTestFailAddColumnAt>0 && --nTestFailAddColumnAt==0 ){
+      if( doltliteMergeInstallStepFails() ){
         rc = SQLITE_BUSY;
         zErr = sqlite3_mprintf("%s", sqlite3ErrStr(rc));
       }else{
@@ -1166,34 +1170,20 @@ static int mergeApplySchemaActionsInTxn(
   return rc;
 }
 
-int doltliteApplyMergeSchemaActions(
-  sqlite3 *db,
-  const ProllyHash *pAncCatHash,
-  const ProllyHash *pTheirCatHash,
-  SchemaMergeAction *aSchemaActions,
-  int nSchemaActions,
-  ProllyHash *pMergedCatHash,
-  char **pzErr
-){
+/* In autocommit each nested statement commits and publishes on its own, so
+** a peer would read a half-installed merge, and a later statement that fails
+** leaves it on disk. One transaction publishes all of it or none. */
+int doltliteMergeAutocommitTxnBegin(sqlite3 *db, int *pbBegan){
   int rc = SQLITE_OK;
-  int bBegan = 0;
-
-  /* In autocommit each ALTER commits and publishes on its own: a peer would
-  ** see a half-applied merge schema, and a later ALTER that fails leaves it
-  ** on disk. */
+  *pbBegan = 0;
   if( db->autoCommit && db->nVdbeWrite==0 ){
     rc = sqlite3_exec(db, "BEGIN IMMEDIATE", 0, 0, 0);
-    bBegan = !db->autoCommit;
+    *pbBegan = !db->autoCommit;
   }
-  if( rc==SQLITE_OK ){
-    rc = mergeApplySchemaActionsInTxn(db, pAncCatHash, pTheirCatHash,
-                                      aSchemaActions, nSchemaActions,
-                                      pMergedCatHash, pzErr);
-  }else if( !*pzErr ){
-    *pzErr = sqlite3_mprintf(
-        "cannot merge: schema change could not be applied: %s",
-        sqlite3_errmsg(db));
-  }
+  return rc;
+}
+
+int doltliteMergeAutocommitTxnEnd(sqlite3 *db, int bBegan, int rc){
   if( bBegan && rc==SQLITE_OK ){
     rc = sqlite3_exec(db, "COMMIT", 0, 0, 0);
   }
@@ -1210,6 +1200,29 @@ int doltliteApplyMergeSchemaActions(
     db->nVcInterruptMask--;
   }
   return rc;
+}
+
+int doltliteApplyMergeSchemaActions(
+  sqlite3 *db,
+  const ProllyHash *pAncCatHash,
+  const ProllyHash *pTheirCatHash,
+  SchemaMergeAction *aSchemaActions,
+  int nSchemaActions,
+  ProllyHash *pMergedCatHash,
+  char **pzErr
+){
+  int bBegan;
+  int rc = doltliteMergeAutocommitTxnBegin(db, &bBegan);
+  if( rc==SQLITE_OK ){
+    rc = mergeApplySchemaActionsInTxn(db, pAncCatHash, pTheirCatHash,
+                                      aSchemaActions, nSchemaActions,
+                                      pMergedCatHash, pzErr);
+  }else if( !*pzErr ){
+    *pzErr = sqlite3_mprintf(
+        "cannot merge: schema change could not be applied: %s",
+        sqlite3_errmsg(db));
+  }
+  return doltliteMergeAutocommitTxnEnd(db, bBegan, rc);
 }
 
 static int mergeRefLoadCatalogs(
@@ -1290,14 +1303,20 @@ static int mergeRefInstallMergedCatalog(
   char **pzErr
 ){
   ProllyHash trackedBaseHash = *pMergedCat;
+  int bBegan;
   int rc;
 
   if( xTestMergeInstall ){
     xTestMergeInstall(pTestMergeInstallArg);
   }
 
+  bBegan = 0;
   rc = SQLITE_OK;
-  if( *pnSchemaActions > 0 ){
+  if( *pnSchemaActions>0 || *pnReindex>0
+   || (*pnRebuildVtabs>0 && nMergeConflicts==0) ){
+    rc = doltliteMergeAutocommitTxnBegin(db, &bBegan);
+  }
+  if( rc==SQLITE_OK && *pnSchemaActions > 0 ){
     rc = doltliteApplyMergeSchemaActions(db, pAncCat, pTheirCat,
                                          *paSchemaActions, *pnSchemaActions,
                                          pWorkingCat, pzErr);
@@ -1305,7 +1324,7 @@ static int mergeRefInstallMergedCatalog(
   freeSchemaMergeActions(*paSchemaActions, *pnSchemaActions);
   *paSchemaActions = 0;
   *pnSchemaActions = 0;
-  if( rc!=SQLITE_OK ) return rc;
+  if( rc!=SQLITE_OK ) goto install_sql_done;
 
   /* Adopted indexes cover only their branch's rows; rebuild over merged
   ** tables before the flush, conflicted rows included, since those hold our
@@ -1320,7 +1339,7 @@ static int mergeRefInstallMergedCatalog(
   doltliteFreeNameList(*pazReindex, *pnReindex);
   *pazReindex = 0;
   *pnReindex = 0;
-  if( rc!=SQLITE_OK ) return rc;
+  if( rc!=SQLITE_OK ) goto install_sql_done;
 
   /* Rebuild derived vtab shadows from merged %_base while the catalog
   ** is live. Populated only on otherwise conflict-free merges. */
@@ -1331,7 +1350,7 @@ static int mergeRefInstallMergedCatalog(
   doltliteFreeNameList(*pazRebuildVtabs, *pnRebuildVtabs);
   *pazRebuildVtabs = 0;
   *pnRebuildVtabs = 0;
-  if( rc!=SQLITE_OK ) return rc;
+  if( rc!=SQLITE_OK ) goto install_sql_done;
 
   /* sqlite_stat* is derived; ANALYZE after a clean merge. */
   if( nMergeConflicts==0 ){
@@ -1347,6 +1366,18 @@ static int mergeRefInstallMergedCatalog(
     if( hasStat1 ){
       (void)sqlite3_exec(db, "ANALYZE", 0, 0, 0);
     }
+  }
+
+install_sql_done:
+  rc = doltliteMergeAutocommitTxnEnd(db, bBegan, rc);
+  if( rc!=SQLITE_OK ){
+    doltliteFreeNameList(*pazReindex, *pnReindex);
+    *pazReindex = 0;
+    *pnReindex = 0;
+    doltliteFreeNameList(*pazRebuildVtabs, *pnRebuildVtabs);
+    *pazRebuildVtabs = 0;
+    *pnRebuildVtabs = 0;
+    return rc;
   }
 
   rc = doltliteFlushCatalogToHash(db, pWorkingCat);
