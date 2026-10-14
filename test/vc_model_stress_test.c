@@ -14,7 +14,8 @@
 ** VCMODEL_TRIPWIRE (recheck own rows after every op), VCMODEL_ICHECK
 ** (integrity_check after every op), VCMODEL_CNT (log row counts per op),
 ** VCMODEL_NO_REVERT, VCMODEL_NO_CP, VCMODEL_NO_CLEAN, VCMODEL_NO_RESET_TABLE,
-** VCMODEL_TRIP_NORETRY, VCMODEL_DBGEX (print excused rows and commits).
+** VCMODEL_TRIP_NORETRY, VCMODEL_DBGEX (print excused rows and commits),
+** VCMODEL_STALECHK (log a connection whose view lags a fresh reader's).
 */
 #include <stdio.h>
 #include <stdlib.h>
@@ -166,11 +167,23 @@ static void curBranch(Conn *c, char *z, int n){
   if( !z[0] ) snprintf(z, n, "?");
 }
 
-static long long aTrip[8192]; static int nTrip = 0;
-static sqlite3 *gTripDb = 0;
-static void tripAdd(long long id){ if( nTrip<8192 ) aTrip[nTrip++] = id; }
+static long long aTrip[8192]; static char aTripBr[8192][48]; static int nTrip = 0;
+static void tripAdd(long long id, const char *zBr){
+  if( nTrip>=8192 || !strcmp(zBr, "?") ) return;
+  aTrip[nTrip] = id;
+  snprintf(aTripBr[nTrip], sizeof(aTripBr[0]), "%s", zBr);
+  nTrip++;
+}
 static void tripRemove(long long id){
-  int i; for(i=0;i<nTrip;i++) if( aTrip[i]==id ){ aTrip[i] = aTrip[--nTrip]; return; }
+  int i;
+  for(i=0;i<nTrip;i++){
+    if( aTrip[i]==id ){
+      nTrip--;
+      aTrip[i] = aTrip[nTrip];
+      memcpy(aTripBr[i], aTripBr[nTrip], sizeof(aTripBr[0]));
+      return;
+    }
+  }
 }
 static long long newId(void){ return (long long)(gW+1)*100000000LL + (++idCtr); }
 
@@ -209,7 +222,7 @@ static void txnCommit(Conn *c){
       E = nowNs();
       for(i=0;i<c->nPend;i++){
         if( c->tainted ) logf_("U\t%lld", c->aPendId[i]);
-        else{ logf_("I\t%lld\t%s\t%lld\t%lld", c->aPendId[i], br, c->aPendS[i], E); tripAdd(c->aPendId[i]); }
+        else{ logf_("I\t%lld\t%s\t%lld\t%lld", c->aPendId[i], br, c->aPendS[i], E); tripAdd(c->aPendId[i], br); }
       }
       txnEnded(c);
       return;
@@ -252,7 +265,7 @@ static void opInsert(Conn *c){
     if( rc==SQLITE_OK ){
       logf_("I\t%lld\t%s\t%lld\t%lld", id1, br, S, E);
       if( id2 ) logf_("I\t%lld\t%s\t%lld\t%lld", id2, br, S, E);
-      tripAdd(id1); if( id2 ) tripAdd(id2);
+      tripAdd(id1, br); if( id2 ) tripAdd(id2, br);
       if( nMine<4096 ) aMine[nMine++] = id1;
       return;
     }
@@ -365,6 +378,7 @@ static int runOp(Conn *c, const char *zOp, const char *zSql, int wantVictim){
   return rc;
 }
 
+static void staleProbe(Conn *c, const char *zWhere);
 static int vc(Conn *c, const char *zOp, const char *zSql, int flags, const char *zTarget){
   char br[128];
   long long S, E;
@@ -385,6 +399,7 @@ static int vc(Conn *c, const char *zOp, const char *zSql, int flags, const char 
       if( flags ) logf_("X\t%d\t%s\t%lld\t%lld\t%s\t%s", flags, zTarget ? zTarget : br, (flags&FM) ? gVictimS : S, E, zOp, gVictim);
       return rc;
     }
+    staleProbe(c, zOp);
     if( c->inTxn || !isBusy(rc, gErr) || otherLocalTxn(c) ) return rc;
     usleep(rn(30000));
   }
@@ -454,16 +469,16 @@ static void opVc(Conn *c){
     vc(c, "checkout", sql, 0, 0);
   }else if( k<32 ){
     const char *o = otherBranch();
-    if( !c->inTxn && rn(2) ) opCommit(c);
+    if( !c->inTxn && rn(2) ){ opCommit(c); staleProbe(c, "commit"); }
     snprintf(sql, sizeof(sql), "SELECT dolt_merge(%s'%s')", rn(3)==0 ? "'--no-ff'," : "", o);
     vc(c, "merge", sql, 0, 0);
   }else if( k<38 ){
-    if( !c->inTxn && rn(2) ) opCommit(c);
+    if( !c->inTxn && rn(2) ){ opCommit(c); staleProbe(c, "commit"); }
     if( getenv("VCMODEL_NO_CP") ) return;
     snprintf(sql, sizeof(sql), "SELECT dolt_cherry_pick('%s')", otherBranch());
     if( vc(c, "cherry_pick", sql, 0, 0)==SQLITE_OK ) logRemoved(c);
   }else if( k<41 ){
-    if( !c->inTxn && rn(2) ) opCommit(c);
+    if( !c->inTxn && rn(2) ){ opCommit(c); staleProbe(c, "commit"); }
     if( getenv("VCMODEL_NO_REVERT") ) return;
     if( vc(c, "revert", "SELECT dolt_revert('HEAD')", 0, 0)==SQLITE_OK ) logRemoved(c);
   }else if( k<46 ){
@@ -607,58 +622,140 @@ static void workerStep(void){
   else opVc(c);
 }
 
+static int tripMissing(sqlite3 *db, const char *zBr, long long *aMissing, int *pnMissing){
+  sqlite3_stmt *st = 0;
+  char *zSql = sqlite3_mprintf("SELECT id FROM w WHERE id IN (");
+  int i, rc, nAsked = 0;
+  long long *aSeen = 0;
+  int nSeen = 0;
+  *pnMissing = 0;
+  for(i=0;i<nTrip;i++){
+    if( strcmp(aTripBr[i], zBr) ) continue;
+    zSql = sqlite3_mprintf("%z%s%lld", zSql, nAsked++ ? "," : "", aTrip[i]);
+  }
+  zSql = sqlite3_mprintf("%z)", zSql);
+  rc = sqlite3_prepare_v2(db, zSql, -1, &st, 0);
+  sqlite3_free(zSql);
+  if( rc ) return rc;
+  aSeen = malloc(sizeof(long long)*(nAsked+1));
+  while( (rc = sqlite3_step(st))==SQLITE_ROW ) aSeen[nSeen++] = sqlite3_column_int64(st, 0);
+  sqlite3_finalize(st);
+  if( rc==SQLITE_DONE ){
+    rc = SQLITE_OK;
+    for(i=0;i<nTrip;i++){
+      int j, f = 0;
+      if( strcmp(aTripBr[i], zBr) ) continue;
+      for(j=0;j<nSeen;j++) if( aSeen[j]==aTrip[i] ) f = 1;
+      if( !f ) aMissing[(*pnMissing)++] = aTrip[i];
+    }
+  }
+  free(aSeen);
+  return rc;
+}
+
 static void tripCheck(void){
-  char *zSql; sqlite3_stmt *st = 0; int i, n = 0, rc;
+  static char azBr[8][48];
+  static sqlite3 *apDb[8];
+  static int nBr = 0;
+  static long long aMissing[8192];
   char path[700];
+  int i, j, nMissing, rc;
   if( !getenv("VCMODEL_TRIPWIRE") || nTrip==0 ) return;
   snprintf(path, sizeof(path), "%s/TRIPPED", zDir);
   if( access(path, F_OK)==0 ){ logf_("NOTE\tpeer tripped, stopping"); fflush(gLog); _exit(0); }
-  if( !gTripDb ){
-    snprintf(path, sizeof(path), "%s@%s", zDb, getenv("VCMODEL_FOCUS") ? getenv("VCMODEL_FOCUS") : "b3");
-    sqlite3_open(path, &gTripDb);
-    sqlite3_busy_timeout(gTripDb, 2000);
-  }
-  zSql = sqlite3_mprintf("SELECT id FROM w WHERE id IN (");
-  for(i=0;i<nTrip;i++) zSql = sqlite3_mprintf("%z%s%lld", zSql, i?",":"", aTrip[i]);
-  zSql = sqlite3_mprintf("%z)", zSql);
-  rc = sqlite3_prepare_v2(gTripDb, zSql, -1, &st, 0);
-  sqlite3_free(zSql);
-  if( rc ){ logf_("NOTE\ttrip prepare %s", sqlite3_errmsg(gTripDb)); return; }
-  {
-    long long *aSeen = malloc(sizeof(long long)*(nTrip+1)); int nSeen = 0;
-    while( (rc = sqlite3_step(st))==SQLITE_ROW ) aSeen[nSeen++] = sqlite3_column_int64(st, 0);
-    sqlite3_finalize(st);
-    if( rc!=SQLITE_DONE ){ free(aSeen); logf_("NOTE\ttrip step rc=%d", rc); return; }
-    n = nSeen;
-    if( n!=nTrip && !getenv("VCMODEL_TRIP_NORETRY") ){
-      /* a reader can be served stale data while a peer commits; re-read */
-      int again;
-      usleep(50000);
-      zSql = sqlite3_mprintf("SELECT id FROM w WHERE id IN (");
-      for(i=0;i<nTrip;i++) zSql = sqlite3_mprintf("%z%s%lld", zSql, i?",":"", aTrip[i]);
-      zSql = sqlite3_mprintf("%z)", zSql);
-      if( sqlite3_prepare_v2(gTripDb, zSql, -1, &st, 0)==SQLITE_OK ){
-        nSeen = 0;
-        while( sqlite3_step(st)==SQLITE_ROW ) aSeen[nSeen++] = sqlite3_column_int64(st, 0);
-      }
-      sqlite3_finalize(st); sqlite3_free(zSql);
-      again = nSeen;
-      if( again==nTrip ){ logf_("STALEREAD\t%lld\t%d missing then visible", nowNs(), nTrip-n); n = again; }
-      else n = again;
+  for(i=0;i<nTrip;i++){
+    for(j=0;j<nBr;j++) if( !strcmp(azBr[j], aTripBr[i]) ) break;
+    if( j==nBr && nBr<8 ){
+      snprintf(azBr[nBr], sizeof(azBr[0]), "%.47s", aTripBr[i]);
+      snprintf(path, sizeof(path), "%s@%s", zDb, azBr[nBr]);
+      sqlite3_open(path, &apDb[nBr]);
+      sqlite3_busy_timeout(apDb[nBr], 2000);
+      nBr++;
     }
-    if( n!=nTrip ){
+  }
+  for(j=0;j<nBr;j++){
+    rc = tripMissing(apDb[j], azBr[j], aMissing, &nMissing);
+    if( rc ){ logf_("NOTE\ttrip %s rc=%d %s", azBr[j], rc, sqlite3_errmsg(apDb[j])); continue; }
+    if( nMissing && !getenv("VCMODEL_TRIP_NORETRY") ){
+      /* A reader can be served stale data while a peer commits; re-read. */
+      usleep(50000);
+      rc = tripMissing(apDb[j], azBr[j], aMissing, &nMissing);
+      if( rc ) continue;
+    }
+    if( nMissing ){
       long long now = nowNs();
-      for(i=0;i<nTrip;i++){
-        int j, f = 0; for(j=0;j<nSeen;j++) if( aSeen[j]==aTrip[i] ) f = 1;
-        if( !f ) logf_("TRIP\t%lld\tmissing\t%lld", now, aTrip[i]);
-      }
+      for(i=0;i<nMissing;i++) logf_("TRIP\t%lld\tmissing\t%lld\t%s", now, aMissing[i], azBr[j]);
       snprintf(path, sizeof(path), "%s/TRIPPED", zDir);
       { FILE *f = fopen(path, "w"); if( f ) fclose(f); }
       fflush(gLog);
       _exit(7);
     }
-    free(aSeen);
   }
+}
+
+static void hashOf(sqlite3 *db, char *z, int n){
+  sqlite3_stmt *st = 0;
+  z[0] = 0;
+  if( sqlite3_prepare_v2(db, "SELECT dolt_hashof_table('w')", -1, &st, 0)==SQLITE_OK
+   && sqlite3_step(st)==SQLITE_ROW && sqlite3_column_text(st, 0) ){
+    snprintf(z, n, "%s", (const char*)sqlite3_column_text(st, 0));
+  }
+  sqlite3_finalize(st);
+}
+
+/* After an autocommit op the connection must read what a fresh reader of its
+** branch reads. A session that disagrees and does not move on a reread holds
+** a stale view it believes is current, which its next write would publish. */
+static int staleDetect(Conn *c, char *zDetail, int nDetail){
+  static char azBr[8][48];
+  static sqlite3 *apDb[8];
+  static int nBr = 0;
+  char br[128], path[800], hConn[64], hConn2[64], hFresh[64], hFresh2[64];
+  int j;
+  if( c->inTxn || !sqlite3_get_autocommit(c->db) ) return 0;
+  curBranch(c, br, sizeof(br));
+  if( !strcmp(br, "?") ) return 0;
+  for(j=0;j<nBr;j++) if( !strcmp(azBr[j], br) ) break;
+  if( j==nBr ){
+    if( nBr==8 ) return 0;
+    snprintf(azBr[nBr], sizeof(azBr[0]), "%.47s", br);
+    snprintf(path, sizeof(path), "%s@%s", zDb, br);
+    if( sqlite3_open_v2(path, &apDb[nBr], SQLITE_OPEN_READONLY, 0)!=SQLITE_OK ) return 0;
+    sqlite3_busy_timeout(apDb[nBr], 2000);
+    nBr++;
+  }
+  hashOf(c->db, hConn, sizeof(hConn));
+  hashOf(apDb[j], hFresh, sizeof(hFresh));
+  if( !hConn[0] || !hFresh[0] || !strcmp(hConn, hFresh) ) return 0;
+  usleep(20000);
+  hashOf(c->db, hConn2, sizeof(hConn2));
+  hashOf(apDb[j], hFresh2, sizeof(hFresh2));
+  if( !strcmp(hConn2, hFresh2) || strcmp(hConn, hConn2) ) return 0;
+  snprintf(zDetail, nDetail, "c%d\t%s\tconn=%s\tfresh=%s", (int)(c-aC), br, hConn2, hFresh2);
+  return 1;
+}
+
+static void staleProbe(Conn *c, const char *zWhere){
+  char z[300], path[700];
+  if( getenv("VCMODEL_STALECHK") && staleDetect(c, z, sizeof(z)) ){
+    logf_("STALEAT\t%lld\t%s\t%s", nowNs(), zWhere, z);
+    if( !strstr(z, "\tb3\t") ){
+      snprintf(path, sizeof(path), "%s/TRIPPED", zDir);
+      { FILE *f = fopen(path, "w"); if( f ) fclose(f); }
+      fflush(gLog);
+      _exit(7);
+    }
+  }
+}
+
+static void staleCheck(void){
+  char z[300], path[700];
+  if( !getenv("VCMODEL_STALECHK") || !staleDetect(&aC[gLastStepConn], z, sizeof(z)) ) return;
+  logf_("STALE\t%lld\t%s", nowNs(), z);
+  snprintf(path, sizeof(path), "%s/TRIPPED", zDir);
+  { FILE *f = fopen(path, "w"); if( f ) fclose(f); }
+  fflush(gLog);
+  _exit(7);
 }
 
 static void icheck(void){
@@ -732,6 +829,7 @@ static void runWorker(int w, int rfd, int wfd){
       }
       tripCheck();
       icheck();
+      staleCheck();
     }
     closeTxns();
     {
