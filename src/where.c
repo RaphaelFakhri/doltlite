@@ -3439,6 +3439,7 @@ static int whereLoopAddBtreeIndex(
     int nRecValid = pBuilder->nRecValid;
 #endif
 #ifdef DOLTLITE_PROLLY
+    if( pProbe->bNumericDesc ) continue;
     /* Range and ORDER BY stay off via bUnordered. Equality of a
     ** NUL-free literal still seeks; a probe that may contain a NUL
     ** has to scan so every equal key is returned. */
@@ -4322,10 +4323,21 @@ static int whereLoopAddBtree(
     if( pProbe->idxType!=SQLITE_IDXTYPE_IPK ){
       int iDb = sqlite3SchemaToIndex(db, pProbe->pSchema);
       int hasNocaseNul = 0;
+      int hasNumericDesc = 0;
       int nOrderCol = IsPrimaryKeyIndex(pProbe)
         ? pProbe->nKeyCol : pProbe->nColumn;
       if( iDb>=0 && iDb<db->nDb && db->aDb[iDb].pBt
        && !sqlite3BtreeUsesOrig(db->aDb[iDb].pBt) ){
+        int iCol;
+        for(iCol=1; iCol<nOrderCol; iCol++){
+          if( !pProbe->aSortOrder[iCol-1] && pProbe->aSortOrder[iCol] ){
+            rc = sqlite3BtreeProllyIndexHasWideNumericDesc(
+                db->aDb[iDb].pBt, pProbe->tnum, &hasNumericDesc);
+            if( pWInfo->pParse->pTriggerTab ) hasNumericDesc = 1;
+            break;
+          }
+        }
+        if( rc!=SQLITE_OK ) break;
         /* Ask every time rather than latch the first positive answer: the
         ** key that made it positive can be deleted, and the index is then
         ** ordered again. The btree memoises this, so asking is cheap. */
@@ -4344,16 +4356,17 @@ static int whereLoopAddBtree(
           }
         }
         pProbe->bNocaseNul = hasNocaseNul ? 1 : 0;
+        pProbe->bNumericDesc = hasNumericDesc ? 1 : 0;
       }
-      if( pProbe->bNocaseNul ){
+      if( pProbe->bNocaseNul || pProbe->bNumericDesc ){
         if( !pProbe->bUnordered ){
           pProbe->bUnordered = 1;
-          pProbe->bNocaseNulUnordered = 1;
+          pProbe->bProllyUnordered = 1;
         }
-      }else if( pProbe->bNocaseNulUnordered ){
+      }else if( pProbe->bProllyUnordered ){
         /* Only ever undo what this made unordered; ANALYZE's verdict stands. */
         pProbe->bUnordered = 0;
-        pProbe->bNocaseNulUnordered = 0;
+        pProbe->bProllyUnordered = 0;
       }
     }
 #endif

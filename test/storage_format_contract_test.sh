@@ -70,6 +70,23 @@ else
   dltest_fail "corpus_v12_checksum" "  expected $expected_sha, got $actual_sha"
 fi
 
+if python3 - "$CORPUS_DIR" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+manifest = dict(line.split("=", 1) for line in
+                (root / "numeric-desc-v0.50.14.manifest").read_text().splitlines())
+assert manifest["writer_release"] == "v0.50.14"
+assert hashlib.sha256((root / manifest["file"]).read_bytes()).hexdigest() == manifest["sha256"]
+PY
+then
+  dltest_pass
+else
+  dltest_fail "numeric_desc_v12_checksum" "  legacy numeric/DESC fixture changed"
+fi
+
 hdr_ver="$(python3 -c "
 import re,sys
 h=open(sys.argv[1]).read()

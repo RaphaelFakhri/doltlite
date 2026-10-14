@@ -488,7 +488,7 @@ static int indexMovetoBuildSeekKey(
       pCur->nSeekSortKeyAlloc = 0;
     }
     rc = sortKeyFromUnpackedIntRecordBuffer(
-        pIdxKey, nIntField, pCur->pKeyInfo,
+        pIdxKey, nIntField,
         &pCur->pSeekSortKey, &pCur->nSeekSortKeyAlloc, &nSortKey);
   }else{
     if( pCur->pSeekSortKey==pCur->aSeekSortKey ){
@@ -592,6 +592,23 @@ static int indexMovetoExactMutMap(
   return SQLITE_OK;
 }
 
+static int unpackedRecordHasWideNumericDescPrefix(
+  const KeyInfo *pKeyInfo,
+  const UnpackedRecord *pIdxKey
+){
+  int i = pIdxKey->nField - 1;
+  const Mem *pMem;
+  if( i<0 || i+1>=pKeyInfo->nAllField || !pKeyInfo->aSortFlags
+   || (pKeyInfo->aSortFlags[i] & KEYINFO_ORDER_DESC)
+   || !(pKeyInfo->aSortFlags[i+1] & KEYINFO_ORDER_DESC) ) return 0;
+  pMem = &pIdxKey->aMem[i];
+  if( pMem->flags & (MEM_Int|MEM_IntReal) ){
+    return pMem->u.i>=9007199254740992LL || pMem->u.i<=-9007199254740992LL;
+  }
+  return (pMem->flags & MEM_Real)
+      && (pMem->u.r>=9007199254740992.0 || pMem->u.r<=-9007199254740992.0);
+}
+
 static int indexMovetoCustomCollation(
   BtCursor *pCur,
   UnpackedRecord *pIdxKey,
@@ -615,6 +632,7 @@ static int indexMovetoCustomCollation(
   ** bytes after a NUL, so an equality seek has to compare the records. */
   hasNocaseNul = unpackedRecordHasNocaseNul(pCur->pKeyInfo, pIdxKey);
   if( !hasNocaseNul
+   && !unpackedRecordHasWideNumericDescPrefix(pCur->pKeyInfo, pIdxKey)
    && (!(exactMutMapKey || pIdxKey->nField >= pCur->pKeyInfo->nAllField)
        || !keyInfoHasUnsupportedCollation(
             pCur->pKeyInfo,
