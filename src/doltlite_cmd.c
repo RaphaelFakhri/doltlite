@@ -829,6 +829,7 @@ static int cmdFinishPlainAfterReport(
 
 static int cmdPersistRestored(
   sqlite3 *db,
+  const ProllyHash *pCatalog,
   const ProllyHash *pHead,
   const ProllyHash *pWsBasis,
   u32 nWsForeignAdopt
@@ -836,7 +837,10 @@ static int cmdPersistRestored(
   int bLocked, bPeerWrote;
   int rc = doltliteLockForRestore(db, pHead, pWsBasis, nWsForeignAdopt,
                                   &bLocked, &bPeerWrote);
-  if( rc==SQLITE_OK && !bPeerWrote ) rc = doltlitePersistWorkingSet(db);
+  if( rc==SQLITE_OK && !bPeerWrote ){
+    rc = doltlitePersistWorkingSetWithHash(db, pCatalog);
+    if( rc==SQLITE_OK ) doltliteAdoptRollbackBaseline(db, pCatalog);
+  }
   if( bLocked ) chunkStoreUnlock(doltliteGetChunkStore(db));
   return rc;
 }
@@ -865,8 +869,8 @@ static int cmdRollbackAutocommitConflict(
     if( rc==SQLITE_OK ) rc = rc2;
   }
   if( rc==SQLITE_OK ){
-    rc = cmdPersistRestored(db, &pSaved->sessionHead, &wsBasis,
-                            nWsForeignAdopt);
+    rc = cmdPersistRestored(db, &pSaved->sessionCatalogHash,
+                            &pSaved->sessionHead, &wsBasis, nWsForeignAdopt);
   }
   doltliteTxnStateClear(pSaved);
   if( rc==SQLITE_OK && hadTopLevelSavepoint ){
