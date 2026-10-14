@@ -455,6 +455,58 @@ static void test_merge_install_unlock_window(void){
   closeRm(db1, zPath);
 }
 
+static void peerWriteDuringInstall(void *pArg){
+  PeerCommit *p = (PeerCommit*)pArg;
+  p->rc = sqlite3_exec(p->db, "INSERT INTO t(id,v) VALUES(99,'peer')", 0, 0, 0);
+}
+
+/* A peer's uncommitted write in the install window makes the merge's reindex
+** fail. The merge must then reload the branch, not restore its pre-merge
+** session, or the session's next write erases the peer's row. */
+static void test_merge_install_peer_write_kept(void){
+  char zPath[256];
+  sqlite3 *db1, *db2 = 0;
+  char *zErr = 0;
+  PeerCommit peer;
+  int nPeer = -1, rc;
+
+  snprintf(zPath, sizeof(zPath), DOLTLITE_TEST_TMPDIR "/cas_swallow_peerws_%d.db", (int)getpid());
+  db1 = openDb(zPath);
+  check("peerws: open", db1!=0);
+  if( !db1 ) return;
+  doltliteTestClearFaults();
+  check("peerws: setup", exec(db1,
+    "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);"
+    "INSERT INTO t VALUES(1,'a');"
+    "SELECT dolt_commit('-Am','base');"
+    "SELECT dolt_branch('feat');"
+    "SELECT dolt_checkout('feat');"
+    "CREATE INDEX tv ON t(v);"
+    "INSERT INTO t VALUES(3,'c');"
+    "SELECT dolt_commit('-Am','feat index');"
+    "SELECT dolt_checkout('main');"
+    "INSERT INTO t VALUES(2,'b');"
+    "SELECT dolt_commit('-Am','main row');")==SQLITE_OK);
+  check("peerws: peer open", sqlite3_open(zPath, &db2)==SQLITE_OK);
+  sqlite3_busy_timeout(db2, 0);
+  peer.db = db2;
+  peer.rc = SQLITE_ERROR;
+  doltliteTestSetMergeInstallHook(peerWriteDuringInstall, &peer);
+  rc = execQuiet(db1, "SELECT dolt_merge('--no-ff','feat')", &zErr);
+  doltliteTestSetMergeInstallHook(0, 0);
+  check("peerws: peer write acknowledged", peer.rc==SQLITE_OK);
+  check("peerws: merge yields BUSY",
+        rc!=SQLITE_OK && zErr && strstr(zErr, "another connection")!=0);
+  check("peerws: follow-up write", exec(db1,
+    "INSERT INTO t(id,v) VALUES(50,'after')")==SQLITE_OK);
+  check("peerws: peer row kept",
+        queryInt(db2, "SELECT count(*) FROM t WHERE id=99", &nPeer)==SQLITE_OK
+        && nPeer==1);
+  sqlite3_free(zErr);
+  sqlite3_close(db2);
+  closeRm(db1, zPath);
+}
+
 /* A fast-forward becomes irreversible once the branch ref moves. An interrupt
 ** that arrives after that point cannot be honoured, and reporting it would
 ** describe a merge that did happen as one that did not. */
@@ -515,6 +567,7 @@ int main(void){
   test_conflicts_resolve_boundary_interrupt(1);
   test_branch_move_ws_read_failure();
   test_merge_install_unlock_window();
+  test_merge_install_peer_write_kept();
   test_ff_interrupt_after_advance();
   printf("vc_cas_swallow_test: %d passed, %d failed\n", nPass, nFail);
   return nFail ? 1 : 0;
