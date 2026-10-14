@@ -3758,6 +3758,112 @@ static void run_push_validation_reads_new_chunks(void){
   removeDbFiles(dbpath);
 }
 
+typedef struct FetchValidationReads FetchValidationReads;
+struct FetchValidationReads {
+  ChunkStore *pStore;
+  u64 before;
+  int fired;
+};
+
+static void fetchValidationStart(void *pArg){
+  FetchValidationReads *p = (FetchValidationReads*)pArg;
+  p->before = p->pStore->pStats->nChunkRead;
+  p->fired++;
+}
+
+static void run_fetch_validation_reads_new_chunks(void){
+  int mode;
+  for(mode=0; mode<2; mode++){
+    sqlite3 *remoteDb = 0, *localDb = 0;
+    char remotePath[256], localPath[256], sql[1024], name[96];
+    FetchValidationReads reads;
+    ChunkStore *cs;
+    u64 nRead;
+    int rc, i;
+    make_dbpath(remotePath, sizeof(remotePath), "test_fetch_validation_remote");
+    make_dbpath(localPath, sizeof(localPath), "test_fetch_validation_local");
+    removeDbFiles(remotePath);
+    removeDbFiles(localPath);
+    check("fvr_open_remote", open_db(remotePath, &remoteDb)==SQLITE_OK);
+    check("fvr_seed", execSql(remoteDb,
+      "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);"
+      "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x<20000)"
+      " INSERT INTO t SELECT x, printf('%0100d', x) FROM c;"
+      "SELECT dolt_commit('-Am','big');")==SQLITE_OK);
+    for(i=0; i<12; i++){
+      snprintf(sql, sizeof(sql),
+          "UPDATE t SET v=printf('%%0100d',%d) WHERE id=1;"
+          "SELECT dolt_commit('-am','old%d')", i, i);
+      check("fvr_old_history", execSql(remoteDb, sql)==SQLITE_OK);
+    }
+    check("fvr_open_local", open_db(localPath, &localDb)==SQLITE_OK);
+    snprintf(sql, sizeof(sql), "SELECT dolt_clone('file://%s')", remotePath);
+    check("fvr_clone", execSql(localDb, sql)==SQLITE_OK);
+    if( mode==1 ){
+      check("fvr_hold_branch", execSql(localDb, "SELECT dolt_branch('held')")==SQLITE_OK);
+    }
+    check("fvr_local_diverges", execSql(localDb,
+      "DROP TABLE t;"
+      "CREATE TABLE app(id INTEGER PRIMARY KEY);"
+      "INSERT INTO app VALUES(1);"
+      "SELECT dolt_commit('-Am','local');")==SQLITE_OK);
+    if( mode==1 ){
+      snprintf(sql, sizeof(sql), "SELECT dolt_remote('add','upstream','file://%s')", remotePath);
+      check("fvr_named_remote", execSql(localDb, sql)==SQLITE_OK);
+    }
+    check("fvr_remote_advances", execSql(remoteDb,
+      "INSERT INTO t VALUES(20001,'one');"
+      "SELECT dolt_commit('-am','one row');")==SQLITE_OK);
+    cs = doltliteGetChunkStore(localDb);
+    memset(&reads, 0, sizeof(reads));
+    reads.pStore = cs;
+    doltliteTestSetBeforeRefInstallHook(fetchValidationStart, &reads);
+    snprintf(sql, sizeof(sql), "SELECT dolt_fetch('%s','main')", mode ? "upstream" : "origin");
+    rc = execSql(localDb, sql);
+    doltliteTestSetBeforeRefInstallHook(0, 0);
+    nRead = cs->pStats->nChunkRead - reads.before;
+    check("fvr_fetch", rc==SQLITE_OK && reads.fired==1);
+    printf("  %s anchor validation chunk reads: %llu\n",
+           mode ? "branch" : "tracking", (unsigned long long)nRead);
+    snprintf(name, sizeof(name), "fetch_validation_%s_reads_new_chunks", mode ? "branch" : "tracking");
+    check(name, nRead<100);
+    snprintf(sql, sizeof(sql), "SELECT count(*) FROM dolt_at_t('%s/main')", mode ? "upstream" : "origin");
+    check("fvr_tracking_rows", strcmp(queryScalarText(localDb, sql), "20001")==0);
+    check("fvr_local_rows_kept", strcmp(queryScalarText(localDb, "SELECT count(*) FROM app"), "1")==0);
+    check("fvr_local_tip_kept", strcmp(queryScalarText(localDb,
+        "SELECT message FROM dolt_log('main') LIMIT 1"), "local")==0);
+    check("fvr_integrity", strcmp(queryScalarText(localDb, "PRAGMA integrity_check"), "ok")==0);
+    check("fvr_close_local", sqlite3_close(localDb)==SQLITE_OK);
+    check("fvr_reopen_local", open_db(localPath, &localDb)==SQLITE_OK);
+    check("fvr_reopened_tracking_rows", strcmp(queryScalarText(localDb, sql), "20001")==0);
+    if( mode==0 ){
+      check("fvr_remote_advances_again", execSql(remoteDb,
+        "INSERT INTO t VALUES(20002,'two');"
+        "SELECT dolt_commit('-am','two rows');")==SQLITE_OK);
+      gGcWindowPath = localPath;
+      doltliteTestSetBeforeRefInstallHook(gcInFetchWindow, 0);
+      rc = execSqlSilent(localDb, "SELECT dolt_fetch('origin','main')");
+      doltliteTestSetBeforeRefInstallHook(0, 0);
+      gGcWindowPath = 0;
+      if( gGcWindowCollected ){
+        check("fvr_missing_new_chunks_busy", (rc&0xff)==SQLITE_BUSY);
+        check("fvr_missing_new_chunks_keeps_tracking",
+              strcmp(queryScalarText(localDb, sql), "20001")==0);
+      }else{
+        printf("  SKIP: fvr_missing_new_chunks_busy (in-window gc unavailable)\n");
+      }
+      check("fvr_retry_fetch", execSql(localDb, "SELECT dolt_fetch('origin','main')")==SQLITE_OK);
+      check("fvr_retry_rows", strcmp(queryScalarText(localDb, sql), "20002")==0);
+      check("fvr_retry_local_rows", strcmp(queryScalarText(localDb, "SELECT count(*) FROM app"), "1")==0);
+      check("fvr_retry_integrity", strcmp(queryScalarText(localDb, "PRAGMA integrity_check"), "ok")==0);
+    }
+    sqlite3_close(localDb);
+    sqlite3_close(remoteDb);
+    removeDbFiles(remotePath);
+    removeDbFiles(localPath);
+  }
+}
+
 static void run_fetch_window_gc_named_remote(void){
   sqlite3 *remoteDb = 0;
   sqlite3 *localDb = 0;
@@ -18404,6 +18510,7 @@ static const RegressionCase aCases[] = {
   { "remote_refs_corruption", "Remote Refs Corruption Test", run_remote_refs_corruption },
   { "fetch_ref_install_survives_window_gc", "Fetch Ref Install Survives Window GC Test", run_fetch_ref_install_survives_window_gc },
   { "push_validation_reads_new_chunks", "Push Validation Reads New Chunks Test", run_push_validation_reads_new_chunks },
+  { "fetch_validation_reads_new_chunks", "Fetch Validation Reads New Chunks Test", run_fetch_validation_reads_new_chunks },
   { "fetch_window_gc_named_remote", "Fetch Window GC Named Remote Test", run_fetch_window_gc_named_remote },
   { "clone_ref_install_survives_window_gc", "Clone Ref Install Survives Window GC Test", run_clone_ref_install_survives_window_gc },
   { "clone_deleted_branch_installs_nothing", "Clone Deleted Branch Installs Nothing Test", run_clone_deleted_branch_installs_nothing },
