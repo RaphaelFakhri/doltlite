@@ -512,6 +512,120 @@ static void test_process_peer_write_kept(const char *zName, const char *zSql){
   check(zCheck, k>1 && nLost==0);
 }
 
+typedef struct AddFlushPeer AddFlushPeer;
+struct AddFlushPeer {
+  int toPeer[2];
+  int fromPeer[2];
+  int fired;
+  int peerRc;
+  int txnState;
+  int waitForCommit;
+};
+
+static int fireAddFlushPeer(unsigned event, void *arg, void *stmt, void *elapsed){
+  AddFlushPeer *p = (AddFlushPeer*)arg;
+  const char *sql = sqlite3_sql((sqlite3_stmt*)stmt);
+  char ch = 'g';
+  (void)elapsed;
+  if( event!=SQLITE_TRACE_PROFILE || p->fired || !sql ) return 0;
+  if( sqlite3_stricmp(sql, "COMMIT")==0 ){
+    p->waitForCommit = 0;
+    return 0;
+  }
+  if( p->waitForCommit || strstr(sql, "SELECT name, rootpage, sql")==0 ){
+    return 0;
+  }
+  p->fired = 1;
+  p->txnState = sqlite3_txn_state(sqlite3_db_handle(stmt), "main");
+  if( write(p->toPeer[1], &ch, 1)!=1
+   || read(p->fromPeer[0], &p->peerRc, sizeof(p->peerRc))!=sizeof(p->peerRc) ){
+    p->fired = -1;
+  }
+  return 0;
+}
+
+static void test_process_add_flush_lock(const char *zArg, int boundary){
+  sqlite3 *db = 0;
+  AddFlushPeer p;
+  char zPath[300], zSql[128], zCheck[128], zHead[64];
+  pid_t pid;
+  int status = 0, rc, retryRc = SQLITE_ERROR;
+  char ch = 'r';
+  snprintf(zPath, sizeof(zPath), "%s/add-flush.db", zDir);
+  remove(zPath);
+  check("add_flush_open", sqlite3_open(zPath, &db)==SQLITE_OK);
+  check("add_flush_seed", execSql(db,
+      "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);"
+      "CREATE TABLE u(x INTEGER PRIMARY KEY);"
+      "SELECT dolt_commit('-Am','init');"
+      "INSERT INTO t VALUES(3,'dirty')")==SQLITE_OK);
+  snprintf(zHead, sizeof(zHead), "%s", queryText(db, "SELECT dolt_hashof('HEAD')"));
+  sqlite3_close(db);
+  memset(&p, 0, sizeof(p));
+  p.waitForCommit = boundary==2;
+  if( pipe(p.toPeer) || pipe(p.fromPeer) ){ perror("pipe"); exit(1); }
+  pid = fork();
+  if( pid<0 ){ perror("fork"); exit(1); }
+  if( pid==0 ){
+    sqlite3 *peer = 0;
+    int peerRc = sqlite3_open(zPath, &peer);
+    if( read(p.toPeer[0], &ch, 1)!=1 ) _exit(1);
+    if( peerRc==SQLITE_OK ) peerRc = execSql(peer, "INSERT INTO u VALUES(1)");
+    if( write(p.fromPeer[1], &peerRc, sizeof(peerRc))!=sizeof(peerRc) ) _exit(1);
+    if( read(p.toPeer[0], &ch, 1)!=1 ) _exit(1);
+    if( (peerRc&255)==SQLITE_BUSY || (peerRc&255)==SQLITE_LOCKED ){
+      sqlite3_busy_timeout(peer, 5000);
+      peerRc = execSql(peer, "INSERT INTO u VALUES(1)");
+    }
+    sqlite3_close(peer);
+    if( write(p.fromPeer[1], &peerRc, sizeof(peerRc))!=sizeof(peerRc) ) _exit(1);
+    _exit(0);
+  }
+  check("add_flush_parent_open", sqlite3_open(zPath, &db)==SQLITE_OK);
+  sqlite3_busy_timeout(db, 5000);
+  if( boundary==1 ) check("add_flush_begin", execSql(db, "BEGIN")==SQLITE_OK);
+  if( boundary==2 ) check("add_flush_savepoint", execSql(db, "SAVEPOINT caller")==SQLITE_OK);
+  if( boundary==3 ) check("add_flush_nested", execSql(db, "BEGIN; SAVEPOINT caller")==SQLITE_OK);
+  sqlite3_trace_v2(db, SQLITE_TRACE_PROFILE, fireAddFlushPeer, &p);
+  snprintf(zSql, sizeof(zSql), "SELECT dolt_add('%s')", zArg);
+  rc = execSql(db, zSql);
+  sqlite3_trace_v2(db, 0, 0, 0);
+  snprintf(zCheck, sizeof(zCheck), "process_add_flush_%s_%d_lock_held", zArg, boundary);
+  check(zCheck, p.fired==1 && p.txnState==SQLITE_TXN_WRITE
+      && (p.peerRc&255)==SQLITE_BUSY);
+  snprintf(zCheck, sizeof(zCheck), "process_add_flush_%s_%d_success", zArg, boundary);
+  check(zCheck, rc==SQLITE_OK);
+  check("add_flush_caller_boundary", sqlite3_get_autocommit(db)==(boundary==0 || boundary==2));
+  if( !sqlite3_get_autocommit(db) ) check("add_flush_commit", execSql(db, "COMMIT")==SQLITE_OK);
+  if( !p.fired ){
+    ch = 'g';
+    if( write(p.toPeer[1], &ch, 1)!=1
+     || read(p.fromPeer[0], &p.peerRc, sizeof(p.peerRc))!=sizeof(p.peerRc) ) exit(1);
+  }
+  ch = 'r';
+  if( write(p.toPeer[1], &ch, 1)!=1
+   || read(p.fromPeer[0], &retryRc, sizeof(retryRc))!=sizeof(retryRc) ) exit(1);
+  check("add_flush_peer_retry", retryRc==SQLITE_OK);
+  waitpid(pid, &status, 0);
+  check("add_flush_peer_exit", WIFEXITED(status) && WEXITSTATUS(status)==0);
+  close(p.toPeer[0]); close(p.toPeer[1]);
+  close(p.fromPeer[0]); close(p.fromPeer[1]);
+  check("add_flush_followup_clean", execSql(db, "SELECT dolt_clean()")==SQLITE_OK);
+  sqlite3_close(db);
+  sqlite3_open(zPath, &db);
+  snprintf(zCheck, sizeof(zCheck), "process_peer_write_kept_add_%s_%d", zArg, boundary);
+  check(zCheck, strcmp(queryText(db, "SELECT count(*) FROM u WHERE x=1"), "1")==0);
+  check("add_flush_dirty_kept", strcmp(queryText(db, "SELECT count(*) FROM t WHERE id=3"), "1")==0);
+  check("add_flush_head_unchanged", strcmp(queryText(db, "SELECT dolt_hashof('HEAD')"), zHead)==0);
+  check("add_flush_staged_commit", execSql(db, "SELECT dolt_commit('-m','staged')")==SQLITE_OK);
+  check("add_flush_staged_t", strcmp(queryText(db, "SELECT count(*) FROM dolt_at_t('HEAD') WHERE id=3"), "1")==0);
+  check("add_flush_unstaged_u", strcmp(queryText(db, "SELECT count(*) FROM dolt_at_u('HEAD')"), "0")==0);
+  check("add_flush_peer_kept_after_commit", strcmp(queryText(db, "SELECT count(*) FROM u WHERE x=1"), "1")==0);
+  check("add_flush_integrity", strcmp(queryText(db, "PRAGMA integrity_check"), "ok")==0);
+  sqlite3_close(db);
+  remove(zPath);
+}
+
 int main(void){
   int i;
   setvbuf(stdout, 0, _IOLBF, 0);
@@ -557,6 +671,12 @@ int main(void){
     snprintf(zName, sizeof(zName), "op_ran_against_peer_%s", p->zName);
     check(zName, aT[MODE_MIDOP][PEER_WRITE].nOpOk>0
               || aT[MODE_MIDOP][PEER_COMMIT].nOpOk>0);
+  }
+
+  for(i=0; i<4; i++){
+    test_process_add_flush_lock(".", i);
+    test_process_add_flush_lock("t", i);
+    test_process_add_flush_lock("-A", i);
   }
 
   test_process_peer_write_kept("reset_table", "SELECT dolt_reset('t')");
