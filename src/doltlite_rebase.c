@@ -1908,7 +1908,7 @@ static int rebaseLiveLockTake(sqlite3 *db, sqlite3_file **ppFile){
   }
   do {
     rc = sqlite3OsLock(pFile, SQLITE_LOCK_SHARED);
-    if( rc==SQLITE_OK ) rc = sqlite3OsLock(pFile, SQLITE_LOCK_EXCLUSIVE);
+    if( rc==SQLITE_OK ) rc = sqlite3OsLock(pFile, SQLITE_LOCK_RESERVED);
     if( rc!=SQLITE_OK ) sqlite3OsUnlock(pFile, SQLITE_LOCK_NONE);
   }while( rc==SQLITE_BUSY && sqlite3InvokeBusyHandler(&db->busyHandler) );
   if( rc!=SQLITE_OK ){
