@@ -19,6 +19,12 @@ FIRST="${VCMODEL_SEED:-$(( $(date +%s) % 1000000 * 10 ))}"
 PAR="${VCMODEL_PAR:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
 OUT="${VCMODEL_OUT:-$PWD/vc-model-stress}"
 
+case "$SECONDS_BUDGET" in
+  ''|*[!0-9]*|0) echo "ERROR: VCMODEL_SECONDS must be a positive integer" >&2; exit 2 ;;
+esac
+case "$PAR" in
+  ''|*[!0-9]*|0) echo "ERROR: VCMODEL_PAR must be a positive integer" >&2; exit 2 ;;
+esac
 if [ ! -x "$BIN" ]; then
   echo "ERROR: $BIN not built (make vc_model_stress_test)" >&2
   exit 2
@@ -53,6 +59,10 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
 done | xargs -P "$PAR" -n 1 bash -c 'run_seed "$0"' > "$OUT/summary.txt"
 
 ok=$(grep -c '^ok ' "$OUT/summary.txt")
+if ! grep -Eq '^(ok|FAIL) ' "$OUT/summary.txt"; then
+  echo "vc_model_stress: no seed ran" >&2
+  exit 1
+fi
 if grep -q '^FAIL ' "$OUT/summary.txt"; then
   echo "vc_model_stress: $ok seeds clean, failures:"
   grep '^FAIL ' "$OUT/summary.txt" | while read -r _ seed cmd; do

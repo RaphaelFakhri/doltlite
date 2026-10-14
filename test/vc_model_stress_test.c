@@ -286,10 +286,13 @@ static void opDelete(Conn *c){
   long long id;
   if( nMine==0 ) return;
   id = aMine[rn(nMine)];
+  snprintf(sql, sizeof(sql), "DELETE FROM w WHERE id=%lld", id);
+  if( ex(c, "delete", sql) ){
+    if( c->inTxn ) txnAbort(c);
+    return;
+  }
   logf_("D\t%lld", id);
   tripRemove(id);
-  snprintf(sql, sizeof(sql), "DELETE FROM w WHERE id=%lld", id);
-  if( ex(c, "delete", sql) && c->inTxn ) txnAbort(c);
 }
 
 static void opBegin(Conn *c){
@@ -1204,6 +1207,7 @@ int main(int argc, char **argv){
     snprintf(zDir, sizeof(zDir), "%s", argv[2]);
     snprintf(zDb, sizeof(zDb), "%s/db.db", zDir);
     nProc = argc>3 ? atoi(argv[3]) : 8;
+    if( nProc<1 || nProc>32 ){ fprintf(stderr, "NPROC must be 1-32\n"); return 2; }
     checkModel(99);
     printf("%d violations\n", nViol);
     return nViol!=0;
@@ -1214,6 +1218,12 @@ int main(int argc, char **argv){
   if( argc>4 ) nConn = atoi(argv[4]);
   if( argc>5 ) nPhase = atoi(argv[5]);
   if( argc>6 ) nOps = atoi(argv[6]);
+  if( nProc<1 || nProc>32 || nConn<1 || nConn>(int)(sizeof(aC)/sizeof(aC[0]))
+   || nPhase<1 || nOps<1 ){
+    fprintf(stderr, "NPROC must be 1-32, NCONN 1-%d, NPHASE and OPS at least 1\n",
+            (int)(sizeof(aC)/sizeof(aC[0])));
+    return 2;
+  }
   if( getenv("VCMODEL_DESTRUCT") ) gDestructPct = atoi(getenv("VCMODEL_DESTRUCT"));
   if( getenv("VCMODEL_BUSY_MAX") ) gBusyMax = atoi(getenv("VCMODEL_BUSY_MAX"));
   if( getenv("VCMODEL_WEDGE_SEC") ) wedgeSec = atoi(getenv("VCMODEL_WEDGE_SEC"));
