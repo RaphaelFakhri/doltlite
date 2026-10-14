@@ -50,6 +50,10 @@ committed.
 | `table`, ... | Drop only those; an unknown name errors with `failed to clean; table not found: '<name>'` |
 | `--dry-run` | Do nothing and return `0`; use `dolt_status` to see what would go |
 
+| Error | Cause |
+|---|---|
+| `cannot write: branch '<name>' no longer exists` | another connection deleted this branch. Untracked tables stay, and the branch is not recreated |
+
 ## Differences from Dolt
 
 `dolt_reset` inside `BEGIN` ends the SQL transaction (commit, then a new

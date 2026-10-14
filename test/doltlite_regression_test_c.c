@@ -7916,10 +7916,8 @@ static void run_vc_persist_does_not_resurrect_deleted_branch(void){
     rc = sqlite3_exec(dbA, azOp[i], 0, 0, &zErr);
     snprintf(label, sizeof(label), "vnr_op%d_rejected", i);
     check(label, rc==SQLITE_BUSY);
-    if( i<2 ){
-      snprintf(label, sizeof(label), "vnr_op%d_names_deleted_branch", i);
-      check(label, zErr!=0 && strstr(zErr, "branch 'feat' no longer exists")!=0);
-    }
+    snprintf(label, sizeof(label), "vnr_op%d_names_deleted_branch", i);
+    check(label, zErr!=0 && strstr(zErr, "branch 'feat' no longer exists")!=0);
     sqlite3_free(zErr);
     zErr = 0;
     snprintf(label, sizeof(label), "vnr_op%d_does_not_resurrect", i);
