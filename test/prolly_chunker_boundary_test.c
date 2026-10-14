@@ -7,6 +7,7 @@
 #include "prolly_chunker.h"
 #include "prolly_node.h"
 #include "chunk_store.h"
+#include "lib/test_tmpdir.h"
 
 static int nPass = 0;
 static int nFail = 0;
@@ -1221,6 +1222,168 @@ static void test_chunker_repeatable(void){
         memcmp(a.data, b.data, PROLLY_HASH_SIZE)==0);
 }
 
+static int storeBuiltNode(ChunkStore *cs, ProllyNodeBuilder *b, ProllyHash *hash){
+  u8 *pData = 0;
+  int nData = 0;
+  int rc = prollyNodeBuilderFinish(b, &pData, &nData);
+  if( rc==SQLITE_OK ) rc = chunkStorePut(cs, pData, nData, hash);
+  sqlite3_free(pData);
+  prollyNodeBuilderFree(b);
+  return rc;
+}
+
+static void test_canonical_root_chain(void){
+  int useCache, internal;
+  for(useCache=0; useCache<2; useCache++){
+    for(internal=0; internal<2; internal++){
+      ChunkStore cs;
+      ProllyCache cache;
+      ProllyChunker ch;
+      ProllyCursor cur;
+      ProllyNodeBuilder b;
+      ProllyHash leaves[2], want, wrapped, root;
+      u8 key[8];
+      u8 flags = PROLLY_NODE_INTKEY | PROLLY_NODE_SUBTREE_COUNTS;
+      int rc, i, level, res = 1, nRows = 0;
+
+      memset(&cs, 0, sizeof(cs));
+      rc = chunkStoreOpen(&cs, sqlite3_vfs_find(0), ":memory:",
+                         SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
+                         | SQLITE_OPEN_MAIN_DB);
+      check("root chain: open", rc==SQLITE_OK);
+      if( rc!=SQLITE_OK ) continue;
+      rc = prollyCacheInit(&cache, 1024*1024);
+      check("root chain: cache init", rc==SQLITE_OK);
+      if( rc!=SQLITE_OK ){
+        chunkStoreClose(&cs);
+        continue;
+      }
+      for(i=0; i<2 && rc==SQLITE_OK; i++){
+        prollyNodeBuilderInit(&b, 0, flags);
+        encodeIntKey(i+1, key);
+        rc = prollyNodeBuilderAdd(&b, key, 8, key, 8);
+        if( rc==SQLITE_OK ) rc = storeBuiltNode(&cs, &b, &leaves[i]);
+        else prollyNodeBuilderFree(&b);
+      }
+      if( rc==SQLITE_OK ){
+        want = leaves[0];
+        if( internal ){
+          prollyNodeBuilderInit(&b, 1, flags);
+          for(i=0; i<2 && rc==SQLITE_OK; i++){
+            encodeIntKey(i+1, key);
+            rc = prollyNodeBuilderAddWithCount(&b, key, 8,
+                                              leaves[i].data, PROLLY_HASH_SIZE, 1);
+          }
+          if( rc==SQLITE_OK ) rc = storeBuiltNode(&cs, &b, &want);
+          else prollyNodeBuilderFree(&b);
+        }
+        wrapped = want;
+        encodeIntKey(internal+1, key);
+        for(level=internal+1; level<=internal+3 && rc==SQLITE_OK; level++){
+          prollyNodeBuilderInit(&b, (u8)level, flags);
+          rc = prollyNodeBuilderAddWithCount(&b, key, 8, wrapped.data,
+                                            PROLLY_HASH_SIZE, internal+1);
+          if( rc==SQLITE_OK ) rc = storeBuiltNode(&cs, &b, &wrapped);
+          else prollyNodeBuilderFree(&b);
+        }
+      }
+      check("root chain: build legacy wrappers", rc==SQLITE_OK);
+      if( rc==SQLITE_OK ){
+        prollyCursorInit(&cur, &cs, &cache, &wrapped, flags);
+        rc = prollyCursorFirst(&cur, &res);
+        while( rc==SQLITE_OK && prollyCursorIsValid(&cur) ){
+          nRows++;
+          rc = prollyCursorNext(&cur);
+        }
+        prollyCursorClose(&cur);
+        check("root chain: legacy root remains readable",
+              rc==SQLITE_OK && res==0 && nRows==internal+1);
+        prollyChunkerInitWithCache(&ch, &cs, useCache ? &cache : 0, flags);
+        rc = prollyChunkerAddAtLevelWithCount(&ch, internal+4, key, 8,
+                                             wrapped.data, PROLLY_HASH_SIZE,
+                                             internal+1);
+        if( rc==SQLITE_OK ) rc = prollyChunkerFinish(&ch);
+        prollyChunkerGetRoot(&ch, &root);
+        check("root chain: stop at leaf or branching node",
+              rc==SQLITE_OK && memcmp(root.data, want.data, PROLLY_HASH_SIZE)==0);
+        prollyChunkerFree(&ch);
+      }
+      prollyCacheFree(&cache);
+      chunkStoreClose(&cs);
+    }
+  }
+}
+
+static void test_sparse_canonical_root(void){
+  int useCache;
+  for(useCache=0; useCache<2; useCache++){
+    ChunkStore cs;
+    ProllyCache cache;
+    ProllyChunker ch;
+    ProllyHash want, root;
+    ProllyNode node;
+    u8 key[8], *pData = 0;
+    char zPath[256];
+    sqlite3_vfs *pVfs = sqlite3_vfs_find(0);
+    int rc, nData = 0, nDataPhys = 0;
+    sqlite3_int64 oldLimit;
+
+    memset(&cs, 0, sizeof(cs));
+    sqlite3_snprintf(sizeof(zPath), zPath,
+                     DOLTLITE_TEST_TMPDIR "/chunker-sparse-%d.db", useCache);
+    pVfs->xDelete(pVfs, zPath, 0);
+    rc = chunkStoreOpen(&cs, pVfs, zPath,
+                       SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
+                       | SQLITE_OPEN_MAIN_DB);
+    check("sparse root: open", rc==SQLITE_OK);
+    if( rc!=SQLITE_OK ) continue;
+    rc = prollyCacheInit(&cache, 1024*1024);
+    check("sparse root: cache init", rc==SQLITE_OK);
+    if( rc!=SQLITE_OK ){
+      chunkStoreClose(&cs);
+      continue;
+    }
+    prollyChunkerInitWithCache(&ch, &cs, useCache ? &cache : 0,
+                              PROLLY_NODE_INTKEY | PROLLY_NODE_SUBTREE_COUNTS);
+    encodeIntKey(1, key);
+    rc = prollyChunkerAdd(&ch, key, 8, (const u8*)"x", 1);
+    if( rc==SQLITE_OK ){
+      encodeIntKey(2, key);
+      rc = prollyChunkerAddZeroTail(&ch, key, 8, 0, 0, 64*1024*1024);
+    }
+    check("sparse root: add", rc==SQLITE_OK);
+    check("sparse root: last row flushed leaf",
+          rc==SQLITE_OK && ch.nLevels==2
+          && ch.aLevel[0].builder.nItems==0
+          && ch.aLevel[1].builder.nItems==1);
+    if( rc==SQLITE_OK && ch.nLevels==2
+        && ch.aLevel[1].builder.nItems==1 ){
+      memcpy(want.data, ch.aLevel[1].builder.pValBuf, PROLLY_HASH_SIZE);
+      oldLimit = sqlite3_hard_heap_limit64(sqlite3_memory_used() + 1024*1024);
+      rc = prollyChunkerFinish(&ch);
+      sqlite3_hard_heap_limit64(oldLimit);
+      check("sparse root: finish within memory limit", rc==SQLITE_OK);
+      if( rc==SQLITE_OK ){
+        prollyChunkerGetRoot(&ch, &root);
+        check("sparse root: collapsed to leaf",
+              memcmp(root.data, want.data, PROLLY_HASH_SIZE)==0);
+        rc = chunkStoreGetSparse(&cs, &root, &pData, &nData, &nDataPhys);
+        if( rc==SQLITE_OK ){
+          rc = prollyNodeParseSparse(&node, pData, nData, nDataPhys);
+        }
+        check("sparse root: leaf remains sparse",
+              rc==SQLITE_OK && node.level==0 && node.nItems==2
+              && nData>64*1024*1024 && nDataPhys<1024);
+        sqlite3_free(pData);
+      }
+    }
+    prollyChunkerFree(&ch);
+    prollyCacheFree(&cache);
+    chunkStoreClose(&cs);
+    pVfs->xDelete(pVfs, zPath, 0);
+  }
+}
+
 int main(void){
   sqlite3_initialize();
   printf("Prolly chunker boundary golden tests\n");
@@ -1230,6 +1393,8 @@ int main(void){
   test_weibull_golden();
   test_chunker_root_golden();
   test_chunker_repeatable();
+  test_canonical_root_chain();
+  test_sparse_canonical_root();
 
   printf("\n%d passed, %d failed\n", nPass, nFail);
   return nFail>0 ? 1 : 0;

@@ -119,6 +119,58 @@ static int finishFlushLevel(ProllyChunker *ch, int level,
   return SQLITE_OK;
 }
 
+static int chunkerPeekNode(ProllyChunker *ch, const ProllyHash *pHash,
+                           int *pLevel, int *pnItems, ProllyHash *pChild){
+  ProllyCacheEntry *pEntry = ch->pCache ? prollyCacheGet(ch->pCache, pHash) : 0;
+  ProllyNode node;
+  u8 *pData = 0;
+  int nData = 0;
+  int nDataPhys = 0;
+  int rc = SQLITE_OK;
+  if( pEntry ){
+    *pLevel = pEntry->node.level;
+    *pnItems = pEntry->node.nItems;
+    if( *pLevel>0 && *pnItems>0 ) prollyNodeChildHash(&pEntry->node, 0, pChild);
+    prollyCacheRelease(ch->pCache, pEntry);
+    return SQLITE_OK;
+  }
+  rc = chunkStoreGetSparse(ch->pStore, pHash, &pData, &nData, &nDataPhys);
+  if( rc!=SQLITE_OK ) return rc;
+  rc = prollyNodeParseSparse(&node, pData, nData, nDataPhys);
+  if( rc==SQLITE_OK ){
+    *pLevel = node.level;
+    *pnItems = node.nItems;
+    if( *pLevel>0 && *pnItems>0 ) prollyNodeChildHash(&node, 0, pChild);
+  }
+  sqlite3_free(pData);
+  return rc;
+}
+
+static int canonicalRootFromSingleChild(ProllyChunker *ch,
+                                        ProllyNodeBuilder *b,
+                                        ProllyHash *pRoot){
+  ProllyHash cur;
+  int depth;
+  assert( b->level>0 && b->nItems==1 );
+  if( (int)(b->aValOff[1] - b->aValOff[0])!=PROLLY_HASH_SIZE ){
+    return SQLITE_CORRUPT;
+  }
+  memcpy(cur.data, b->pValBuf + b->aValOff[0], PROLLY_HASH_SIZE);
+  for(depth = 0; depth < PROLLY_CURSOR_MAX_DEPTH; depth++){
+    int level = 0, nItems = 0, rc;
+    ProllyHash child;
+    rc = chunkerPeekNode(ch, &cur, &level, &nItems, &child);
+    if( rc!=SQLITE_OK ) return rc;
+    if( level==0 || nItems>1 ){
+      memcpy(pRoot, &cur, sizeof(ProllyHash));
+      return SQLITE_OK;
+    }
+    if( nItems==0 ) return SQLITE_CORRUPT;
+    memcpy(&cur, &child, sizeof(ProllyHash));
+  }
+  return SQLITE_CORRUPT;
+}
+
 static int hasPendingAncestorLevels(const ProllyChunker *ch, int level){
   int k;
   for( k = level + 1; k < ch->nLevels; k++ ){
@@ -272,6 +324,14 @@ int prollyChunkerFinish(ProllyChunker *ch){
       } else {
 
         ProllyHash hash;
+
+        if( level>0 && pLevel->builder.nItems==1 ){
+          rc = canonicalRootFromSingleChild(ch, &pLevel->builder, &hash);
+          if( rc!=SQLITE_OK ) return rc;
+          memcpy(&ch->root, &hash, sizeof(ProllyHash));
+          resetLevel(pLevel);
+          return SQLITE_OK;
+        }
 
         rc = finishFlushLevel(ch, level, &hash);
         if( rc!=SQLITE_OK ) return rc;
