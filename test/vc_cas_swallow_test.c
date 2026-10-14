@@ -507,6 +507,172 @@ static void test_merge_install_peer_write_kept(void){
   closeRm(db1, zPath);
 }
 
+typedef struct RestorePeer RestorePeer;
+struct RestorePeer {
+  sqlite3 *db;
+  sqlite3 *peer;
+  int commitPeer;
+  int peerRc;
+  int readRc;
+  int nPeer;
+  int refsMoved;
+};
+
+static void refreshPeerDuringInstall(void *pArg){
+  RestorePeer *p = (RestorePeer*)pArg;
+  ChunkStore *cs = doltliteGetChunkStore(p->db);
+  ProllyHash before = cs->refs.committedRefsHash;
+  p->peerRc = exec(p->peer, "INSERT INTO t VALUES(99,'peer')");
+  if( p->peerRc==SQLITE_OK && p->commitPeer ){
+    p->peerRc = exec(p->peer, "SELECT dolt_commit('-am','peer')");
+  }
+  if( p->peerRc==SQLITE_OK ){
+    p->peerRc = exec(p->peer, "BEGIN IMMEDIATE");
+  }
+  p->readRc = queryInt(p->db, "SELECT count(*) FROM t WHERE id=99",
+                       &p->nPeer);
+  p->refsMoved = prollyHashCompare(&before, &cs->refs.committedRefsHash)!=0;
+}
+
+static void test_failed_merge_restore_after_peer_refresh(void){
+  int commitPeer, action;
+  for(commitPeer=0; commitPeer<2; commitPeer++){
+    for(action=0; action<3; action++){
+      char zPath[256];
+      sqlite3 *db, *peer = 0;
+      RestorePeer probe;
+      char *zErr = 0, *zRows = 0, *zIntegrity = 0;
+      int rc, n = -1;
+
+      snprintf(zPath, sizeof(zPath), DOLTLITE_TEST_TMPDIR
+          "/cas_restore_refresh_%d_%d_%d.db", (int)getpid(), commitPeer, action);
+      db = openDb(zPath);
+      check("restore refresh: open", db!=0);
+      if( !db ) continue;
+      check("restore refresh: setup", exec(db,
+        "CREATE TABLE t(id INTEGER PRIMARY KEY,v TEXT);"
+        "INSERT INTO t VALUES(1,'base');"
+        "SELECT dolt_commit('-Am','base');"
+        "SELECT dolt_checkout('-b','feat');"
+        "INSERT INTO t VALUES(2,'feat');"
+        "SELECT dolt_commit('-am','feat');"
+        "SELECT dolt_checkout('main');"
+        "INSERT INTO t VALUES(3,'main');"
+        "SELECT dolt_commit('-am','main');")==SQLITE_OK);
+      check("restore refresh: peer open", sqlite3_open(zPath, &peer)==SQLITE_OK);
+      sqlite3_busy_timeout(db, 0);
+      sqlite3_busy_timeout(peer, 0);
+      memset(&probe, 0, sizeof(probe));
+      probe.db = db;
+      probe.peer = peer;
+      probe.commitPeer = commitPeer;
+      probe.peerRc = probe.readRc = SQLITE_ERROR;
+      doltliteTestSetMergeInstallHook(refreshPeerDuringInstall, &probe);
+      rc = execQuiet(db, "SELECT dolt_merge('--no-ff','feat')", &zErr);
+      doltliteTestSetMergeInstallHook(0, 0);
+      check("restore refresh: peer acknowledged", probe.peerRc==SQLITE_OK);
+      check("restore refresh: nested read adopted peer",
+            probe.readRc==SQLITE_OK && probe.nPeer==1 && probe.refsMoved);
+      check("restore refresh: busy", rc==SQLITE_BUSY);
+      check("restore refresh: release peer", exec(peer, "ROLLBACK")==SQLITE_OK);
+      if( action==0 ){
+        check("restore refresh: next read sees peer",
+              queryInt(db, "SELECT count(*) FROM t WHERE id=99", &n)==SQLITE_OK
+              && n==1);
+      }else if( action==1 ){
+        check("restore refresh: next add", exec(db, "SELECT dolt_add('t')")==SQLITE_OK);
+        check("restore refresh: staged peer",
+              queryInt(db, "SELECT count(*) FROM dolt_at_t('STAGED') WHERE id=99",
+                       &n)==SQLITE_OK && n==1);
+      }
+      check("restore refresh: next write", exec(db,
+        "INSERT INTO t VALUES(4,'after');"
+        "SELECT dolt_add('t'); SELECT dolt_commit('-m','after');")==SQLITE_OK);
+      sqlite3_close(peer);
+      sqlite3_close(db);
+      db = 0;
+      check("restore refresh: reopen", sqlite3_open(zPath, &db)==SQLITE_OK);
+      zRows = queryText(db,
+          "SELECT group_concat(id) FROM (SELECT id FROM t ORDER BY id)");
+      check("restore refresh: acknowledged rows kept",
+            zRows && strcmp(zRows, "1,3,4,99")==0);
+      zIntegrity = queryText(db, "PRAGMA integrity_check");
+      check("restore refresh: integrity", zIntegrity && strcmp(zIntegrity, "ok")==0);
+      if( commitPeer ){
+        check("restore refresh: peer commit kept", queryInt(db,
+            "SELECT count(*) FROM dolt_log WHERE message='peer'", &n)==SQLITE_OK
+            && n==1);
+      }
+      sqlite3_free(zRows);
+      sqlite3_free(zIntegrity);
+      sqlite3_free(zErr);
+      closeRm(db, zPath);
+    }
+  }
+}
+
+static void moveRefsDuringExplicitMerge(void *pArg){
+  RestorePeer *p = (RestorePeer*)pArg;
+  ChunkStore *cs = doltliteGetChunkStore(p->db);
+  ProllyHash before = cs->refs.committedRefsHash;
+  p->peerRc = exec(p->db, "SELECT dolt_tag('during')");
+  p->refsMoved = prollyHashCompare(&before, &cs->refs.committedRefsHash)!=0;
+  doltliteTestFailNextHeadConfirm();
+}
+
+static void test_restore_moved_refs_keeps_explicit_work(void){
+  int commit;
+  for(commit=0; commit<2; commit++){
+    char zPath[256];
+    sqlite3 *db;
+    RestorePeer probe;
+    char *zErr = 0, *zRows = 0;
+    int rc, n = -1;
+
+    snprintf(zPath, sizeof(zPath), DOLTLITE_TEST_TMPDIR
+        "/cas_restore_explicit_%d_%d.db", (int)getpid(), commit);
+    db = openDb(zPath);
+    check("restore explicit: open", db!=0);
+    if( !db ) continue;
+    check("restore explicit: setup", exec(db,
+      "CREATE TABLE t(id INTEGER PRIMARY KEY,v TEXT);"
+      "CREATE TABLE u(id INTEGER PRIMARY KEY);"
+      "INSERT INTO t VALUES(1,'base');"
+      "SELECT dolt_commit('-Am','base');"
+      "SELECT dolt_checkout('-b','feat');"
+      "INSERT INTO t VALUES(2,'feat');"
+      "SELECT dolt_commit('-am','feat');"
+      "SELECT dolt_checkout('main');"
+      "INSERT INTO t VALUES(3,'main');"
+      "SELECT dolt_commit('-am','main');"
+      "BEGIN; INSERT INTO u VALUES(99);")==SQLITE_OK);
+    memset(&probe, 0, sizeof(probe));
+    probe.db = db;
+    probe.peerRc = SQLITE_ERROR;
+    doltliteTestSetMergeInstallHook(moveRefsDuringExplicitMerge, &probe);
+    rc = execQuiet(db, "SELECT dolt_merge('--no-ff','feat')", &zErr);
+    doltliteTestSetMergeInstallHook(0, 0);
+    doltliteTestClearFaults();
+    check("restore explicit: refs moved", probe.peerRc==SQLITE_OK && probe.refsMoved);
+    check("restore explicit: busy keeps transaction", rc==SQLITE_BUSY
+          && !sqlite3_get_autocommit(db));
+    check("restore explicit: local work kept", queryInt(db,
+        "SELECT count(*) FROM u WHERE id=99", &n)==SQLITE_OK && n==1);
+    check("restore explicit: next write", exec(db, "INSERT INTO u VALUES(100)")==SQLITE_OK);
+    check("restore explicit: finish", exec(db, commit ? "COMMIT" : "ROLLBACK")==SQLITE_OK);
+    sqlite3_close(db);
+    db = 0;
+    check("restore explicit: reopen", sqlite3_open(zPath, &db)==SQLITE_OK);
+    check("restore explicit: local rows durable", queryInt(db,
+        "SELECT count(*) FROM u", &n)==SQLITE_OK && n==(commit ? 2 : 0));
+    zRows = queryText(db, "SELECT group_concat(id) FROM (SELECT id FROM t ORDER BY id)");
+    check("restore explicit: merge not applied", zRows && strcmp(zRows, "1,3")==0);
+    sqlite3_free(zRows);
+    sqlite3_free(zErr);
+    closeRm(db, zPath);
+  }
+}
+
 /* The merge replays feat's columns onto main's schema one ALTER at a time.
 ** A later ALTER that fails must leave none of them on disk. */
 static void test_merge_schema_actions_all_or_nothing(void){
@@ -724,6 +890,8 @@ int main(void){
   test_branch_move_ws_read_failure();
   test_merge_install_unlock_window();
   test_merge_install_peer_write_kept();
+  test_failed_merge_restore_after_peer_refresh();
+  test_restore_moved_refs_keeps_explicit_work();
   test_merge_schema_actions_all_or_nothing();
   test_merge_install_reindex_all_or_nothing();
   test_cherry_pick_install_all_or_nothing();
