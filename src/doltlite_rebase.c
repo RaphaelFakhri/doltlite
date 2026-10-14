@@ -97,9 +97,17 @@ static int rebaseCreateWorkingBranchRefs(
 }
 
 static char *rebaseWorkingBranchExistsMsg(sqlite3 *db, const char *zWorking){
-  int active = 0;
-  if( doltliteBranchWorkingSetIsRebasing(db, zWorking, &active)==SQLITE_OK
-   && active ){
+  char *zOrig = 0;
+  u8 flags = 0;
+  int abortable = 0;
+  if( doltliteBranchWorkingSetRebaseOrig(db, zWorking, &flags, &zOrig, 0)
+        ==SQLITE_OK ){
+    abortable = flags!=0
+        || (zOrig && strncmp(zWorking, "dolt_rebase_", 12)==0
+            && sqlite3_stricmp(zWorking+12, zOrig)==0);
+  }
+  sqlite3_free(zOrig);
+  if( abortable ){
     return sqlite3_mprintf("rebase working branch already exists: %s; a rebase "
         "is in progress there, run dolt_rebase('--abort') to discard it",
         zWorking);
@@ -1860,6 +1868,129 @@ static int rebaseUnclaimActiveEnd(
   return chunkStoreCommit(cs);
 }
 
+/* Held by a connection for the whole of --continue, through the claim to
+** the end. The OS drops it when that process dies, so a claim whose lock
+** can be taken was abandoned. One file per database keeps it from being a
+** leak per branch; continues on different branches just take turns. */
+static int rebaseLiveLockTake(sqlite3 *db, sqlite3_file **ppFile){
+  const char *zDb = sqlite3_db_filename(db, "main");
+  sqlite3_vfs *pVfs = db->pVfs;
+  sqlite3_file *pFile;
+  const char *zBase;
+  char *zRaw;
+  char *zLock;
+  int nRaw;
+  int rc;
+
+  *ppFile = 0;
+  if( !zDb || !zDb[0] || !pVfs ) return SQLITE_OK;
+  zBase = strrchr(zDb, '/');
+  zRaw = zBase
+      ? sqlite3_mprintf("%.*s/.%s-rebase-lock", (int)(zBase-zDb), zDb, zBase+1)
+      : sqlite3_mprintf(".%s-rebase-lock", zDb);
+  if( !zRaw ) return SQLITE_NOMEM;
+  nRaw = sqlite3Strlen30(zRaw);
+  /* The VFS keeps the name pointer until close, so it lives in the same
+  ** allocation as the handle; the zeroed tail double-nul terminates it. */
+  pFile = sqlite3MallocZero(pVfs->szOsFile + nRaw + 4);
+  if( !pFile ){
+    sqlite3_free(zRaw);
+    return SQLITE_NOMEM;
+  }
+  zLock = ((char*)pFile) + pVfs->szOsFile;
+  memcpy(zLock, zRaw, nRaw);
+  sqlite3_free(zRaw);
+  rc = sqlite3OsOpen(pVfs, zLock, pFile,
+      SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_MAIN_DB, 0);
+  if( rc!=SQLITE_OK ){
+    sqlite3_free(pFile);
+    return rc;
+  }
+  do {
+    rc = sqlite3OsLock(pFile, SQLITE_LOCK_SHARED);
+    if( rc==SQLITE_OK ) rc = sqlite3OsLock(pFile, SQLITE_LOCK_EXCLUSIVE);
+    if( rc!=SQLITE_OK ) sqlite3OsUnlock(pFile, SQLITE_LOCK_NONE);
+  }while( rc==SQLITE_BUSY && sqlite3InvokeBusyHandler(&db->busyHandler) );
+  if( rc!=SQLITE_OK ){
+    sqlite3OsClose(pFile);
+    sqlite3_free(pFile);
+    return rc;
+  }
+  *ppFile = pFile;
+  return SQLITE_OK;
+}
+
+static int rebaseRefreshStore(sqlite3 *db){
+  ChunkStore *cs = doltliteGetChunkStore(db);
+  int rc;
+  if( !cs ) return SQLITE_ERROR;
+  rc = chunkStoreLockAndRefresh(cs);
+  if( rc!=SQLITE_OK ) return rc;
+  rc = chunkStoreForceRefresh(cs);
+  chunkStoreUnlock(cs);
+  return rc;
+}
+
+static void rebaseLiveLockRelease(sqlite3_file *pFile){
+  if( !pFile ) return;
+  sqlite3OsUnlock(pFile, SQLITE_LOCK_NONE);
+  sqlite3OsClose(pFile);
+  sqlite3_free(pFile);
+}
+
+/* The working branch and original branch for the session: on the working
+** branch itself, or on the branch it was cut from. */
+static int rebaseSessionWorkingNames(
+  sqlite3 *db,
+  char **pzWorking,
+  char **pzOrig
+){
+  const char *zCur = doltliteGetSessionBranch(db);
+  static const char zPrefix[] = "dolt_rebase_";
+  int nPrefix = (int)sizeof(zPrefix)-1;
+
+  *pzWorking = 0;
+  *pzOrig = 0;
+  if( !zCur || !zCur[0] ) return SQLITE_OK;
+  if( strncmp(zCur, zPrefix, nPrefix)==0 && zCur[nPrefix] ){
+    *pzWorking = sqlite3_mprintf("%s", zCur);
+    *pzOrig = sqlite3_mprintf("%s", zCur+nPrefix);
+  }else{
+    *pzWorking = sqlite3_mprintf("%s%s", zPrefix, zCur);
+    *pzOrig = sqlite3_mprintf("%s", zCur);
+  }
+  if( !*pzWorking || !*pzOrig ){
+    sqlite3_free(*pzWorking);
+    sqlite3_free(*pzOrig);
+    *pzWorking = *pzOrig = 0;
+    return SQLITE_NOMEM;
+  }
+  return SQLITE_OK;
+}
+
+/* A claimed rebase: the working branch exists with its flags clear but its
+** original-branch field still naming zOrig. */
+static int rebaseWorkingBranchClaimed(
+  sqlite3 *db,
+  const char *zWorking,
+  const char *zOrig,
+  int *pClaimed
+){
+  ChunkStore *cs = doltliteGetChunkStore(db);
+  char *zField = 0;
+  u8 flags = 0;
+  int rc;
+
+  *pClaimed = 0;
+  if( !cs || chunkStoreFindBranch(cs, zWorking, 0)!=SQLITE_OK ) return SQLITE_OK;
+  rc = doltliteBranchWorkingSetRebaseOrig(db, zWorking, &flags, &zField, 0);
+  if( rc==SQLITE_OK ){
+    *pClaimed = flags==0 && zField && sqlite3_stricmp(zField, zOrig)==0;
+  }
+  sqlite3_free(zField);
+  return rc;
+}
+
 /* Exclusive claim to end the rebase. DONE if isRebasing already clear;
 ** OK after this connection clears it. Storage failure restores ownership. */
 static int rebaseClaimActiveEnd(
@@ -1923,7 +2054,11 @@ static int rebaseClaimActiveEnd(
     goto claim_done;
   }
 
-  rc = doltliteClearSessionRebaseState(db);
+  /* Clear the flags but keep the fields: if this connection dies before it
+  ** finishes, --abort can still tell an interrupted rebase from a branch
+  ** that merely carries the working-branch name. */
+  rc = doltliteSetSessionRebaseState(db, 0, &savedPre, &savedOnto,
+                                     zSavedOrig, zReturnBranch);
   if( rc!=SQLITE_OK ) goto claim_done;
   mutated = 1;
   rc = doltliteSaveWorkingSet(db);
@@ -2894,6 +3029,68 @@ static void doltliteRebasePausedContinue(
   }
 }
 
+/* A --continue that died after its claim left the working branch with its
+** flags clear and nothing else will ever finish or discard it. Discard it
+** once its lock shows no live continue owns the claim; re-check under the
+** lock, since the owner may have finished while this waited. DONE when
+** there is nothing to recover. */
+static int rebaseAbortAbandonedClaim(sqlite3 *db){
+  sqlite3_file *pLock = 0;
+  char *zWorking = 0;
+  char *zOrig = 0;
+  char *zReturn = 0;
+  u8 flags = 0;
+  int claimed = 0;
+  int origMissing = 0;
+  int rc;
+
+  rc = rebaseSessionWorkingNames(db, &zWorking, &zOrig);
+  if( rc==SQLITE_OK && zWorking ){
+    rc = rebaseWorkingBranchClaimed(db, zWorking, zOrig, &claimed);
+  }
+  if( rc!=SQLITE_OK || !claimed ) goto abandon_done;
+  rc = rebaseLiveLockTake(db, &pLock);
+  if( rc==SQLITE_BUSY ){
+    claimed = 0;
+    rc = SQLITE_OK;
+    goto abandon_done;
+  }
+  if( rc==SQLITE_OK ) rc = rebaseRetryDbOp(db, rebaseRefreshStore);
+  if( rc==SQLITE_OK ){
+    rc = rebaseWorkingBranchClaimed(db, zWorking, zOrig, &claimed);
+  }
+  if( rc!=SQLITE_OK || !claimed ) goto abandon_done;
+  {
+    char *zField = 0;
+    rc = doltliteBranchWorkingSetRebaseOrig(db, zWorking, &flags, &zField,
+                                            &zReturn);
+    sqlite3_free(zField);
+  }
+  if( rc!=SQLITE_OK ) goto abandon_done;
+  rc = rebaseCleanupAfterClaim(db, zOrig, zWorking, &origMissing);
+  if( zReturn && zReturn[0] ){
+    int rc2 = rebaseRetryBranchOp(
+        db, rebaseRestoreReturnBranchWorkingState, zReturn);
+    rebaseKeepFirstError(&rc, rc2);
+  }
+  {
+    int rc2 = rebaseRetryDbOp(db, doltlitePersistWorkingSet);
+    rebaseKeepFirstError(&rc, rc2);
+  }
+  {
+    int rc2 = rebaseRetryDbOp(db, doltliteVcSealBranchStyleTxn);
+    rebaseKeepFirstError(&rc, rc2);
+  }
+
+abandon_done:
+  rebaseLiveLockRelease(pLock);
+  sqlite3_free(zWorking);
+  sqlite3_free(zOrig);
+  sqlite3_free(zReturn);
+  if( rc==SQLITE_OK && !claimed ) rc = SQLITE_DONE;
+  return rc;
+}
+
 static void doltliteRebaseInteractiveAbort(
   sqlite3_context *context,
   sqlite3 *db
@@ -2915,7 +3112,15 @@ static void doltliteRebaseInteractiveAbort(
 
   rc = rebaseAdoptPersistedRebase(db);
   if( rc==SQLITE_DONE ){
-    sqlite3_result_error(context, "no rebase in progress", -1);
+    rc = rebaseAbortAbandonedClaim(db);
+    if( rc==SQLITE_OK ){
+      sqlite3_result_text(context, "Interactive rebase aborted", -1,
+                          SQLITE_STATIC);
+    }else if( rc==SQLITE_DONE ){
+      sqlite3_result_error(context, "no rebase in progress", -1);
+    }else{
+      rebaseResultRecoveryFailure(context, rc);
+    }
     return;
   }
   if( rc!=SQLITE_OK ){
@@ -3347,9 +3552,9 @@ static void doltliteRebaseInteractiveContinue(
   if( rc!=SQLITE_OK ) goto abort_err;
 
   /* Claim already cleared durable isRebasing; finish checkout, working-branch
-  ** delete, and return-branch restore. */
-  rc = doltliteClearSessionRebaseState(db);
-  if( rc==SQLITE_OK ) rc = rebaseRetryDbOp(db, doltlitePersistWorkingSet);
+  ** delete, and return-branch restore. The working branch keeps the claim's
+  ** fields until it is deleted, so a crash before then is still abortable. */
+  rc = rebaseRetryDbOp(db, doltlitePersistWorkingSet);
   if( rc!=SQLITE_OK ) goto abort_err;
 
   /* curCat is the flushed catalog just persisted; do not re-serialize the
@@ -3556,7 +3761,16 @@ static void doltliteRebaseFunc(
       goto rebase_cleanup;
     }
     keepTopLevelSavepoint = 1;
-    doltliteRebaseInteractiveContinue(context, db);
+    {
+      sqlite3_file *pLock = 0;
+      int lrc = rebaseLiveLockTake(db, &pLock);
+      if( lrc!=SQLITE_OK ){
+        sqlite3_result_error_code(context, lrc);
+        goto rebase_cleanup;
+      }
+      doltliteRebaseInteractiveContinue(context, db);
+      rebaseLiveLockRelease(pLock);
+    }
     goto rebase_cleanup;
   }
   if( isInteractive ){
