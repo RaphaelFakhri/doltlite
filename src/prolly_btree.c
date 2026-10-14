@@ -983,7 +983,7 @@ static int prollyBtreeOpenImpl(
       return rc;
     }
     *ppBtree = p;  /* registerDoltiteFunctions reads db->aDb[0].pBt */
-    rc = registerDoltiteFunctions(db);
+    rc = hasMainBtree ? SQLITE_OK : registerDoltiteFunctions(db);
     if( rc==SQLITE_NOMEM || rc==SQLITE_IOERR_NOMEM ){
       *ppBtree = 0;
       sqlite3BtreeClose(p);
@@ -1292,7 +1292,7 @@ static int prollyBtreeOpenImpl(
 
   *ppBtree = p;
 
-  rc = registerDoltiteFunctions(db);
+  rc = hasMainBtree ? SQLITE_OK : registerDoltiteFunctions(db);
   if( rc==SQLITE_NOMEM || rc==SQLITE_IOERR_NOMEM ){
     *ppBtree = 0;
     releaseOpenStoreFilename(zStoreFilename, bStoreUri);
