@@ -289,6 +289,15 @@ static const char *remoteSqlFetchMsg(DoltliteRemote *pRemote, int rc){
   return remoteSqlRemoteMsg(pRemote, rc);
 }
 
+static const char *remoteSqlCloneMsg(DoltliteRemote *pRemote, int rc){
+  if( rc==SQLITE_BUSY_SNAPSHOT && !(pRemote && pRemote->xErrMsg
+                                    && pRemote->xErrMsg(pRemote)
+                                    && pRemote->xErrMsg(pRemote)[0]) ){
+    return "clone failed (graph changed during install; retry)";
+  }
+  return remoteSqlRemoteMsg(pRemote, rc);
+}
+
 static void remoteSqlRestoreAndReport(
   sqlite3_context *ctx,
   sqlite3 *db,
@@ -2101,7 +2110,7 @@ static void doltCloneFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
   /* The clone copied the name into the remote row. */
   sqlite3_free(zRemoteOwned);
   if( rc!=SQLITE_OK ){
-    const char *zMsg = remoteSqlRemoteMsg(pRemote, rc);
+    const char *zMsg = remoteSqlCloneMsg(pRemote, rc);
     char *zOwned = 0;
     if( occupied==1 ){
       zMsg = "database is not empty — clone into a fresh database";
@@ -2113,8 +2122,6 @@ static void doltCloneFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
       zMsg = zBranchOpt ? "branch not found on remote"
                         : "default branch missing from cloned refs";
       rc = SQLITE_ERROR;
-    }else if( !zMsg && rc==SQLITE_BUSY_SNAPSHOT ){
-      zMsg = "clone failed (graph changed during install; retry)";
     }
     zOwned = zMsg ? sqlite3_mprintf("%s", zMsg) : 0;
     pRemote->xClose(pRemote);

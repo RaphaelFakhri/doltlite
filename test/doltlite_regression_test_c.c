@@ -3817,8 +3817,10 @@ static void run_clone_ref_install_survives_window_gc(void){
   char remotePath[256];
   char clonePath[256];
   char sql[512];
+  char *zErr;
   int rc;
 
+  zErr = 0;
   printf("=== Clone Ref Install Survives Window GC Test ===\n\n");
   make_dbpath(remotePath, sizeof(remotePath), "test_clone_window_gc_remote");
   make_dbpath(clonePath, sizeof(clonePath), "test_clone_window_gc_clone");
@@ -3838,15 +3840,22 @@ static void run_clone_ref_install_survives_window_gc(void){
   gGcWindowPath = clonePath;
   doltliteTestSetBeforeRefInstallHook(gcInFetchWindow, 0);
   snprintf(sql, sizeof(sql), "SELECT dolt_clone('file://%s')", remotePath);
-  rc = execSqlSilent(cloneDb, sql);
+  rc = sqlite3_exec(cloneDb, sql, 0, 0, &zErr);
   if( gGcWindowCollected ){
     check("clone_window_reports_failure", rc!=SQLITE_OK);
     check("clone_window_busy_snapshot",
           sqlite3_extended_errcode(cloneDb)==SQLITE_BUSY_SNAPSHOT);
+    check("clone_window_names_clone",
+          zErr!=0 && strstr(zErr, "clone failed")!=0
+          && strstr(zErr, "push")==0
+          && strstr(zErr, "lazy clone")==0);
   }else{
     printf("  SKIP: clone_window_reports_failure (in-window gc unavailable)\n");
     printf("  SKIP: clone_window_busy_snapshot (in-window gc unavailable)\n");
+    printf("  SKIP: clone_window_names_clone (in-window gc unavailable)\n");
   }
+  sqlite3_free(zErr);
+  zErr = 0;
   doltliteTestSetBeforeRefInstallHook(0, 0);
   gGcWindowPath = 0;
   check("clone_window_close_target_clean", sqlite3_close(cloneDb)==SQLITE_OK);
@@ -3873,6 +3882,78 @@ static void run_clone_ref_install_survives_window_gc(void){
         strcmp(queryScalarText(afterDb, "SELECT count(*) FROM t"), "2")==0);
   check("clone_window_graph_complete",
         execSqlSilent(afterDb, "SELECT dolt_gc()")==SQLITE_OK);
+
+  sqlite3_close(afterDb);
+  removeDbFiles(remotePath);
+  removeDbFiles(clonePath);
+}
+
+/* An origin row makes a missing chunk record lazy-clone corruption text.
+** The clone refusal must stay a retryable clone error. */
+static void run_clone_origin_window_gc_names_clone(void){
+  sqlite3 *remoteDb = 0;
+  sqlite3 *cloneDb = 0;
+  sqlite3 *afterDb = 0;
+  char remotePath[256];
+  char clonePath[256];
+  char sql[512];
+  char *zErr;
+  int rc;
+
+  zErr = 0;
+  printf("=== Clone Origin Window GC Names Clone Test ===\n\n");
+  make_dbpath(remotePath, sizeof(remotePath), "test_clone_origin_window_remote");
+  make_dbpath(clonePath, sizeof(clonePath), "test_clone_origin_window_clone");
+  removeDbFiles(remotePath);
+  removeDbFiles(clonePath);
+
+  check("clone_origin_open_remote", open_db(remotePath, &remoteDb)==SQLITE_OK);
+  check("clone_origin_seed_remote", execSql(remoteDb,
+    "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);"
+    "INSERT INTO t VALUES(1,'base');"
+    "SELECT dolt_commit('-A','-m','base');")==SQLITE_OK);
+  check("clone_origin_open_target", open_db(clonePath, &cloneDb)==SQLITE_OK);
+  snprintf(sql, sizeof(sql),
+           "SELECT dolt_remote('add','origin','file://%s')", remotePath);
+  check("clone_origin_add_origin", execSql(cloneDb, sql)==SQLITE_OK);
+
+  gGcWindowPath = clonePath;
+  doltliteTestSetBeforeRefInstallHook(gcInFetchWindow, 0);
+  snprintf(sql, sizeof(sql), "SELECT dolt_clone('file://%s')", remotePath);
+  rc = sqlite3_exec(cloneDb, sql, 0, 0, &zErr);
+  if( gGcWindowCollected ){
+    check("clone_origin_reports_failure", rc!=SQLITE_OK);
+    check("clone_origin_busy_snapshot",
+          sqlite3_extended_errcode(cloneDb)==SQLITE_BUSY_SNAPSHOT);
+    check("clone_origin_names_clone",
+          zErr!=0 && strstr(zErr, "graph changed during install")!=0
+          && strstr(zErr, "push")==0
+          && strstr(zErr, "lazy clone")==0);
+  }else{
+    printf("  SKIP: clone_origin_reports_failure (in-window gc unavailable)\n");
+    printf("  SKIP: clone_origin_busy_snapshot (in-window gc unavailable)\n");
+    printf("  SKIP: clone_origin_names_clone (in-window gc unavailable)\n");
+  }
+  sqlite3_free(zErr);
+  doltliteTestSetBeforeRefInstallHook(0, 0);
+  gGcWindowPath = 0;
+  check("clone_origin_close_target", sqlite3_close(cloneDb)==SQLITE_OK);
+  cloneDb = 0;
+  check("clone_origin_close_remote", sqlite3_close(remoteDb)==SQLITE_OK);
+  remoteDb = 0;
+
+  check("clone_origin_reopen", open_db(clonePath, &afterDb)==SQLITE_OK);
+  check("clone_origin_still_readable",
+        execSqlSilent(afterDb, "SELECT dolt_hashof('HEAD')")==SQLITE_OK);
+  if( gGcWindowCollected ){
+    snprintf(sql, sizeof(sql), "SELECT dolt_clone('file://%s')", remotePath);
+    check("clone_origin_retry_succeeds",
+          execSqlSilent(afterDb, sql)==SQLITE_OK);
+  }else{
+    printf("  SKIP: clone_origin_retry_succeeds (in-window gc unavailable)\n");
+  }
+  check("clone_origin_rows",
+        strcmp(queryScalarText(afterDb, "SELECT count(*) FROM t"), "1")==0);
 
   sqlite3_close(afterDb);
   removeDbFiles(remotePath);
@@ -18406,6 +18487,7 @@ static const RegressionCase aCases[] = {
   { "push_validation_reads_new_chunks", "Push Validation Reads New Chunks Test", run_push_validation_reads_new_chunks },
   { "fetch_window_gc_named_remote", "Fetch Window GC Named Remote Test", run_fetch_window_gc_named_remote },
   { "clone_ref_install_survives_window_gc", "Clone Ref Install Survives Window GC Test", run_clone_ref_install_survives_window_gc },
+  { "clone_origin_window_gc_names_clone", "Clone Origin Window GC Names Clone Test", run_clone_origin_window_gc_names_clone },
   { "clone_deleted_branch_installs_nothing", "Clone Deleted Branch Installs Nothing Test", run_clone_deleted_branch_installs_nothing },
   { "fetch_preserves_concurrent_local_refs", "Fetch Preserves Concurrent Local Refs Test", run_fetch_preserves_concurrent_local_refs },
   { "file_remote_url_absolute", "File Remote URL Absolute Test", run_file_remote_url_absolute },

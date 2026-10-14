@@ -2967,7 +2967,12 @@ int doltliteClone(
   }
   if( rc==SQLITE_OK && nRoots>0 ){
     rc = remoteValidateGraph(pLocal, aRoots, nRoots);
-    if( rc==SQLITE_NOTFOUND || rc==SQLITE_CORRUPT ) rc = SQLITE_BUSY_SNAPSHOT;
+    if( rc==SQLITE_NOTFOUND || rc==SQLITE_CORRUPT ){
+      /* A miss on a store that already has origin records the lazy-clone
+      ** corruption text. This refusal is retryable; that text is not. */
+      sqlite3_free(chunkStoreSourceTakeError(pLocal, 0));
+      rc = SQLITE_BUSY_SNAPSHOT;
+    }
   }
   sqlite3_free(aRoots);
   aRoots = 0;
