@@ -1351,6 +1351,80 @@ static void test_commit_keeps_peer_insert_during_publish(void){
   remove(ready);
 }
 
+/* A peer commit in the same gap moves HEAD, so the paused commit loses the
+** race. The writes that connection acknowledges next must publish, and must
+** not erase the insert the peer made after its commit. */
+static void test_commit_lost_race_keeps_later_writes(void){
+  char path[256];
+  char pause[256];
+  char ready[300];
+  sqlite3 *db = 0;
+  int status = 0;
+  int rc;
+  pid_t pid;
+
+  printf("--- Test 6f: writes after a lost commit race keep the peer's insert ---\n");
+  snprintf(path, sizeof(path), DOLTLITE_TEST_TMPDIR "/mp_commit_lost_%d.db", (int)getpid());
+  snprintf(pause, sizeof(pause), DOLTLITE_TEST_TMPDIR "/mp_commit_lost_%d.pause", (int)getpid());
+  snprintf(ready, sizeof(ready), "%s.ready", pause);
+  remove(path);
+  remove(pause);
+  remove(ready);
+  setup_db(path);
+  {
+    FILE *hold = fopen(pause, "w");
+    if( !hold ){ perror("pause"); _exit(1); }
+    if( fputc('x', hold)==EOF ){ perror("pause"); _exit(1); }
+    fclose(hold);
+  }
+  check("mp_commit_lost_open", sqlite3_open(path, &db)==SQLITE_OK);
+  sqlite3_busy_timeout(db, 200);
+  check("mp_commit_lost_dirty", execSql(db, "INSERT INTO t VALUES(10, 'mine')")==SQLITE_OK);
+  pid = fork();
+  if( pid==0 ){
+    sqlite3 *peer = 0;
+    int i, ok;
+    for( i=0; i<500 && access(ready, F_OK)!=0; i++ ) sqlite3_sleep(20);
+    if( access(ready, F_OK)!=0 ){ remove(pause); _exit(1); }
+    if( sqlite3_open(path, &peer)!=SQLITE_OK ){ remove(pause); _exit(2); }
+    sqlite3_busy_timeout(peer, 10000);
+    ok = execSql(peer, "UPDATE t SET v='peer' WHERE id=1; "
+                       "SELECT dolt_commit('-am','peer')")==SQLITE_OK
+      && execSql(peer, "INSERT INTO t VALUES(11, 'peer')")==SQLITE_OK
+      && execSql(peer, "BEGIN IMMEDIATE")==SQLITE_OK;
+    /* Hold the lock past the committer's busy timeout, so its branch
+    ** advance fails on the lock instead of the HEAD check. */
+    remove(pause);
+    sqlite3_sleep(800);
+    if( ok ) ok = execSql(peer, "COMMIT")==SQLITE_OK;
+    sqlite3_close(peer);
+    _exit(ok ? 0 : 3);
+  }
+  if( pid<0 ){ perror("fork"); _exit(1); }
+  setenv("DOLTLITE_PAUSE_BEFORE_BRANCH_ADVANCE", pause, 1);
+  rc = execSql(db, "SELECT dolt_commit('-am','mine')");
+  unsetenv("DOLTLITE_PAUSE_BEFORE_BRANCH_ADVANCE");
+  waitpid(pid, &status, 0);
+  check("mp_commit_lost_peer_acked", WIFEXITED(status) && WEXITSTATUS(status)==0);
+  check("mp_commit_lost_commit_busy", rc==SQLITE_BUSY);
+  check("mp_commit_lost_sees_peer",
+        strcmp(queryScalarText(db,
+          "SELECT group_concat(id) FROM (SELECT id FROM t ORDER BY id)"),
+          "1,10,11")==0);
+  check("mp_commit_lost_follow_up",
+        execSql(db, "INSERT INTO t VALUES(12, 'after')")==SQLITE_OK);
+  sqlite3_close(db);
+  check("mp_commit_lost_reopen", sqlite3_open(path, &db)==SQLITE_OK);
+  check("mp_commit_lost_rows_kept",
+        strcmp(queryScalarText(db,
+          "SELECT group_concat(id) FROM (SELECT id FROM t ORDER BY id)"),
+          "1,10,11,12")==0);
+  sqlite3_close(db);
+  remove(path);
+  remove(pause);
+  remove(ready);
+}
+
 static void test_commit_does_not_erase_peer_write(void){
   char path[256];
   sqlite3 *db = 0;
@@ -2273,6 +2347,7 @@ int main(){
   test_write_after_lost_commit_race();
   test_commit_does_not_erase_peer_write();
   test_commit_keeps_peer_insert_during_publish();
+  test_commit_lost_race_keeps_later_writes();
   test_op_keeps_peer_write_on_main();
   test_busy_command_keeps_peer_write();
   test_ref_command_binds_post_wait_tip();

@@ -1200,6 +1200,11 @@ static void doltliteCommitFuncImpl(
   }
   if( rc==SQLITE_BUSY ){
     rc = doltliteRestoreTxnStateOnFailure(db, &mutationState, rc);
+    /* The refresh that lost the race already adopted the peer's publish,
+    ** so the restored snapshot would read as current and the next write
+    ** would publish it over the peer. Autocommit has nothing unpublished
+    ** to keep: reload from disk. */
+    if( db->autoCommit ) doltliteInvalidateSessionWorkingState(db);
     if( rc==SQLITE_BUSY ){
       sqlite3_result_error(context,
           "cannot commit: database is busy or branch HEAD changed. "
