@@ -157,6 +157,7 @@ int doltliteRestoreTxnState(sqlite3 *db, DoltliteTxnState *p){
   ChunkStore *cs;
   int rc;
   int rcFirst;
+  int bRefsMoved;
   int bSwept = 0;
   assert( db!=0 && p!=0 );
   assert( p->zSessionBranch!=0 );
@@ -168,8 +169,9 @@ int doltliteRestoreTxnState(sqlite3 *db, DoltliteTxnState *p){
 
   if( !cs ) return SQLITE_ERROR;
 
-  if( prollyHashCompare(&p->committedRefsHash,
-                        &cs->refs.committedRefsHash)==0 ){
+  bRefsMoved = prollyHashCompare(&p->committedRefsHash,
+                                 &cs->refs.committedRefsHash)!=0;
+  if( !bRefsMoved ){
     refsTableSetHash(&cs->refs, &p->refsHash);
   }else{
     csRestoreCommittedRefsHash(cs);
@@ -216,7 +218,9 @@ int doltliteRestoreTxnState(sqlite3 *db, DoltliteTxnState *p){
         db, &p->sessionConstraintViolationsCatalog);
   }
   if( rcFirst==SQLITE_OK ) rcFirst = rc;
-  if( rcFirst!=SQLITE_OK || bSwept ) doltliteInvalidateSessionWorkingState(db);
+  if( rcFirst!=SQLITE_OK || bSwept || (bRefsMoved && db->autoCommit) ){
+    doltliteInvalidateSessionWorkingState(db);
+  }
   return rcFirst;
 }
 
