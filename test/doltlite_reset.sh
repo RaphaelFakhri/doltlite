@@ -580,6 +580,17 @@ run_test_error_match "commit_after_named_reset_sees_nothing_staged" \
   "nothing to commit" "$NW_STAGE/g"
 rm -f "$NW_DB" "$NW_WORK" "$NW_STAGE"
 
+RB_DB=/tmp/test_reset_hard_rollback_$$.db; rm -f "$RB_DB"
+echo "CREATE TABLE u(x INTEGER PRIMARY KEY); INSERT INTO u VALUES(1); SELECT dolt_commit('-Am','i');" | $DOLTLITE "$RB_DB" > /dev/null 2>&1
+run_test "rollback_after_hard_reset_keeps_reset" \
+  "INSERT INTO u VALUES(2); SELECT dolt_reset('--hard'); BEGIN IMMEDIATE; ROLLBACK; SELECT group_concat(x) FROM u;" \
+  "0
+1" "$RB_DB"
+run_test "rollback_after_hard_reset_is_durable" \
+  "SELECT group_concat(x) FROM u;" \
+  "1" "$RB_DB"
+rm -f "$RB_DB"
+
 rm -f "$DB" "$DB2" "$DB3" "$DB3B" "$DB3C" "$DB4" "$DB5" "$DB5B" "$DB5C" "$DB5C.hash" "$DB6" "$DB7" "$DB8" "$DB9" "$DB10" "$DB11" "$DB12" "$DB13" "$DB14" "$DB15" "$DB16" "$DB17" "$DB18"
 
 dltest_finish

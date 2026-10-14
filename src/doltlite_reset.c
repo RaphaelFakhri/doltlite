@@ -986,6 +986,14 @@ static void doltliteResetFunc(
       sqlite3_result_error_code(context, rc);
       goto reset_cleanup;
     }
+    if( db->autoCommit ){
+      ProllyHash persistedCat;
+      if( doltliteGetPersistedWorkingCatalogHash(db, &persistedCat)==SQLITE_OK ){
+        doltliteAdoptRollbackBaseline(db, &persistedCat);
+      }else{
+        doltliteInvalidateSessionWorkingState(db);
+      }
+    }
   }else{
     rc = doltlitePersistWorkingSet(db);
     if( rc!=SQLITE_OK ){
