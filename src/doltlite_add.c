@@ -1202,6 +1202,7 @@ static int doltliteStageArgsAndPersist(
 
 stage_done:
   if( bBegan && rc==SQLITE_OK ){
+    doltliteTestPause("DOLTLITE_PAUSE_BEFORE_PERSIST");
     rc = sqlite3_exec(db, "COMMIT", 0, 0, 0);
   }
   if( bBegan && rc!=SQLITE_OK && !db->autoCommit ){

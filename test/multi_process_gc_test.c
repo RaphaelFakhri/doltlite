@@ -1199,15 +1199,15 @@ static void test_gc_sweeps_refused_commit_catalog(void){
   remove(ready);
 }
 
-/* dolt_add persists through a commit that detaches its local refs across
-** the graph lock. A peer's gc that lands first replaces the file; the
-** moved-file proof must still see this connection's branch tips. */
 static void test_gc_before_add_persist(void){
   char path[256];
   char pause[256];
   char ready[300];
   sqlite3 *db = 0;
   int status = 0;
+  int staged[2], resume[2];
+  int gotStaged;
+  char ch = 'g';
   pid_t pid;
 
   printf("--- Test: peer gc between dolt_add's staging and its persist ---\n");
@@ -1216,9 +1216,12 @@ static void test_gc_before_add_persist(void){
   snprintf(ready, sizeof(ready), "%s.ready", pause);
   setup_db_with_rows(path, 5);
   mpHoldPause(pause, ready);
+  if( pipe(staged) || pipe(resume) ){ perror("pipe"); _exit(1); }
   pid = fork();
   if( pid==0 ){
     int rc;
+    close(staged[0]);
+    close(resume[1]);
     if( sqlite3_open(path, &db)!=SQLITE_OK ) _exit(1);
     sqlite3_busy_timeout(db, 10000);
     if( execSql(db, "INSERT INTO t VALUES(100,'mine')")!=SQLITE_OK ) _exit(2);
@@ -1227,18 +1230,31 @@ static void test_gc_before_add_persist(void){
     unsetenv("DOLTLITE_PAUSE_BEFORE_PERSIST");
     if( rc==SQLITE_READONLY ) _exit(10);
     if( rc!=SQLITE_OK && (rc&0xff)!=SQLITE_BUSY ) _exit(11);
+    ch = 'd';
+    if( write(staged[1], &ch, 1)!=1 ) _exit(14);
+    if( read(resume[0], &ch, 1)!=1 || ch!='g' ) _exit(15);
     if( execSql(db, "INSERT INTO t VALUES(300,'after')")!=SQLITE_OK ) _exit(12);
     if( execSql(db, "SELECT dolt_add('.')")!=SQLITE_OK ) _exit(13);
     sqlite3_close(db);
     _exit(0);
   }
   if( pid<0 ){ perror("fork"); _exit(1); }
+  close(staged[1]);
+  close(resume[0]);
   check("gc_addpersist_reached_pause", mpAwaitPause(ready));
   check("gc_addpersist_peer_open", sqlite3_open(path, &db)==SQLITE_OK);
+  sqlite3_busy_timeout(db, 0);
+  check("gc_addpersist_peer_busy", (execSql(db, "SELECT dolt_gc()")&0xff)==SQLITE_BUSY);
+  remove(pause);
+  gotStaged = read(staged[0], &ch, 1)==1 && ch=='d';
+  check("gc_addpersist_finished_staging", gotStaged);
   sqlite3_busy_timeout(db, 10000);
   check("gc_addpersist_peer_gc", execSql(db, "SELECT dolt_gc()")==SQLITE_OK);
-  remove(pause);
+  ch = 'g';
+  if( gotStaged ) check("gc_addpersist_resume", write(resume[1], &ch, 1)==1);
   waitpid(pid, &status, 0);
+  close(staged[0]);
+  close(resume[1]);
   if( !WIFEXITED(status) || WEXITSTATUS(status)!=0 ){
     fprintf(stderr, "  add-persist child exit %d\n",
             WIFEXITED(status) ? WEXITSTATUS(status) : -1);
@@ -1247,6 +1263,8 @@ static void test_gc_before_add_persist(void){
         WIFEXITED(status) && WEXITSTATUS(status)==0);
   check("gc_addpersist_rows",
         countRowsDiag(db, "SELECT count(*) FROM t WHERE id IN (100,300)")==2);
+  check("gc_addpersist_integrity",
+        strcmp(queryScalarText(db, "PRAGMA integrity_check"), "ok")==0);
   sqlite3_close(db);
   remove(path);
   remove(pause);
