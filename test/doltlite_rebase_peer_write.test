@@ -87,4 +87,67 @@ foreach {original phase} {main plan f plan main edit f edit} {
   }
 }
 
+foreach gc {0 1} {
+  foreach reopen {0 1} {
+    foreach mode {autocommit transaction savepoint} {
+      reset_db
+      execsql {
+        CREATE TABLE t(id INTEGER PRIMARY KEY,v TEXT);
+        INSERT INTO t VALUES(0,'base');
+        SELECT dolt_commit('-Am','init');
+        SELECT dolt_checkout('-b','feat');
+        CREATE TABLE feat_only(id INTEGER PRIMARY KEY);
+        INSERT INTO t VALUES(10,'f1');
+        SELECT dolt_commit('-Am','f1');
+        INSERT INTO t VALUES(11,'f2');
+        SELECT dolt_commit('-am','f2');
+        SELECT dolt_checkout('main');
+        INSERT INTO t VALUES(1,'m1');
+        SELECT dolt_commit('-am','m1');
+        SELECT dolt_checkout('feat');
+        SELECT dolt_rebase('-i','main');
+      }
+      if {$reopen} {
+        db close
+        sqlite3 db test.db
+      }
+      sqlite3 peer test.db
+      peer eval {SELECT dolt_branch('-D','feat')}
+      if {$gc} {peer eval {SELECT dolt_gc()}}
+      peer eval {INSERT INTO t VALUES(900,'peer'); SELECT dolt_add('t')}
+      set before [rebase_peer_state peer]
+      peer close
+      switch $mode {
+        transaction {execsql BEGIN}
+        savepoint {execsql {SAVEPOINT caller}}
+      }
+      set name rebase-deleted-$gc-$reopen-$mode
+      do_test $name-abort {
+        set caught [catch {db eval {SELECT dolt_rebase('--abort')}} message]
+        list $caught [expr {[db errorcode]&255}] $message
+      } {1 1 {branch not found: feat; interactive rebase aborted}}
+      do_test $name-cleaned {
+        list [db one {SELECT active_branch()}] \
+             [db eval {SELECT name FROM dolt_branches ORDER BY name}] \
+             [db one {SELECT count(*) FROM sqlite_schema WHERE name='dolt_rebase'}] \
+             [expr {$before eq [rebase_peer_state db]}]
+      } {main main 0 1}
+      do_catchsql_test $name-no-rebase {
+        SELECT dolt_rebase('--abort');
+      } {1 {no rebase in progress}}
+      db close
+      sqlite3 db test.db
+      do_test $name-reopen {
+        list [db eval {SELECT name FROM dolt_branches ORDER BY name}] \
+             [expr {$before eq [rebase_peer_state db]}]
+      } {main 1}
+      do_execsql_test $name-write {
+        INSERT INTO t VALUES(901,'recovered');
+        SELECT length(dolt_commit('-am','recovered'));
+        PRAGMA integrity_check;
+      } {40 ok}
+    }
+  }
+}
+
 finish_test
