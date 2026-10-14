@@ -356,6 +356,31 @@ clean_rollback:
     db->nVcInterruptMask--;
   }
 clean_error:
+  /* A missing branch is SQLITE_BUSY with no message of its own, including
+  ** when the refusal happens inside the transaction that drops untracked
+  ** tables. sqlite3_errstr would say "database is locked". */
+  if( (rc&0xff)==SQLITE_BUSY ){
+    const char *zMissing;
+    const char *zSession;
+    int bGone;
+
+    zMissing = 0;
+    bGone = 0;
+    if( db->nDb>0 && db->aDb[0].pBt ){
+      zMissing = doltliteBtreeMissingWriteBranch(db->aDb[0].pBt);
+    }
+    zSession = doltliteGetSessionBranch(db);
+    if( zMissing ){
+      bGone = 1;
+    }else if( cs && zSession && cs->refs.nBranches>0
+           && chunkStoreFindBranch(cs, zSession, 0)==SQLITE_NOTFOUND ){
+      bGone = 1;
+    }
+    if( bGone ){
+      doltliteCmdResultWriteTxnError(context, db, rc);
+      goto clean_done;
+    }
+  }
   /* A sub-call that fails without touching the connection leaves errmsg
   ** reading "not an error". */
   sqlite3_result_error(context,
