@@ -1163,11 +1163,17 @@ static int doltliteStageArgsAndPersist(
   ProllyHash workingHash;
   ProllyHash savedStaged;
   int rc;
+  int bBegan = 0;
 
+  if( db->autoCommit && db->nVdbeWrite==0 ){
+    rc = sqlite3_exec(db, "BEGIN IMMEDIATE", 0, 0, 0);
+    bBegan = !db->autoCommit;
+    if( rc!=SQLITE_OK ) goto stage_done;
+  }
   rc = doltliteEnsureWriteTxnAndSavepoints(db);
   if( rc!=SQLITE_OK ){
     sqlite3_result_error_code(context, rc);
-    return rc;
+    goto stage_done;
   }
 
   doltliteGetSessionStaged(db, &savedStaged);
@@ -1176,7 +1182,7 @@ static int doltliteStageArgsAndPersist(
   if( rc!=SQLITE_OK ){
     doltliteVcResultErrorCode(context, sqlite3_context_db_handle(context),
         "failed to flush", rc);
-    return rc;
+    goto stage_done;
   }
 
   if( stageAll ){
@@ -1185,15 +1191,32 @@ static int doltliteStageArgsAndPersist(
     rc = doltliteStageNamedTables(db, context, cs, &workingHash, argc, argv,
                                   bForce, 0);
   }
-  if( rc!=SQLITE_OK ) return rc;
+  if( rc!=SQLITE_OK ) goto stage_done;
 
   rc = doltlitePersistOrSaveWorkingSet(db);
   if( rc!=SQLITE_OK ){
     int restoreRc = doltliteSetSessionStaged(db, &savedStaged);
     sqlite3_result_error_code(context, rc);
-    return restoreRc==SQLITE_OK ? rc : restoreRc;
+    if( restoreRc!=SQLITE_OK ) rc = restoreRc;
   }
-  return SQLITE_OK;
+
+stage_done:
+  if( bBegan && rc==SQLITE_OK ){
+    rc = sqlite3_exec(db, "COMMIT", 0, 0, 0);
+  }
+  if( bBegan && rc!=SQLITE_OK && !db->autoCommit ){
+    int rc2;
+    db->nVcInterruptMask++;
+    rc2 = sqlite3_exec(db, "ROLLBACK", 0, 0, 0);
+    if( rc2!=SQLITE_OK ){
+      sqlite3RollbackAll(db, SQLITE_OK);
+      sqlite3CloseSavepoints(db);
+      db->autoCommit = 1;
+      rc = rc2;
+    }
+    db->nVcInterruptMask--;
+  }
+  return rc;
 }
 
 static void doltliteAddFunc(

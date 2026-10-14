@@ -24,6 +24,7 @@ static int nCommit = 0;
 static int nRollback = 0;
 
 static int onCommit(void *pArg){ (void)pArg; nCommit++; return 0; }
+static int rejectCommit(void *pArg){ (void)pArg; nCommit++; return 1; }
 static void onRollback(void *pArg){ (void)pArg; nRollback++; }
 
 static int exec(sqlite3 *db, const char *zSql){
@@ -52,6 +53,15 @@ static void expectHooks(
   check(zName, r==0);
 }
 
+static int scalarInt(sqlite3 *db, const char *zSql){
+  sqlite3_stmt *p = 0;
+  int result = -1;
+  if( sqlite3_prepare_v2(db, zSql, -1, &p, 0)==SQLITE_OK
+   && sqlite3_step(p)==SQLITE_ROW ) result = sqlite3_column_int(p, 0);
+  sqlite3_finalize(p);
+  return result;
+}
+
 int main(void){
   char zPath[256];
   sqlite3 *db = 0;
@@ -76,6 +86,7 @@ int main(void){
   /* Writing rows is a SQL transaction, so both groups are represented. */
   expectHooks(db, "insert", "INSERT INTO t VALUES(2,'y')", 1);
   expectHooks(db, "dolt_add", "SELECT dolt_add('-A')", 1);
+  expectHooks(db, "add inside SQL writer", "INSERT INTO t VALUES(30,dolt_add('t'))", 1);
 
   /* These move refs and publish working state without a SQL transaction. */
   expectHooks(db, "dolt_commit", "SELECT dolt_commit('-m','c1')", 0);
@@ -101,6 +112,37 @@ int main(void){
       "BEGIN; INSERT INTO t VALUES(4,'q'); ROLLBACK;")==SQLITE_OK);
   check("rollback: rollback hook fires", nRollback==1);
   check("rollback: commit hook silent", nCommit==0);
+
+  check("add failure seed", exec(db, "INSERT INTO t VALUES(5,'pending')")==SQLITE_OK);
+  nCommit = nRollback = 0;
+  check("add missing table fails", exec(db, "SELECT dolt_add('t','missing')")==SQLITE_ERROR);
+  check("add missing table closes transaction", sqlite3_get_autocommit(db));
+  check("add missing table hooks", nCommit==0 && nRollback==1);
+  check("add missing table leaves staging unchanged", scalarInt(db,
+      "SELECT count(*) FROM dolt_status WHERE staged")==0);
+
+  sqlite3_commit_hook(db, rejectCommit, 0);
+  nCommit = nRollback = 0;
+  check("add rejected commit fails", (exec(db, "SELECT dolt_add('-A')")&255)==SQLITE_CONSTRAINT);
+  check("add rejected commit closes transaction", sqlite3_get_autocommit(db));
+  check("add rejected commit hooks", nCommit==1 && nRollback==1);
+  check("add rejected commit leaves staging unchanged", scalarInt(db,
+      "SELECT count(*) FROM dolt_status WHERE staged")==0);
+  check("add rejected commit keeps working rows", scalarInt(db,
+      "SELECT count(*) FROM t WHERE a=5")==1);
+  {
+    sqlite3 *peer = 0;
+    check("add rejected commit peer open", sqlite3_open(zPath, &peer)==SQLITE_OK);
+    check("add rejected commit durable staging unchanged", scalarInt(peer,
+        "SELECT count(*) FROM dolt_status WHERE staged")==0);
+    check("add rejected commit durable working rows", scalarInt(peer,
+        "SELECT count(*) FROM t WHERE a=5")==1);
+    check("add rejected commit releases lock", exec(peer,
+        "INSERT INTO t VALUES(6,'peer')")==SQLITE_OK);
+    sqlite3_close(peer);
+  }
+  sqlite3_commit_hook(db, onCommit, 0);
+  expectHooks(db, "add retry after rejected commit", "SELECT dolt_add('t')", 1);
 
   sqlite3_commit_hook(db, 0, 0);
   sqlite3_rollback_hook(db, 0, 0);

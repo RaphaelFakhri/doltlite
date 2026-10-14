@@ -302,4 +302,59 @@ foreach boundary {begin nested collision} {
   }
 }
 
+proc add_interrupt_snapshot {handle} {
+  $handle eval {
+    SELECT dolt_hashof('HEAD'),dolt_hashof_db('WORKING'),dolt_hashof_db('STAGED');
+    SELECT table_name,staged,status FROM dolt_status ORDER BY table_name,staged;
+    SELECT id,v FROM t ORDER BY id;
+    SELECT * FROM u;
+  }
+}
+
+foreach arg {. t -A} {
+  foreach api {progress interrupt} {
+    set interrupted 0
+    for {set tick 1} {$tick<=400} {incr tick} {
+      reset_db
+      db eval {
+        CREATE TABLE t(id INTEGER PRIMARY KEY,v TEXT);
+        INSERT INTO t VALUES(1,'base');
+        SELECT dolt_commit('-Am','base');
+        INSERT INTO t VALUES(2,'staged');
+        SELECT dolt_add('t');
+        INSERT INTO t VALUES(3,'working');
+        CREATE TABLE u(id INTEGER PRIMARY KEY);
+        INSERT INTO u VALUES(99);
+      }
+      set before [add_interrupt_snapshot db]
+      set ::cleanTicks 0
+      set ::cleanFired 0
+      db progress 1 [list clean_interrupt_progress $api $tick]
+      set failed [catch {db eval "SELECT dolt_add('$arg')"} message]
+      set code [sqlite3_errcode db]
+      db progress 0 {}
+      set prefix add-interrupt-$arg-$api-$tick
+      do_test $prefix.autocommit {sqlite3_get_autocommit db} 1
+      if {$failed} {
+        incr interrupted
+        do_test $prefix.code {set code} SQLITE_INTERRUPT
+        do_test $prefix.live {add_interrupt_snapshot db} $before
+        sqlite3 observer test.db
+        do_test $prefix.durable {add_interrupt_snapshot observer} $before
+        observer close
+        do_execsql_test $prefix.write {
+          INSERT INTO t VALUES(4,'recovered');
+        } {}
+      } else {
+        do_test $prefix.staged {
+          db one {SELECT count(*) FROM dolt_diff_t('HEAD','STAGED')}
+        } 2
+      }
+      if {!$::cleanFired} break
+    }
+    do_test add-interrupt-$arg-$api.cancellable {expr {$interrupted>0}} 1
+    do_test add-interrupt-$arg-$api.terminates {expr {$tick<=400}} 1
+  }
+}
+
 finish_test
