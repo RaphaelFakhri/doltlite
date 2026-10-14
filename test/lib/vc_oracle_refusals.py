@@ -333,7 +333,7 @@ def _selftest():
     branch = "Error near line 3: no such branch: feat\n"
     assert refusal_bits(dl, branch) == "1", refusal_bits(dl, branch)
     assert not vectors_match(refusal_bits(dl, ""), refusal_bits(dt, branch))
-    shared = "Error near line 3: cannot pull with uncommitted changes\n"
+    shared = "Error near line 3: cannot merge with uncommitted changes\n"
     assert refusal_bits(dl, shared) == refusal_bits(dt, shared) == "1"
     assert vectors_match(refusal_bits(dl, shared), refusal_bits(dt, shared))
     rollback = "SELECT 1;\nROLLBACK;\n"
