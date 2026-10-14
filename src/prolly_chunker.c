@@ -119,13 +119,13 @@ static int finishFlushLevel(ProllyChunker *ch, int level,
   return SQLITE_OK;
 }
 
-/* Read a node's level, item count and first child hash. */
 static int chunkerPeekNode(ProllyChunker *ch, const ProllyHash *pHash,
                            int *pLevel, int *pnItems, ProllyHash *pChild){
   ProllyCacheEntry *pEntry = ch->pCache ? prollyCacheGet(ch->pCache, pHash) : 0;
   ProllyNode node;
   u8 *pData = 0;
   int nData = 0;
+  int nDataPhys = 0;
   int rc = SQLITE_OK;
   if( pEntry ){
     *pLevel = pEntry->node.level;
@@ -134,9 +134,9 @@ static int chunkerPeekNode(ProllyChunker *ch, const ProllyHash *pHash,
     prollyCacheRelease(ch->pCache, pEntry);
     return SQLITE_OK;
   }
-  rc = chunkStoreGet(ch->pStore, pHash, &pData, &nData);
+  rc = chunkStoreGetSparse(ch->pStore, pHash, &pData, &nData, &nDataPhys);
   if( rc!=SQLITE_OK ) return rc;
-  rc = prollyNodeParse(&node, pData, nData);
+  rc = prollyNodeParseSparse(&node, pData, nData, nDataPhys);
   if( rc==SQLITE_OK ){
     *pLevel = node.level;
     *pnItems = node.nItems;
@@ -146,8 +146,6 @@ static int chunkerPeekNode(ProllyChunker *ch, const ProllyHash *pHash,
   return rc;
 }
 
-/* Dolt getCanonicalRoot(): a single-entry internal level is replaced by the
-** first descendant that is a leaf or has more than one child. */
 static int canonicalRootFromSingleChild(ProllyChunker *ch,
                                         ProllyNodeBuilder *b,
                                         ProllyHash *pRoot){
@@ -328,17 +326,10 @@ int prollyChunkerFinish(ProllyChunker *ch){
         ProllyHash hash;
 
         if( level>0 && pLevel->builder.nItems==1 ){
-          /* An internal level holding one child is not a canonical root.
-          ** Like Dolt's getCanonicalRoot(), never write it: descend to the
-          ** first leaf or multi-child internal node. Without this the root
-          ** of identical content depends on edit order. */
           rc = canonicalRootFromSingleChild(ch, &pLevel->builder, &hash);
           if( rc!=SQLITE_OK ) return rc;
           memcpy(&ch->root, &hash, sizeof(ProllyHash));
-          prollyNodeBuilderReset(&pLevel->builder);
-          pLevel->nItems = 0;
-          pLevel->nBytes = 0;
-          pLevel->subtreeCount = 0;
+          resetLevel(pLevel);
           return SQLITE_OK;
         }
 

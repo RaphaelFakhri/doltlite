@@ -4,6 +4,7 @@ doltlite_recover_backup_fault
 doltlite_recover_fts3_optimize
 doltlite_recover_history_pk
 doltlite_unborn_branch
+doltlite_chunker_canonical_root
 doltlite_empty_working_set_peer
 doltlite_apply_read_error
 doltlite_reset_read_error
