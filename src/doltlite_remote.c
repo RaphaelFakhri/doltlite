@@ -214,7 +214,7 @@ static int remoteValidateGraph(
 
 /* Hashes whose closure the store already holds complete: every chunk under
 ** the anchors' trees, without their commit history. Every installed ref was
-** validated or built locally, and gc keeps what refs reach, so a pushed
+** validated or built locally, and gc keeps what refs reach, so a transferred
 ** graph only needs reading where it differs. Leaves are named by their
 ** level-1 parents, so the build reads about one chunk in a node's fanout. */
 static int remoteBuildTrustedSet(
@@ -279,6 +279,34 @@ static int remoteBuildTrustedSet(
   return rc;
 }
 
+static int remoteValidateGraphWithAnchors(
+  ChunkStore *pStore,
+  const ProllyHash *aRoots,
+  int nRoots,
+  const ProllyHash *aAnchors,
+  int nAnchors,
+  int *pbMissing
+){
+  ProllyHashSet trusted;
+  int bTrusted = 0;
+  int rc;
+
+  rc = prollyHashSetInit(&trusted, 1024);
+  if( rc!=SQLITE_OK ) return rc;
+  if( nAnchors>0 ){
+    rc = remoteBuildTrustedSet(pStore, aAnchors, nAnchors, &trusted);
+    /* An anchor that cannot be read proves nothing; walk everything. */
+    if( rc==SQLITE_OK ) bTrusted = 1;
+    else if( rc!=SQLITE_NOMEM ) rc = SQLITE_OK;
+  }
+  if( rc==SQLITE_OK ){
+    rc = remoteValidateGraphEx(pStore, aRoots, nRoots,
+                               bTrusted ? &trusted : 0, pbMissing);
+  }
+  prollyHashSetFree(&trusted);
+  return rc;
+}
+
 static int remoteValidateGraphTrusted(
   ChunkStore *pStore,
   const ProllyHash *aRoots,
@@ -287,11 +315,8 @@ static int remoteValidateGraphTrusted(
   int *pbMissing
 ){
   ProllyHash aAnchors[4];
-  ProllyHashSet trusted;
   const char *zDefault = chunkStoreGetDefaultBranch(pStore);
   int nAnchors = 0;
-  int bTrusted = 0;
-  int rc;
 
   memset(aAnchors, 0, sizeof(aAnchors));
   if( zBranch
@@ -306,19 +331,35 @@ static int remoteValidateGraphTrusted(
    && chunkStoreFindBranch(pStore, zDefault, &aAnchors[nAnchors])==SQLITE_OK ){
     nAnchors++;
   }
-  rc = prollyHashSetInit(&trusted, 1024);
-  if( rc!=SQLITE_OK ) return rc;
-  if( nAnchors>0 ){
-    rc = remoteBuildTrustedSet(pStore, aAnchors, nAnchors, &trusted);
-    /* An anchor that cannot be read proves nothing; walk everything. */
-    if( rc==SQLITE_OK ) bTrusted = 1;
-    else if( rc!=SQLITE_NOMEM ) rc = SQLITE_OK;
-  }
+  return remoteValidateGraphWithAnchors(
+      pStore, aRoots, nRoots, aAnchors, nAnchors, pbMissing);
+}
+
+static int remoteValidateFetchedGraph(
+  ChunkStore *pStore,
+  const ProllyHash *pCommit,
+  const char *zRemoteName,
+  const char *zBranch
+){
+  const BranchRef *aBranch;
+  ProllyHash *aAnchors;
+  int nBranch;
+  int nAnchors = 0;
+  int rc;
+  int i;
+
+  refsTableGetBranches(&pStore->refs, &nBranch, &aBranch);
+  aAnchors = sqlite3_malloc64(((sqlite3_uint64)nBranch+1)*sizeof(*aAnchors));
+  if( !aAnchors ) return SQLITE_NOMEM;
+  for(i=0; i<nBranch; i++) aAnchors[nAnchors++] = aBranch[i].commitHash;
+  rc = chunkStoreFindTracking(pStore, zRemoteName, zBranch, &aAnchors[nAnchors]);
+  if( rc==SQLITE_OK ) nAnchors++;
+  if( rc==SQLITE_NOTFOUND ) rc = SQLITE_OK;
   if( rc==SQLITE_OK ){
-    rc = remoteValidateGraphEx(pStore, aRoots, nRoots,
-                               bTrusted ? &trusted : 0, pbMissing);
+    rc = remoteValidateGraphWithAnchors(
+        pStore, pCommit, 1, aAnchors, nAnchors, 0);
   }
-  prollyHashSetFree(&trusted);
+  sqlite3_free(aAnchors);
   return rc;
 }
 
@@ -2344,9 +2385,8 @@ static int installFetchedRefs(
   if( rc==SQLITE_OK && !bSkipGraphValidation ){
     /* Nothing roots synced chunks until this tracking ref lands. A gc in that
     ** window collects the fetch; installing then wedges later connections. */
-    ProllyHash aRoots[1];
-    memcpy(&aRoots[0], pRemoteCommit, sizeof(aRoots[0]));
-    rc = remoteValidateGraph(pLocal, aRoots, 1);
+    rc = remoteValidateFetchedGraph(
+        pLocal, pRemoteCommit, zRemoteName, zBranch);
     if( rc==SQLITE_NOTFOUND || rc==SQLITE_CORRUPT ){
       /* The miss also recorded a missing-chunk error on the origin source,
       ** which would report a healthy store as corrupt. */
