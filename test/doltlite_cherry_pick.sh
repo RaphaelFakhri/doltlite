@@ -1055,4 +1055,30 @@ SELECT dolt_commit('-Am','add t'); SELECT dolt_checkout('main');" > /dev/null 2>
 done
 rm -f "$DB"
 
+# A conflicted table is staged at its base, and its index entries must be too.
+DB=/tmp/test_cp_conflict_index_$$.db; rm -f "$DB"
+$DOLTLITE "$DB" "CREATE TABLE w(id INTEGER PRIMARY KEY, v TEXT);
+CREATE INDEX j ON w(v); INSERT INTO w VALUES(1,'a');
+SELECT dolt_commit('-Am','base'); SELECT dolt_branch('b1');
+UPDATE w SET v='m'; SELECT dolt_commit('-Am','m');" > /dev/null 2>&1
+$DOLTLITE "$DB" "SELECT dolt_checkout('b1'); UPDATE w SET v='b';
+INSERT INTO w VALUES(2,'z'); DROP INDEX j; CREATE INDEX k ON w(v);
+SELECT dolt_commit('-Am','reindex');" > /dev/null 2>&1
+echo "BEGIN;
+SELECT dolt_cherry_pick('b1');
+SELECT dolt_conflicts_resolve('--ours','w');
+SELECT dolt_commit('-m','staged only');
+SELECT dolt_branch('chk','HEAD');" | $DOLTLITE "$DB" > /dev/null 2>&1
+run_test "cp_conflict_index_staged_at_base" \
+  "PRAGMA integrity_check; SELECT group_concat(name) FROM (SELECT name FROM sqlite_master ORDER BY name); SELECT group_concat(id||v) FROM w;" \
+  "ok
+j,w
+1m" "$DB/chk"
+run_test "cp_conflict_index_working_kept" \
+  "SELECT group_concat(name) FROM (SELECT name FROM sqlite_master ORDER BY name); SELECT group_concat(id||v) FROM (SELECT * FROM w ORDER BY id); PRAGMA integrity_check;" \
+  "k,w
+1m,2z
+ok" "$DB"
+rm -f "$DB"
+
 dltest_finish
