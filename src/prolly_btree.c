@@ -1232,7 +1232,7 @@ static int prollyBtreeOpenImpl(
     p->bDeferredRevision = pBt->store.openPending && zBranchFromPath;
   }
 
-  p->cat.iNextTable = 2;
+  if( p->cat.iNextTable<2 ) p->cat.iNextTable = 2;
   if( !addTable(p, 1, BTREE_INTKEY) ){
     pagerShimDestroy(pBt->pPagerShim);
     prollyCacheFree(&pBt->cache);

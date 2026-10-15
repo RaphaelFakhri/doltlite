@@ -1,0 +1,108 @@
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+
+reset_db
+execsql {
+  BEGIN;
+  INSERT INTO dolt_docs VALUES('a','1');
+  ROLLBACK;
+}
+db close
+sqlite3 db test.db
+do_execsql_test open-root-allocation-empty {
+  CREATE TABLE w(id INTEGER PRIMARY KEY,v TEXT);
+  INSERT INTO w VALUES(1,'base');
+  SELECT rootpage FROM sqlite_schema WHERE name='w';
+  SELECT id,v FROM w;
+  PRAGMA integrity_check;
+} {2 1 base ok}
+
+foreach layout {rowid clustered indexed} {
+  foreach operation {revert cherry_pick} {
+    foreach mode {amend named} {
+      reset_db
+      set key "INTEGER PRIMARY KEY"
+      if {$layout eq "clustered"} {set key "INT PRIMARY KEY"}
+      execsql "CREATE TABLE w(id $key,v TEXT)"
+      if {$layout eq "indexed"} {execsql {CREATE INDEX wv ON w(v)}}
+      execsql {
+        INSERT INTO w VALUES(1,'base');
+        SELECT dolt_commit('-Am','base');
+        SELECT dolt_branch('side');
+      }
+      sqlite3 cold test.db@side
+      set prefix open-root-allocation-$layout-$operation-$mode
+      execsql {BEGIN IMMEDIATE}
+      do_test $prefix.busy {
+        list [catch {cold eval "SELECT dolt_${operation}('HEAD')"} msg] \
+             [sqlite3_errcode cold]
+      } {1 SQLITE_BUSY}
+      execsql {COMMIT}
+      do_test $prefix.create {
+        cold eval {CREATE TABLE d(id INTEGER PRIMARY KEY,x TEXT)}
+      } {}
+      do_test $prefix.distinct-roots {
+        cold eval {
+          SELECT count(DISTINCT rootpage) FROM sqlite_schema
+           WHERE type='table' AND name IN ('w','d');
+        }
+      } {2}
+      do_test $prefix.separate-writes {
+        cold eval {
+          INSERT INTO d VALUES(50,'scratch');
+          INSERT INTO w VALUES(3,'tracked');
+          SELECT id,v FROM w ORDER BY id;
+          SELECT id,x FROM d ORDER BY id;
+        }
+      } {1 base 3 tracked 50 scratch}
+      if {$mode eq "amend"} {
+        set commit {SELECT length(dolt_commit('-a','--amend','-m','amended'))}
+      } else {
+        cold eval {SELECT dolt_add('w')}
+        set commit {SELECT length(dolt_commit('-m','named stage'))}
+      }
+      do_test $prefix.commit {
+        concat [cold eval $commit] [cold eval {
+          SELECT id,v FROM dolt_at_w('HEAD') ORDER BY id;
+          PRAGMA integrity_check;
+        }]
+      } {40 1 base 3 tracked ok}
+      set committed [cold one {SELECT dolt_hashof('HEAD')}]
+      sqlite3 historical test.db@$committed
+      do_test $prefix.committed-schema {
+        historical eval {
+          SELECT name,tbl_name FROM sqlite_schema WHERE type='table';
+          SELECT id,v FROM w ORDER BY id;
+          PRAGMA integrity_check;
+        }
+      } {w w 1 base 3 tracked ok}
+      historical close
+      do_test $prefix.commit-all {
+        cold eval {SELECT length(dolt_commit('-Am','both tables'))}
+      } {40}
+      cold close
+      sqlite3 cold test.db@side
+      do_test $prefix.reopen {
+        cold eval {
+          SELECT id,v FROM w ORDER BY id;
+          SELECT id,x FROM d ORDER BY id;
+          SELECT id,v FROM dolt_at_w('HEAD') ORDER BY id;
+          SELECT id,x FROM dolt_at_d('HEAD') ORDER BY id;
+          PRAGMA integrity_check;
+        }
+      } {1 base 3 tracked 50 scratch 1 base 3 tracked 50 scratch ok}
+      if {$layout eq "indexed"} {
+        do_test $prefix.index {
+          cold eval {SELECT id FROM w INDEXED BY wv WHERE v='tracked'}
+        } {3}
+      }
+      do_execsql_test $prefix.branch-owned {
+        SELECT id,v FROM w ORDER BY id;
+        SELECT count(*) FROM sqlite_schema WHERE name='d';
+        PRAGMA integrity_check;
+      } {1 base 0 ok}
+      cold close
+    }
+  }
+}
+finish_test
