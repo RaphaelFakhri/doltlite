@@ -78,6 +78,7 @@ doltlite_merge_table_name_conflict
 doltlite_merge_seed
 doltlite_merge_shared_columns
 doltlite_merge_local_changes
+doltlite_merge_index_domains
 doltlite_merge_added_unique
 doltlite_merge_ignored
 doltlite_rebase_plan_hash
@@ -86,6 +87,7 @@ doltlite_rebase_peer_write
 doltlite_rebase_io
 doltlite_conflicts_multi
 doltlite_conflict_rollback_baseline
+doltlite_replay_conflict_indexes
 doltlite_recover_changes
 doltlite_gc_stop_world
 doltlite_gc_queue
@@ -149,6 +151,7 @@ doltlite_ref_peer_gc
 doltlite_ref_snapshot_boundary
 doltlite_deleted_branch_gc
 doltlite_reset_peer_gc
+doltlite_reset_peer_write
 doltlite_backup_peer_write
 doltlite_backup_busy
 doltlite_vc_interrupt

@@ -1,0 +1,94 @@
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+
+foreach {layout key} {integer {INTEGER PRIMARY KEY} clustered {INT PRIMARY KEY}} {
+  foreach indexes {ours theirs both removed} {
+    foreach finish {rollback commit} {
+      reset_db
+      execsql "CREATE TABLE w(id $key,v TEXT)"
+      execsql {
+        CREATE TABLE d(id INTEGER PRIMARY KEY,x TEXT);
+        CREATE INDEX id ON d(x);
+        CREATE TABLE z(id INTEGER PRIMARY KEY,v TEXT);
+        INSERT INTO w VALUES(1,'base');
+        INSERT INTO z VALUES(1,'base');
+      }
+      if {$indexes eq "removed"} {execsql {CREATE INDEX iw ON w(v)}}
+      execsql {
+        SELECT dolt_commit('-Am','base');
+        SELECT dolt_checkout('-b','other');
+        DROP TABLE d;
+        CREATE TABLE a(id INTEGER PRIMARY KEY);
+        INSERT INTO a VALUES(10);
+        UPDATE w SET v='other';
+        INSERT INTO w VALUES(2,'other');
+        INSERT INTO z VALUES(2,'other');
+      }
+      if {$indexes eq "theirs"} {execsql {CREATE INDEX theirs ON w(v)}}
+      if {$indexes eq "both"} {execsql {CREATE INDEX ours ON w(v)}}
+      if {$indexes eq "removed"} {execsql {DROP INDEX iw}}
+      execsql {
+        SELECT dolt_commit('-Am','other');
+        SELECT dolt_checkout('main');
+        UPDATE w SET v='main';
+      }
+      if {$indexes in {ours both}} {execsql {CREATE INDEX ours ON w(v)}}
+      execsql {SELECT dolt_commit('-Am','main')}
+      set before [execsql {SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY name}]
+      set prefix replay-index-$layout-$indexes-$finish
+      execsql {BEGIN IMMEDIATE}
+      do_test $prefix-conflict {
+        set result [catchsql {SELECT dolt_cherry_pick('other')}]
+        list [lindex $result 0] [string match {*1 conflict*} [lindex $result 1]]
+      } {1 1}
+      do_execsql_test $prefix-staged {
+        SELECT dolt_hashof_table('w','HEAD')=dolt_hashof_table('w','STAGED');
+        SELECT count(*) FROM dolt_schema_diff('HEAD','STAGED')
+          WHERE from_table_name='w' OR to_table_name='w';
+        SELECT id FROM w ORDER BY id;
+        SELECT id FROM a;
+        SELECT id FROM z ORDER BY id;
+      } {1 0 1 2 10 1 2}
+      if {$finish eq "rollback"} {
+        execsql {ROLLBACK}
+        do_execsql_test $prefix-rows {SELECT * FROM w} {1 main}
+        do_test $prefix-schema {
+          execsql {SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY name}
+        } $before
+      } else {
+        execsql {
+          SELECT dolt_conflicts_resolve('--ours','w');
+          SELECT dolt_commit('-m','nonconflicting tables');
+          SELECT dolt_branch('staged_commit');
+        }
+        sqlite3 snapshot test.db/staged_commit
+        do_test $prefix-committed {
+          snapshot eval {
+            SELECT * FROM w;
+            SELECT id FROM a;
+            SELECT id FROM z ORDER BY id;
+            SELECT count(*) FROM sqlite_schema WHERE name='theirs';
+            SELECT count(*) FROM sqlite_schema WHERE name='d';
+            PRAGMA integrity_check;
+          }
+        } {1 main 10 1 2 0 0 ok}
+        snapshot close
+        execsql {SELECT dolt_commit('-Am','resolved table')}
+      }
+      do_execsql_test $prefix-integrity {PRAGMA integrity_check} {ok}
+      db close
+      sqlite3 db test.db
+      if {$finish eq "rollback"} {
+        do_execsql_test $prefix-reopen {SELECT * FROM w; PRAGMA integrity_check} {1 main ok}
+      } else {
+        do_execsql_test $prefix-reopen {
+          SELECT * FROM w ORDER BY id;
+          SELECT id FROM w WHERE v='other';
+          SELECT count(*) FROM dolt_conflicts;
+          PRAGMA integrity_check;
+        } {1 main 2 other 2 0 ok}
+      }
+    }
+  }
+}
+finish_test

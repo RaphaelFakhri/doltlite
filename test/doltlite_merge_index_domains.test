@@ -1,0 +1,63 @@
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+
+foreach {layout key} {integer {INTEGER PRIMARY KEY} clustered {INT PRIMARY KEY}} {
+  foreach local {add drop} {
+    reset_db
+    execsql "CREATE TABLE w(id $key,v TEXT)"
+    execsql {
+      CREATE TABLE d(id INTEGER PRIMARY KEY);
+      CREATE INDEX iw ON w(v);
+      INSERT INTO w VALUES(1,'base');
+      SELECT dolt_commit('-Am','base');
+      SELECT dolt_checkout('-b','other');
+      INSERT INTO w VALUES(2,'other');
+      SELECT dolt_commit('-am','other');
+      SELECT dolt_checkout('main');
+      INSERT INTO w VALUES(3,'main');
+      SELECT dolt_commit('-am','main');
+    }
+    if {$local eq "drop"} {
+      execsql {DROP TABLE d}
+    } else {
+      execsql {CREATE TABLE a(id INTEGER PRIMARY KEY)}
+    }
+    execsql {INSERT INTO w VALUES(4,'local'); SELECT dolt_add('w'); SELECT dolt_commit('-m','stage w only')}
+    set prefix merge-index-domain-$layout-$local
+    do_test $prefix-merge {
+      lindex [catchsql {SELECT dolt_merge('--no-ff','other')}] 0
+    } {0}
+    do_execsql_test $prefix-rows {
+      SELECT id,v FROM w ORDER BY id;
+      SELECT id FROM w INDEXED BY iw WHERE v='other';
+      SELECT id FROM w NOT INDEXED WHERE v='other';
+      PRAGMA integrity_check;
+    } {1 base 2 other 3 main 4 local 2 2 ok}
+    set status [expr {$local eq "drop" ? {d deleted} : {a {new table}}}]
+    do_execsql_test $prefix-unstaged {
+      SELECT table_name,status FROM dolt_status;
+    } $status
+    execsql {SELECT dolt_branch('merged_commit')}
+    sqlite3 snapshot test.db/merged_commit
+    do_test $prefix-committed {
+      snapshot eval {
+        SELECT id,v FROM w ORDER BY id;
+        SELECT id FROM w INDEXED BY iw WHERE v='other';
+        SELECT count(*) FROM sqlite_schema WHERE name='d';
+        SELECT count(*) FROM sqlite_schema WHERE name='a';
+        PRAGMA integrity_check;
+      }
+    } {1 base 2 other 3 main 4 local 2 1 0 ok}
+    snapshot close
+    execsql {SELECT dolt_commit('-Am','local schema')}
+    db close
+    sqlite3 db test.db
+    do_execsql_test $prefix-reopen {
+      SELECT id,v FROM w ORDER BY id;
+      SELECT id FROM w INDEXED BY iw WHERE v='other';
+      SELECT count(*) FROM dolt_status;
+      PRAGMA integrity_check;
+    } {1 base 2 other 3 main 4 local 2 0 ok}
+  }
+}
+finish_test

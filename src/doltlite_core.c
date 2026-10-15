@@ -1265,6 +1265,15 @@ int doltlitePersistOrSaveWorkingSet(sqlite3 *db){
   return doltliteSaveWorkingSet(db);
 }
 
+/* Close a private batch while the outer VC command keeps conflicts pending. */
+int doltliteCommitInternalTxn(sqlite3 *db){
+  int rc;
+  db->nVcInternalCommit++;
+  rc = sqlite3_exec(db, "COMMIT", 0, 0, 0);
+  db->nVcInternalCommit--;
+  return rc;
+}
+
 int doltliteDetectConstraintViolationsInTxn(
   sqlite3 *db,
   const ProllyHash *pAncCat,
@@ -1287,7 +1296,8 @@ int doltliteDetectConstraintViolationsInTxn(
   vrc = doltliteDetectConstraintViolationsFiltered(
       db, pAncCat, 0, 0, 1, pnViolations, pzErr);
   if( bOwnTxn ){
-    erc = sqlite3_exec(db, vrc==SQLITE_OK ? "COMMIT" : "ROLLBACK", 0, 0, 0);
+    erc = vrc==SQLITE_OK ? doltliteCommitInternalTxn(db)
+                        : sqlite3_exec(db, "ROLLBACK", 0, 0, 0);
     if( vrc==SQLITE_OK ) vrc = erc;
   }
   return vrc;

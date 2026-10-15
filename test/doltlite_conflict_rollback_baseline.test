@@ -55,4 +55,77 @@ foreach {layout key} {integer {INTEGER PRIMARY KEY} clustered {INT PRIMARY KEY}}
   }
 }
 
+proc conflict_internal_commit {} {db eval COMMIT}
+
+foreach {layout key} {integer {INTEGER PRIMARY KEY} clustered {INT PRIMARY KEY}} {
+  foreach {boundary sql} {
+    mixed {SELECT dolt_reset()}
+    soft {SELECT dolt_reset('--soft')}
+    table {SELECT dolt_reset('w')}
+    callback {SELECT conflict_internal_commit()}
+  } {
+    foreach finish {rollback resolve} {
+      reset_db
+      execsql "CREATE TABLE w(id $key,v TEXT)"
+      execsql {
+        CREATE TABLE u(id INTEGER PRIMARY KEY);
+        INSERT INTO w VALUES(1,'base');
+        SELECT dolt_commit('-Am','base');
+        SELECT dolt_checkout('-b','other');
+        UPDATE w SET v='other';
+        INSERT INTO u VALUES(2);
+        SELECT dolt_commit('-am','other');
+        SELECT dolt_checkout('main');
+        UPDATE w SET v='main';
+        SELECT dolt_commit('-am','main');
+        BEGIN;
+      }
+      db function conflict_internal_commit conflict_internal_commit
+      set prefix conflict-seal-$layout-$boundary-$finish
+      set head [execsql {SELECT dolt_hashof('HEAD')}]
+      do_test $prefix-pick {
+        set result [catchsql {SELECT dolt_cherry_pick('other')}]
+        list [lindex $result 0] [string match {*1 conflict*} [lindex $result 1]]
+      } {1 1}
+      set staged [execsql {SELECT dolt_hashof_db('STAGED')}]
+      execsql {INSERT INTO u VALUES(99)}
+      do_test $prefix-refused {
+        set result [catchsql $sql]
+        list [lindex $result 0] [regexp {unresolved conflicts|conflicts detected} [lindex $result 1]]
+      } {1 1}
+      do_execsql_test $prefix-staged-kept {SELECT dolt_hashof_db('STAGED')} $staged
+      do_test $prefix-transaction-open {sqlite3_get_autocommit db} 0
+      do_execsql_test $prefix-state-kept {
+        SELECT count(*) FROM dolt_conflicts;
+        SELECT * FROM u;
+      } {1 2 99}
+      do_execsql_test $prefix-head-kept {SELECT dolt_hashof('HEAD')} $head
+      if {$finish eq "resolve"} {
+        execsql {SELECT dolt_conflicts_resolve('--ours','w'); COMMIT}
+      } else {
+        execsql {ROLLBACK}
+      }
+      do_execsql_test $prefix-no-conflicts {
+        SELECT count(*) FROM dolt_conflicts;
+        BEGIN IMMEDIATE;
+        ROLLBACK;
+        PRAGMA integrity_check;
+      } {0 ok}
+      db close
+      sqlite3 db test.db
+      set expected [expr {$finish eq "resolve" ? 2 : 0}]
+      do_execsql_test $prefix-reopen {
+        SELECT * FROM w;
+        SELECT count(*) FROM u;
+        SELECT count(*) FROM dolt_conflicts;
+        PRAGMA integrity_check;
+      } [list 1 main $expected 0 ok]
+      do_execsql_test $prefix-later-write {
+        INSERT INTO u VALUES(100);
+        SELECT count(*) FROM u WHERE id=100;
+      } {1}
+    }
+  }
+}
+
 finish_test

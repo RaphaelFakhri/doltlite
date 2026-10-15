@@ -1934,6 +1934,7 @@ void doltliteTestFailNextGetBranchWorkingSet(void);
 void doltliteTestSetMergeInstallHook(void (*xHook)(void*), void *pArg);
 void doltliteTestFailMergeInstallStepAt(int n);
 int doltliteMergeInstallStepFails(void);
+int doltliteCommitInternalTxn(sqlite3 *db);
 int doltliteMergeAutocommitTxnBegin(sqlite3 *db, int *pbBegan);
 int doltliteMergeAutocommitTxnEnd(sqlite3 *db, int bBegan, int rc);
 void doltliteTestSetRebaseBeforeAdvanceHook(void (*xHook)(void));
