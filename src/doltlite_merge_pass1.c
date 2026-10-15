@@ -116,10 +116,12 @@ static int mergePass1CollectIndexes(
     struct TableEntry *oursIdx;
     /* WITHOUT ROWID PK is the table tree; skip it. */
     if( pIdx->idxType==SQLITE_IDXTYPE_PRIMARYKEY && !HasRowid(pTab) ) continue;
-    oursIdx = doltliteFindTableByNumber(c->aOurs, c->nOurs, pIdx->tnum);
+    oursIdx = findCatalogEntryBySchemaObject(
+        c->aOurs, c->nOurs, c->aOursSchema, c->nOursSchema,
+        "index", pIdx->zName, pTab->zName);
     if( oursIdx ){
       MergeIndexInfo *mi = &aIdxInfo[nIdxInfo];
-      mi->iTable = pIdx->tnum;
+      mi->iTable = oursIdx->iTable;
       memcpy(&mi->oursRoot, &oursIdx->root, sizeof(ProllyHash));
       mi->nColumn = pIdx->nKeyCol;
       mi->aiColumn = pIdx->aiColumn;
