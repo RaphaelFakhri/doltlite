@@ -54,6 +54,7 @@ foreach layout {rowid without-rowid} {
       do_test $name-commit-refused {
         lindex [catchsql COMMIT] 0
       } 1
+      do_test $name-commit-refusal-ended {sqlite3_get_autocommit db} 1
       do_execsql_test $name-commit-refusal-preserved {
         SELECT id,v FROM t ORDER BY id;
         SELECT count(*) FROM dolt_conflicts;

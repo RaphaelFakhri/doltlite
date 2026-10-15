@@ -35,6 +35,7 @@ static int vdbeDoltliteCheckCommit(Vdbe *p){
   if( !p->db->nVcInternalCommit
    && doltliteSessionHasUnresolvedConflicts(p->db) ){
     p->rc = SQLITE_CONSTRAINT;
+    if( p->db->nVdbeExec==1 ) p->errorAction = OE_Rollback;
     sqlite3VdbeError(p, "cannot merge: unresolved conflicts cannot be committed");
     return SQLITE_CONSTRAINT;
   }
@@ -4510,7 +4511,7 @@ case OP_Savepoint: {
       int isTransaction = pSavepoint->pNext==0 && db->isTransactionSavepoint;
       if( isTransaction && p1==SAVEPOINT_RELEASE ){
 #ifdef DOLTLITE_PROLLY
-        if( (rc = vdbeDoltliteCheckCommit(p))!=SQLITE_OK ) goto vdbe_return;
+        if( (rc = vdbeDoltliteCheckCommit(p))!=SQLITE_OK ) goto abort_due_to_error;
 #endif
         if( (rc = sqlite3VdbeCheckFkDeferred(p))!=SQLITE_OK ){
           goto vdbe_return;
@@ -4620,7 +4621,7 @@ case OP_AutoCommit: {
   if( desiredAutoCommit!=db->autoCommit ){
 #ifdef DOLTLITE_PROLLY
     if( desiredAutoCommit && !iRollback
-     && (rc = vdbeDoltliteCheckCommit(p))!=SQLITE_OK ) goto vdbe_return;
+     && (rc = vdbeDoltliteCheckCommit(p))!=SQLITE_OK ) goto abort_due_to_error;
 #endif
     if( iRollback ){
       assert( desiredAutoCommit==1 );
