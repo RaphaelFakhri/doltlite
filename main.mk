@@ -2864,7 +2864,12 @@ DOLTLITE_C_TESTS = \
 	oom_dolt_fault_test$(T.exe) \
 	crash_recovery_test$(T.exe) \
 	concurrent_branch_test$(T.exe) \
-	concurrent_refs_merge_test$(T.exe)
+	concurrent_refs_merge_test$(T.exe) \
+	vc_model_stress_test$(T.exe)
+
+vc_model_stress_test$(T.exe): $(TOP)/test/vc_model_stress_test.c libdoltlite$(T.lib)
+	$(T.link) -I. -I$(TOP)/src -o $@ $(TOP)/test/vc_model_stress_test.c \
+		libdoltlite$(T.lib) -lz -lpthread -lm
 
 serialize_pending_test$(T.exe): $(TOP)/test/serialize_pending_test.c $(TOP)/test/lib/temp_db_dir.h libdoltlite$(T.lib)
 	$(T.link) -I. -I$(TOP)/src -o $@ $(TOP)/test/serialize_pending_test.c \

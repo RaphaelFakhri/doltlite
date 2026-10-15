@@ -31,6 +31,10 @@ on:
         description: DOLTLITE_MP_COMMIT_OPS for multi_process_test
         required: false
         default: "2000"
+      vc_model_seconds:
+        description: Seconds for the multi-process VC model stress
+        required: false
+        default: "7200"
 
 permissions:
   contents: read
@@ -102,6 +106,7 @@ jobs:
           - vc-fuzzer
           - concurrent
           - multi-process
+          - vc-model
 
     steps:
     - uses: actions/checkout@v4
@@ -126,6 +131,8 @@ jobs:
         concurrent="${{ github.event.inputs.concurrent_seconds || '7200' }}"
         multiproc="${{ github.event.inputs.multiproc_seconds || '7200' }}"
         mp_ops="${{ github.event.inputs.multiproc_commit_ops || '2000' }}"
+        vc_model="${{ github.event.inputs.vc_model_seconds || '7200' }}"
+        echo "vc_model_seconds=$vc_model" >> "$GITHUB_OUTPUT"
         echo "vc_seconds=$vc" >> "$GITHUB_OUTPUT"
         echo "concurrent_seconds=$concurrent" >> "$GITHUB_OUTPUT"
         echo "multiproc_seconds=$multiproc" >> "$GITHUB_OUTPUT"
@@ -140,6 +147,7 @@ jobs:
         CONCURRENT_SECONDS: ${{ steps.budget.outputs.concurrent_seconds }}
         MULTIPROC_SECONDS: ${{ steps.budget.outputs.multiproc_seconds }}
         MULTIPROC_COMMIT_OPS: ${{ steps.budget.outputs.multiproc_commit_ops }}
+        VC_MODEL_SECONDS: ${{ steps.budget.outputs.vc_model_seconds }}
       run: |
         set -uo pipefail
         WS="$GITHUB_WORKSPACE"
@@ -291,6 +299,15 @@ jobs:
             fi
             ;;
 
+          vc-model)
+            echo "=== multi-process VC model stress (${VC_MODEL_SECONDS}s) ===" | tee "$log"
+            if ! VCMODEL_SECONDS="$VC_MODEL_SECONDS" VCMODEL_OUT="$outdir/runs" \
+                 bash ../test/vc_model_stress.sh ./vc_model_stress_test \
+                 >>"$log" 2>&1; then
+              rc=1
+            fi
+            ;;
+
           *)
             echo "::error::unknown suite: $SUITE" | tee "$log"
             rc=1
@@ -334,6 +351,10 @@ jobs:
               echo "./vc_concurrency_test"
               echo "./vc_ref_mutation_stress_test"
               echo '```'
+              ;;
+            vc-model)
+              echo "Each failing seed in the log prints its own rerun command;"
+              echo "run it from build/ with DIR replaced by a scratch directory."
               ;;
             multi-process)
               echo '```bash'
