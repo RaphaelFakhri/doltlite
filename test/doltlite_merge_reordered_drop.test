@@ -1,0 +1,92 @@
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+
+foreach keymode {integer text without-rowid} {
+  set key {id INTEGER PRIMARY KEY}
+  set suffix {}
+  if {$keymode ne "integer"} {set key {id TEXT PRIMARY KEY}}
+  if {$keymode eq "without-rowid"} {set suffix {WITHOUT ROWID}}
+  foreach indexed {0 1} {
+    foreach direction {forward reverse} {
+      reset_db
+      execsql "CREATE TABLE w($key,v TEXT) $suffix"
+      if {$indexed} {execsql {CREATE INDEX iw ON w(v)}}
+      execsql {
+        INSERT INTO w VALUES(1,'base');
+        SELECT dolt_commit('-Am','base');
+        SELECT dolt_branch('x');
+        SELECT dolt_branch('y');
+        SELECT dolt_checkout('x');
+        ALTER TABLE w ADD COLUMN a TEXT;
+        SELECT dolt_commit('-Am','a');
+        SELECT dolt_checkout('y');
+        ALTER TABLE w ADD COLUMN b TEXT;
+        SELECT dolt_commit('-Am','b');
+        SELECT dolt_checkout('main');
+        SELECT dolt_merge('x');
+        SELECT dolt_merge('y');
+        SELECT dolt_branch('t','y');
+        SELECT dolt_checkout('t');
+        SELECT dolt_merge('x');
+        SELECT dolt_merge('main');
+        INSERT INTO w(id,v,a,b) VALUES(9,'incoming','old-a','old-b');
+        SELECT dolt_commit('-Am','incoming');
+        SELECT dolt_checkout('main');
+        ALTER TABLE w DROP COLUMN a;
+        ALTER TABLE w DROP COLUMN b;
+        SELECT dolt_commit('-Am','drop');
+      }
+      set target t
+      set reopen [file normalize test.db]
+      if {$direction eq "reverse"} {
+        execsql {SELECT dolt_checkout('t')}
+        set target main
+        append reopen /t
+      }
+      set prefix reordered-drop-$keymode-$indexed-$direction
+      do_test $prefix-merge {
+        execsql "SELECT dolt_merge('$target')"
+        execsql {
+          SELECT count(*) FROM dolt_conflicts;
+          SELECT name FROM pragma_table_info('w') ORDER BY cid;
+          SELECT id,v FROM w ORDER BY id;
+          PRAGMA integrity_check;
+        }
+      } {0 id v 1 base 9 incoming ok}
+      db close
+      sqlite3 db $reopen
+      do_execsql_test $prefix-reopen {
+        SELECT id,v FROM w ORDER BY id;
+        PRAGMA integrity_check;
+      } {1 base 9 incoming ok}
+      do_execsql_test $prefix-defaults {
+        ALTER TABLE w ADD COLUMN z TEXT DEFAULT 'new-z';
+        ALTER TABLE w ADD COLUMN a TEXT DEFAULT 'new-a';
+        ALTER TABLE w ADD COLUMN b TEXT DEFAULT 'new-b';
+        SELECT id,z,a,b FROM w ORDER BY id;
+        PRAGMA integrity_check;
+      } {1 new-z new-a new-b 9 new-z new-a new-b ok}
+      do_execsql_test $prefix-index {
+        CREATE INDEX iz ON w(z);
+        SELECT id FROM w INDEXED BY iz WHERE z='new-z' ORDER BY id;
+        UPDATE w SET v='updated',z='changed' WHERE id=9;
+        SELECT id FROM w INDEXED BY iz WHERE z='changed';
+        PRAGMA integrity_check;
+      } {1 9 9 ok}
+      if {$indexed} {
+        do_execsql_test $prefix-existing-index {
+          SELECT id FROM w INDEXED BY iw WHERE v='updated';
+        } {9}
+      }
+      execsql {SELECT dolt_commit('-Am','defaults and indexes')}
+      db close
+      sqlite3 db $reopen
+      do_execsql_test $prefix-durable {
+        SELECT id,z,a,b FROM w ORDER BY id;
+        SELECT count(*) FROM dolt_status;
+        PRAGMA integrity_check;
+      } {1 new-z new-a new-b 9 changed new-a new-b 0 ok}
+    }
+  }
+}
+finish_test

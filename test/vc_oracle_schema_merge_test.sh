@@ -2522,4 +2522,60 @@ SQL
   done
 done
 
+
+for keymode in integer text; do
+  key='id INTEGER PRIMARY KEY'
+  if [ "$keymode" = text ]; then key='id VARCHAR(32) PRIMARY KEY'; fi
+  for direction in forward reverse; do
+    tag="reordered_drop_${keymode}_${direction}"
+    DB="$TMPROOT/$tag.db"
+    dl_setup "$DB" "$tag" <<SQL
+CREATE TABLE w($key, v TEXT);
+INSERT INTO w VALUES(1,'base');
+SELECT dolt_commit('-Am','base');
+SELECT dolt_branch('x');
+SELECT dolt_branch('y');
+SELECT dolt_checkout('x');
+ALTER TABLE w ADD COLUMN a TEXT;
+SELECT dolt_commit('-Am','a');
+SELECT dolt_checkout('y');
+ALTER TABLE w ADD COLUMN b TEXT;
+SELECT dolt_commit('-Am','b');
+SELECT dolt_checkout('main');
+SELECT dolt_merge('x');
+SELECT dolt_merge('y');
+SELECT dolt_branch('t','y');
+SELECT dolt_checkout('t');
+SELECT dolt_merge('x');
+SELECT dolt_merge('main');
+INSERT INTO w(id,v,a,b) VALUES(9,'incoming','old-a','old-b');
+SELECT dolt_commit('-Am','incoming');
+SELECT dolt_checkout('main');
+ALTER TABLE w DROP COLUMN a;
+ALTER TABLE w DROP COLUMN b;
+SELECT dolt_commit('-Am','drop');
+SQL
+    target=t
+    result_branch=main
+    checkout=''
+    if [ "$direction" = reverse ]; then
+      checkout="SELECT dolt_checkout('t');"
+      target=main
+      result_branch=t
+    fi
+    apply="$checkout
+SELECT dolt_merge('$target');
+ALTER TABLE w ADD COLUMN z TEXT DEFAULT 'new-z';
+ALTER TABLE w ADD COLUMN a TEXT DEFAULT 'new-a';
+ALTER TABLE w ADD COLUMN b TEXT DEFAULT 'new-b';
+SELECT dolt_commit('-Am','defaults');"
+    run_dual_command_outcome "${tag}_apply" "$DB" \
+      "$apply" "$(vc_oracle_translate_for_dolt "$apply")" ok
+    expect_dual_value "${tag}_defaults" "$DB" \
+      $'1|new-z|new-a|new-b\n9|new-z|new-a|new-b' \
+      "SELECT concat(id,'|',z,'|',a,'|',b) FROM dolt_at_w('$result_branch') ORDER BY id;" \
+      "SELECT concat(id,'|',z,'|',a,'|',b) FROM w AS OF '$result_branch' ORDER BY id;"
+  done
+done
+
 vc_oracle_finish

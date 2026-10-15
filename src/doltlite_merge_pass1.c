@@ -1080,7 +1080,12 @@ static int mergePass1BothSides(
   zOursPrevSql = 0;
 
   /* Mirror: we kept our schema, so theirs is the off-layout side. */
-  if( zName && !bSchemaConflict && schemaChoice==SCHEMA_MERGE_OURS ){
+  if( zName && !bSchemaConflict && !bDualAddColMerge
+   && (schemaChoice==SCHEMA_MERGE_OURS
+       || (schemaChoice==SCHEMA_MERGE_DEFAULT
+           && ourSchemaChanged && theirSchemaChanged
+           && prollyHashCompare(&c->aOurs[iOurs].schemaHash,
+                                &theirsEntry->schemaHash)!=0)) ){
     SchemaEntry *ancSE = findSchemaEntry(c->aAncSchema, c->nAncSchema, zName);
     SchemaEntry *ourSE = findSchemaEntry(c->aOursSchema, c->nOursSchema, zName);
     SchemaEntry *theirSE = findSchemaEntry(c->aTheirsSchema, c->nTheirsSchema, zName);
