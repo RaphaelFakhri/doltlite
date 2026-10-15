@@ -639,11 +639,32 @@ static void test_process_add_flush_lock(const char *zArg, int boundary){
   remove(zPath);
 }
 
-static void test_process_apply_clean_peer(int revert, int commitPeer){
+static int fireApplyInstallPeer(unsigned event, void *arg, void *stmt, void *elapsed){
+  AddFlushPeer *p = (AddFlushPeer*)arg;
+  const char *sql = sqlite3_sql((sqlite3_stmt*)stmt);
+  char ch = 'g';
+  (void)elapsed;
+  if( event!=SQLITE_TRACE_PROFILE || p->fired || !sql
+   || sqlite3_stricmp(sql, "COMMIT")!=0 ) return 0;
+  p->fired = 1;
+  p->txnState = sqlite3_txn_state(sqlite3_db_handle(stmt), "main");
+  if( write(p->toPeer[1], &ch, 1)!=1
+   || read(p->fromPeer[0], &p->peerRc, sizeof(p->peerRc))!=sizeof(p->peerRc) ){
+    p->fired = -1;
+  }
+  return 0;
+}
+
+static void test_process_apply_clean_peer(
+  int revert,
+  int commitPeer,
+  int afterInstall
+){
   sqlite3 *db = 0;
   AddFlushPeer p;
   char zPath[300], zCheck[128], zHead[64], zPeerHead[64];
   const char *zOp = revert ? "revert" : "cherry_pick";
+  const char *zExpected = revert ? "1,4,99" : "1,3,4,99";
   pid_t pid;
   int status = 0, rc;
   char ch = 'r';
@@ -684,11 +705,19 @@ static void test_process_apply_clean_peer(int revert, int commitPeer){
     int peerRc = sqlite3_open(zPath, &peer);
     char zTip[64] = {0};
     if( read(p.toPeer[0], &ch, 1)!=1 ) _exit(1);
+    if( peerRc==SQLITE_OK && afterInstall && commitPeer ){
+      peerRc = execSql(peer,
+          "INSERT INTO t VALUES(98,'peer commit');"
+          "SELECT dolt_commit('-am','peer')");
+    }
     if( peerRc==SQLITE_OK ){
       peerRc = execSql(peer, "INSERT INTO t VALUES(99,'peer')");
     }
-    if( peerRc==SQLITE_OK && commitPeer ){
+    if( peerRc==SQLITE_OK && commitPeer && !afterInstall ){
       peerRc = execSql(peer, "SELECT dolt_commit('-am','peer')");
+    }
+    if( peerRc==SQLITE_OK && afterInstall ){
+      peerRc = execSql(peer, "SELECT dolt_reset()");
     }
     snprintf(zTip, sizeof(zTip), "%s", queryText(peer, "SELECT dolt_hashof('HEAD')"));
     if( write(p.fromPeer[1], &peerRc, sizeof(peerRc))!=sizeof(peerRc) ) _exit(1);
@@ -701,7 +730,8 @@ static void test_process_apply_clean_peer(int revert, int commitPeer){
   sqlite3_busy_timeout(db, 5000);
   check("apply_clean_initial_rows", strcmp(queryText(db,
       "SELECT count(*) FROM t"), revert ? "1" : "2")==0);
-  sqlite3_trace_v2(db, SQLITE_TRACE_PROFILE, fireAddFlushPeer, &p);
+  sqlite3_trace_v2(db, SQLITE_TRACE_PROFILE,
+      afterInstall ? fireApplyInstallPeer : fireAddFlushPeer, &p);
   rc = execSql(db, revert ? "SELECT dolt_revert('HEAD')"
                            : "SELECT dolt_cherry_pick('feat')");
   sqlite3_trace_v2(db, 0, 0, 0);
@@ -718,24 +748,32 @@ static void test_process_apply_clean_peer(int revert, int commitPeer){
   close(p.fromPeer[0]); close(p.fromPeer[1]);
 
   check("apply_clean_followup", execSql(db,
+      "INSERT INTO t(id,v) VALUES(4,'after');"
       "ALTER TABLE t ADD COLUMN extra TEXT;"
       "SELECT dolt_merge('main');"
       "SELECT dolt_reset();"
       "SELECT dolt_branch('after');"
-      "INSERT INTO t(id,v) VALUES(4,'after');"
       "SELECT dolt_commit('-a','--amend','-m','after')")==SQLITE_OK);
   check("apply_clean_followup_peer_visible", strcmp(queryText(db,
       "SELECT count(*) FROM t WHERE id=99"), "1")==0);
   check("apply_clean_close", sqlite3_close(db)==SQLITE_OK);
   check("apply_clean_reopen", sqlite3_open(zPath, &db)==SQLITE_OK);
-  snprintf(zCheck, sizeof(zCheck), "process_apply_%s_%d_peer_kept", zOp, commitPeer);
+  if( afterInstall ){
+    snprintf(zCheck, sizeof(zCheck), "process_apply_%s_%d_install_peer_kept",
+        zOp, commitPeer);
+    zExpected = revert ? (commitPeer ? "1,4,98,99" : "1,4,99")
+                       : (commitPeer ? "1,2,3,4,98,99" : "1,2,3,4,99");
+  }else{
+    snprintf(zCheck, sizeof(zCheck), "process_apply_%s_%d_peer_kept", zOp, commitPeer);
+  }
   check(zCheck, strcmp(queryText(db,
       "SELECT group_concat(id) FROM (SELECT id FROM t ORDER BY id)"),
-      revert ? "1,4,99" : "1,3,4,99")==0);
+      zExpected)==0);
   check("apply_clean_peer_in_head", strcmp(queryText(db,
       "SELECT count(*) FROM dolt_at_t('HEAD') WHERE id=99"), "1")==0);
-  check("apply_clean_index_not_installed", strcmp(queryText(db,
-      "SELECT count(*) FROM sqlite_master WHERE name='tv'"), "0")==0);
+  check(afterInstall ? "apply_install_index_kept" : "apply_clean_index_not_installed",
+      strcmp(queryText(db,
+      "SELECT count(*) FROM sqlite_master WHERE name='tv'"), afterInstall ? "1" : "0")==0);
   check("apply_clean_original_tip_kept", strcmp(queryText(db,
       "SELECT dolt_hashof('after')"), zPeerHead)==0);
   check("apply_clean_peer_commit_state", commitPeer ? strcmp(zHead,zPeerHead)!=0
@@ -793,7 +831,8 @@ int main(void){
   }
 
   for(i=0; i<4; i++){
-    test_process_apply_clean_peer(i/2, i%2);
+    test_process_apply_clean_peer(i/2, i%2, 0);
+    test_process_apply_clean_peer(i/2, i%2, 1);
     test_process_add_flush_lock(".", i);
     test_process_add_flush_lock("t", i);
     test_process_add_flush_lock("-A", i);

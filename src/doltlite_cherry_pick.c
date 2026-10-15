@@ -111,6 +111,7 @@ static int applyRestoreOriginalBranch(
 static int cherryPickRestoreAndPersist(
   sqlite3 *db,
   DoltliteTxnState *pSaved,
+  const ProllyHash *pNewHead,
   int opRc
 ){
   ProllyHash restoredCat = pSaved->sessionCatalogHash;
@@ -135,6 +136,7 @@ static int cherryPickRestoreAndPersist(
         cs, doltliteGetSessionBranch(db), &diskHead, &found)==SQLITE_OK
    && found
    && prollyHashCompare(&diskHead, &savedHead)!=0
+   && prollyHashCompare(&diskHead, pNewHead)==0
    && prollyHashCompare(&diskHead, &sessionHead)==0 ){
     doltliteTxnStateClear(pSaved);
     return opRc;
@@ -355,6 +357,7 @@ int applyMergedCatalogAndCommit(
   if( pzApplyErr ) *pzApplyErr = 0;
   cs = doltliteGetChunkStore(db);
   memset(&savedState, 0, sizeof(savedState));
+  memset(&commitHash, 0, sizeof(commitHash));
   if( hexBuf ) hexBuf[0] = '\0';
   zOpLabel = bPreferOurMaster ? "Revert" : "Cherry-pick";
   zBranch = doltliteGetSessionBranch(db);
@@ -558,7 +561,7 @@ int applyMergedCatalogAndCommit(
         chunkStoreUnlock(cs);
         graphLocked = 0;
       }
-      return cherryPickRestoreAndPersist(db, &savedState, SQLITE_DONE);
+      return cherryPickRestoreAndPersist(db, &savedState, &commitHash, SQLITE_DONE);
     }
   }
 
@@ -588,7 +591,7 @@ apply_rollback:
   if( graphLocked ){
     chunkStoreUnlock(cs);
   }
-  return cherryPickRestoreAndPersist(db, &savedState, rc);
+  return cherryPickRestoreAndPersist(db, &savedState, &commitHash, rc);
 }
 
 static void doltliteCherryPickFunc(
