@@ -1,0 +1,63 @@
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+
+foreach advance {0 1} {
+  foreach {mode sql} {
+    mixed {SELECT dolt_reset()}
+    named {SELECT dolt_reset('w')}
+    soft {SELECT dolt_reset('--soft','HEAD')}
+    hard {SELECT dolt_reset('--hard')}
+  } {
+    foreach finish {rollback commit checkout} {
+      reset_db
+      execsql {
+        CREATE TABLE w(id INTEGER PRIMARY KEY,v TEXT);
+        INSERT INTO w VALUES(1,'base');
+        SELECT dolt_commit('-Am','base');
+        SELECT dolt_branch('other');
+        BEGIN;
+        SELECT * FROM w;
+      }
+      sqlite3 peer test.db
+      if {$advance} {
+        peer eval {
+          INSERT INTO w VALUES(2,'peer commit');
+          SELECT dolt_commit('-am','peer commit');
+        }
+      }
+      peer eval {INSERT INTO w VALUES(3,'peer working')}
+      set head [peer one {SELECT dolt_hashof('HEAD')}]
+      set prefix reset-peer-$advance-$mode-$finish
+      do_test $prefix-refused {
+        set result [catchsql $sql]
+        list [lindex $result 0] [regexp {locked|another connection} [lindex $result 1]]
+      } {1 1}
+      do_execsql_test $prefix-pinned {SELECT id FROM w ORDER BY id} {1}
+      switch $finish {
+        rollback {execsql {ROLLBACK}}
+        commit {execsql {COMMIT}}
+        checkout {
+          catchsql {SELECT dolt_checkout('other')}
+          if {![sqlite3_get_autocommit db]} {execsql {COMMIT}}
+        }
+      }
+      set expected [expr {$advance ? {1 2 3} : {1 3}}]
+      do_test $prefix-peer-kept {
+        peer eval {SELECT id FROM w ORDER BY id}
+      } $expected
+      do_test $prefix-head-kept {
+        peer one {SELECT dolt_hashof('HEAD')}
+      } $head
+      peer close
+      db close
+      sqlite3 db test.db
+      execsql {SELECT dolt_checkout('main')}
+      do_execsql_test $prefix-reopen {
+        SELECT id FROM w ORDER BY id;
+        SELECT count(*) FROM dolt_conflicts;
+        PRAGMA integrity_check;
+      } [concat $expected 0 ok]
+    }
+  }
+}
+finish_test

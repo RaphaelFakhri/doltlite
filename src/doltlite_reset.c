@@ -757,7 +757,7 @@ static void doltliteResetFunc(
   ** surfaces on a read-only connection; refuse before session mutation. */
   if( doltliteCmdRejectReadOnly(context) ) goto reset_cleanup;
 
-  if( isHard && !db->autoCommit ){
+  if( !db->autoCommit && (!isSoft || zRef || nPaths>0) ){
     rc = doltliteEnsureWriteTxnAndSavepoints(db);
     if( rc!=SQLITE_OK ){
       if( rc==SQLITE_BUSY_SNAPSHOT ) doltliteInvalidateSessionWorkingState(db);
