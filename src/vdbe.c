@@ -30,6 +30,16 @@ int doltliteSyntheticRowidFromRecord(const u8*, int, const KeyInfo*, i64*);
 #ifdef DOLTLITE_PROLLY
 #include "chunk_store.h"
 ChunkStore *doltliteBtreeChunkStore(Btree*);
+int doltliteSessionHasUnresolvedConflicts(sqlite3*);
+static int vdbeDoltliteCheckCommit(Vdbe *p){
+  if( !p->db->nVcInternalCommit
+   && doltliteSessionHasUnresolvedConflicts(p->db) ){
+    p->rc = SQLITE_CONSTRAINT;
+    sqlite3VdbeError(p, "cannot merge: unresolved conflicts cannot be committed");
+    return SQLITE_CONSTRAINT;
+  }
+  return SQLITE_OK;
+}
 static ChunkStore *vdbeDoltliteSeqStore(sqlite3 *db, int iDb){
   if( iDb<0 || iDb>=db->nDb || iDb==1 ) return 0;
   return doltliteBtreeChunkStore(db->aDb[iDb].pBt);
@@ -4499,6 +4509,9 @@ case OP_Savepoint: {
       */
       int isTransaction = pSavepoint->pNext==0 && db->isTransactionSavepoint;
       if( isTransaction && p1==SAVEPOINT_RELEASE ){
+#ifdef DOLTLITE_PROLLY
+        if( (rc = vdbeDoltliteCheckCommit(p))!=SQLITE_OK ) goto vdbe_return;
+#endif
         if( (rc = sqlite3VdbeCheckFkDeferred(p))!=SQLITE_OK ){
           goto vdbe_return;
         }
@@ -4605,6 +4618,10 @@ case OP_AutoCommit: {
   assert( p->bIsReader );
 
   if( desiredAutoCommit!=db->autoCommit ){
+#ifdef DOLTLITE_PROLLY
+    if( desiredAutoCommit && !iRollback
+     && (rc = vdbeDoltliteCheckCommit(p))!=SQLITE_OK ) goto vdbe_return;
+#endif
     if( iRollback ){
       assert( desiredAutoCommit==1 );
       sqlite3RollbackAll(db, SQLITE_ABORT_ROLLBACK);

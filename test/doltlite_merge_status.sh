@@ -27,7 +27,7 @@ run_test "row_count_merging" "SELECT count(*) FROM dolt_merge_status;" "1" "$DB"
 run_test_error_match "conflict_commit_is_refused" \
   "BEGIN; SELECT dolt_merge('feature');
 COMMIT;" \
-  "Error near line 2: constraint failed" "$DB" 'constraint\ failed|Merge\ has\ 1\ conflict\(s\)\.\ Resolve\ and\ then\ commit\ with\ dolt_commit\.'
+  "Error near line 2: cannot merge: unresolved conflicts cannot be committed" "$DB" 'cannot\ merge:\ unresolved\ conflicts\ cannot\ be\ committed|Merge\ has\ 1\ conflict\(s\)\.\ Resolve\ and\ then\ commit\ with\ dolt_commit\.'
 run_test "conflict_does_not_outlive_transaction" "$MS" "0|~|~|~|~" "$DB"
 
 echo "BEGIN; SELECT dolt_conflicts_resolve('--ours','t'); SELECT dolt_commit('-m','resolved');" | $DOLTLITE "$DB" > /dev/null 2>&1

@@ -1760,6 +1760,7 @@ struct sqlite3 {
 #ifdef DOLTLITE_PROLLY
   Vdbe *pVcCommand;
   int nVcInterruptMask;
+  int nVcInternalCommit;
   int nVcStatementRestore;
 #endif
   int nVdbeExec;                /* Number of nested calls to VdbeExec() */

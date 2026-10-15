@@ -206,6 +206,8 @@ static int applyStageConflictsAtBase(
   struct TableEntry *pWorkMaster;
   struct TableEntry *pBaseMaster;
   struct TableEntry *pBaseEntry;
+  SchemaEntry *aBaseSchema = 0;
+  SchemaEntry *aMergedSchema = 0;
   ApplyConflictNames names;
   const char **azTouched = 0;
   ProllyHash composedRoot;
@@ -214,7 +216,10 @@ static int applyStageConflictsAtBase(
   int nBuf = 0;
   int nBase = 0;
   int nMerged = 0;
+  int nBaseSchema = 0;
+  int nMergedSchema = 0;
   int nTouched = 0;
+  Pgno offset;
   int i;
   int rc;
 
@@ -230,15 +235,33 @@ static int applyStageConflictsAtBase(
   if( rc!=SQLITE_OK ) goto stage_done;
   rc = doltliteLoadCatalog(db, pBaseCat, &aBase, &nBase, 0);
   if( rc!=SQLITE_OK ) goto stage_done;
+  rc = loadSchemaFromCatalog(db, cs, doltliteGetCache(db), pMergedCat,
+                             &aMergedSchema, &nMergedSchema);
+  if( rc!=SQLITE_OK ) goto stage_done;
+  rc = loadSchemaFromCatalog(db, cs, doltliteGetCache(db), pBaseCat,
+                             &aBaseSchema, &nBaseSchema);
+  if( rc!=SQLITE_OK ) goto stage_done;
+  rc = doltliteDisjoinCatalogEntries(db, aMerged, nMerged,
+                                     aBase, nBase, &offset);
+  if( rc!=SQLITE_OK ) goto stage_done;
+  for(i=0; i<nBaseSchema; i++){
+    if( aBaseSchema[i].iRootpage>1 ) aBaseSchema[i].iRootpage += offset;
+  }
 
-  for(i=0; i<nMerged; i++){
-    if( aMerged[i].iTable<=1 || !aMerged[i].zName ) continue;
-    if( !applyNameIsConflict(names.az, names.n, aMerged[i].zName) ) continue;
-    pBaseEntry = doltliteFindTableByName(aBase, nBase, aMerged[i].zName);
+  for(i=0; i<names.n; i++){
+    struct TableEntry *pMergedEntry;
+    pBaseEntry = doltliteFindTableByName(aBase, nBase, names.az[i]);
     if( !pBaseEntry ) continue;
-    aMerged[i].root = pBaseEntry->root;
-    aMerged[i].schemaHash = pBaseEntry->schemaHash;
-    aMerged[i].flags = pBaseEntry->flags;
+    addRemoveIndexEntriesOfTable(aMerged, &nMerged,
+                                 aMergedSchema, nMergedSchema, names.az[i]);
+    pMergedEntry = doltliteFindTableByName(aMerged, nMerged, names.az[i]);
+    if( !pMergedEntry ) continue;
+    pMergedEntry->root = pBaseEntry->root;
+    pMergedEntry->schemaHash = pBaseEntry->schemaHash;
+    pMergedEntry->flags = pBaseEntry->flags;
+    rc = addAppendIndexEntriesOfTable(0, &aMerged, &nMerged, aBase, nBase,
+                                      aBaseSchema, nBaseSchema, names.az[i]);
+    if( rc!=SQLITE_OK ) goto stage_done;
   }
 
   if( nMerged>0 ){
@@ -278,6 +301,8 @@ static int applyStageConflictsAtBase(
   }
 
 stage_done:
+  freeSchemaEntries(aMergedSchema, nMergedSchema);
+  freeSchemaEntries(aBaseSchema, nBaseSchema);
   sqlite3_free(buf);
   sqlite3_free(azTouched);
   doltliteFreeCatalog(aMerged, nMerged);
