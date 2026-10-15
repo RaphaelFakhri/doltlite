@@ -50,12 +50,95 @@ static int execSql(sqlite3 *db, const char *sql){
   return rc;
 }
 
+static void test_checkout_commit_after_peer_rollback(void){
+  const char *zPath = DOLTLITE_TEST_TMPDIR "/test_checkout_commit_peer_rollback.db";
+  const char *azKey[] = { "INTEGER PRIMARY KEY", "INT PRIMARY KEY" };
+  int i;
+  for(i=0; i<2; i++){
+    sqlite3 *peer = 0, *db = 0;
+    char zSql[2048], zBranchPath[512], zHead[64], zSourceHead[64];
+    remove(zPath);
+    check("checkout_commit_peer_open", sqlite3_open(zPath, &peer)==SQLITE_OK);
+    snprintf(zSql, sizeof(zSql),
+      "CREATE TABLE w(id %s,v TEXT);"
+      "INSERT INTO w VALUES(1,'base');"
+      "SELECT dolt_commit('-Am','base');"
+      "SELECT dolt_checkout('-b','b3');"
+      "ALTER TABLE w ADD COLUMN source TEXT;"
+      "CREATE INDEX source_iw ON w(v);"
+      "INSERT INTO w(id,v) VALUES(3,'source');"
+      "SELECT dolt_commit('-am','source');"
+      "SELECT dolt_checkout('main');"
+      "SELECT dolt_checkout('-b','b1');"
+      "ALTER TABLE w ADD COLUMN target TEXT;"
+      "CREATE INDEX target_iw ON w(v);"
+      "INSERT INTO w(id,v) VALUES(11,'target'),(12,'target');"
+      "SELECT dolt_commit('-am','target');"
+      "SELECT dolt_checkout('b3');", azKey[i]);
+    check("checkout_commit_peer_setup", execSql(peer, zSql)==SQLITE_OK);
+    snprintf(zBranchPath, sizeof(zBranchPath), "%s@b3", zPath);
+    check("checkout_commit_victim_open", sqlite3_open(zBranchPath, &db)==SQLITE_OK);
+    check("checkout_commit_source_edits", execSql(db,
+      "BEGIN; UPDATE w SET v='edited' WHERE id=3; COMMIT;"
+      "DELETE FROM w WHERE id=3;")==SQLITE_OK);
+    snprintf(zSourceHead, sizeof(zSourceHead), "%s",
+        queryScalarText(db, "SELECT dolt_hashof('HEAD')"));
+    check("checkout_commit_peer_source_refreshed", strcmp(queryScalarText(peer,
+      "SELECT group_concat(id) FROM (SELECT id FROM w ORDER BY id)"), "1")==0);
+    check("checkout_commit_peer_rollback", execSql(peer,
+      "BEGIN; SAVEPOINT caller;"
+      "SELECT dolt_checkout('b1');"
+      "INSERT INTO w(id,v) VALUES(99,'rolled back');"
+      "SAVEPOINT tail; ROLLBACK;")==SQLITE_OK);
+    check("checkout_commit_peer_publish", execSql(peer,
+      "INSERT INTO w(id,v) VALUES(88,'peer');")==SQLITE_OK);
+    snprintf(zHead, sizeof(zHead), "%s",
+        queryScalarText(peer, "SELECT dolt_hashof('HEAD')"));
+    check("checkout_commit_victim_publish", execSql(db,
+      "SELECT dolt_checkout('b1');"
+      "SELECT dolt_commit('-am','after checkout','--allow-empty');")==SQLITE_OK);
+    check("checkout_commit_target_rows_kept", strcmp(queryScalarText(db,
+      "SELECT group_concat(id) FROM (SELECT id FROM dolt_at_w('HEAD') ORDER BY id)"),
+      "1,11,12,88")==0);
+    check("checkout_commit_stacks_on_target", strcmp(queryScalarText(db,
+      "SELECT dolt_hashof('HEAD~1')"), zHead)==0);
+    check("checkout_commit_target_schema_kept", strcmp(queryScalarText(db,
+      "SELECT group_concat(name) FROM pragma_table_info('w')"), "id,v,target")==0);
+    check("checkout_commit_target_index_kept", strcmp(queryScalarText(db,
+      "SELECT count(*) FROM sqlite_schema WHERE name='target_iw'"), "1")==0);
+    check("checkout_commit_source_index_absent", strcmp(queryScalarText(db,
+      "SELECT count(*) FROM sqlite_schema WHERE name='source_iw'"), "0")==0);
+    check("checkout_commit_peer_sees_target", strcmp(queryScalarText(peer,
+      "SELECT group_concat(id) FROM (SELECT id FROM w ORDER BY id)"), "1,11,12,88")==0);
+    check("checkout_commit_target_integrity", strcmp(queryScalarText(db,
+      "PRAGMA integrity_check"), "ok")==0);
+    check("checkout_commit_return_to_source", execSql(db,
+      "SELECT dolt_checkout('b3')")==SQLITE_OK);
+    check("checkout_commit_source_rows_kept", strcmp(queryScalarText(db,
+      "SELECT group_concat(id) FROM (SELECT id FROM w ORDER BY id)"), "1")==0);
+    check("checkout_commit_source_head_kept", strcmp(queryScalarText(db,
+      "SELECT dolt_hashof('HEAD')"), zSourceHead)==0);
+    sqlite3_close(peer);
+    sqlite3_close(db);
+    snprintf(zBranchPath, sizeof(zBranchPath), "%s@b1", zPath);
+    check("checkout_commit_reopen", sqlite3_open(zBranchPath, &db)==SQLITE_OK);
+    check("checkout_commit_durable_rows_kept", strcmp(queryScalarText(db,
+      "SELECT group_concat(id) FROM (SELECT id FROM w ORDER BY id)"), "1,11,12,88")==0);
+    check("checkout_commit_durable_integrity", strcmp(queryScalarText(db,
+      "PRAGMA integrity_check"), "ok")==0);
+    sqlite3_close(db);
+    remove(zPath);
+  }
+}
+
 int main(){
   sqlite3 *db1 = 0, *db2 = 0;
   sqlite3 *db3 = 0;
   const char *dbpath = DOLTLITE_TEST_TMPDIR "/test_concurrent_branch.db";
   const char *defaultPath = DOLTLITE_TEST_TMPDIR "/test_concurrent_default_branch.db";
   int rc;
+
+  test_checkout_commit_after_peer_rollback();
 
   remove(dbpath); { char _w[256]; snprintf(_w,256,"%s-wal",dbpath); remove(_w); }
 
