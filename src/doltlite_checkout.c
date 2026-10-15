@@ -1615,6 +1615,7 @@ checkout_done:
       doltliteVcResultSealError(ctx, db, rc);
       return;
     }
+    doltliteAdoptRollbackBaseline(db, &m.targetCatHash);
   }
   sqlite3_result_int(ctx, 0);
 }
