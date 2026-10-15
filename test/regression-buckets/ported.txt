@@ -158,3 +158,4 @@ doltlite_vc_interrupt
 doltlite_commit_publication
 doltlite_commit_active_write
 doltlite_sqlite_encoding
+doltlite_merge_reordered_drop
