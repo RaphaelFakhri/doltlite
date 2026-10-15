@@ -14,9 +14,9 @@ set -u
 
 BIN="${1:-./vc_model_stress_test}"
 case "$BIN" in /*) ;; *) BIN="$PWD/$BIN" ;; esac
-SECONDS_BUDGET="${VCMODEL_SECONDS:-600}"
+SECONDS_BUDGET="${VCMODEL_SECONDS-600}"
 FIRST="${VCMODEL_SEED:-$(( $(date +%s) % 1000000 * 10 ))}"
-PAR="${VCMODEL_PAR:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
+PAR="${VCMODEL_PAR-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
 OUT="${VCMODEL_OUT:-$PWD/vc-model-stress}"
 
 case "$SECONDS_BUDGET" in
