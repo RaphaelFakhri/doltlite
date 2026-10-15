@@ -17,6 +17,7 @@
 ** VCMODEL_TRIP_NORETRY, VCMODEL_DBGEX (print excused rows and commits),
 ** VCMODEL_STALECHK (log a connection whose view lags a fresh reader's),
 ** VCMODEL_PRELOG (log each statement before it runs).
+** VCMODEL_CLUSTERED=1 uses an INT PRIMARY KEY instead of a rowid alias.
 */
 #include <stdio.h>
 #include <stdlib.h>
@@ -1181,8 +1182,12 @@ static void buildDb(void){
   char *zE = 0;
   int rc;
   sqlite3_open(zDb, &db);
+  rc = sqlite3_exec(db, getenv("VCMODEL_CLUSTERED")
+                       && atoi(getenv("VCMODEL_CLUSTERED"))
+      ? "CREATE TABLE w(id INT PRIMARY KEY, v TEXT)"
+      : "CREATE TABLE w(id INTEGER PRIMARY KEY, v TEXT)", 0, 0, &zE);
+  if( rc ){ fprintf(stderr, "build failed: %s\n", zE); exit(2); }
   rc = sqlite3_exec(db,
-    "CREATE TABLE w(id INTEGER PRIMARY KEY, v TEXT);"
     "INSERT INTO w VALUES(1,'a'),(2,'b'),(3,'c');"
     "SELECT dolt_commit('-Am','init');"
     "INSERT INTO w VALUES(4,'d');"
