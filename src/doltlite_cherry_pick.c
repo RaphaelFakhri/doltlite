@@ -405,6 +405,10 @@ int applyMergedCatalogAndCommit(
     sqlite3_free(zMergeErr);
 
     rc = doltliteRefreshAndConfirmHead(db, cs, ourHead);
+    if( rc==SQLITE_OK ){
+      rc = doltliteConfirmWorkingSet(db, cs, pCleanWorkingSet);
+      if( rc!=SQLITE_OK ) chunkStoreUnlock(cs);
+    }
     if( rc!=SQLITE_OK ){
       doltliteFreeNameList(azReindex, nReindex);
       doltliteFreeNameList(azRebuild, nRebuild);
