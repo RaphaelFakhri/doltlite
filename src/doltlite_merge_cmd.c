@@ -1185,7 +1185,7 @@ int doltliteMergeAutocommitTxnBegin(sqlite3 *db, int *pbBegan){
 
 int doltliteMergeAutocommitTxnEnd(sqlite3 *db, int bBegan, int rc){
   if( bBegan && rc==SQLITE_OK ){
-    rc = sqlite3_exec(db, "COMMIT", 0, 0, 0);
+    rc = doltliteCommitInternalTxn(db);
   }
   if( bBegan && rc!=SQLITE_OK && !db->autoCommit ){
     int rc2;
