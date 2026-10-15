@@ -15,7 +15,8 @@
 ** (integrity_check after every op), VCMODEL_CNT (log row counts per op),
 ** VCMODEL_NO_REVERT, VCMODEL_NO_CP, VCMODEL_NO_CLEAN, VCMODEL_NO_RESET_TABLE,
 ** VCMODEL_TRIP_NORETRY, VCMODEL_DBGEX (print excused rows and commits),
-** VCMODEL_STALECHK (log a connection whose view lags a fresh reader's).
+** VCMODEL_STALECHK (log a connection whose view lags a fresh reader's),
+** VCMODEL_PRELOG (log each statement before it runs).
 */
 #include <stdio.h>
 #include <stdlib.h>
@@ -122,6 +123,7 @@ static int ex(Conn *c, const char *zOp, const char *zSql){
   char *zE = 0;
   int rc;
   long long tS = nowNs();
+  if( getenv("VCMODEL_PRELOG") ) logf_("PRE\t%lld\tc%d\t%s\t%s", tS, (int)(c-aC), zOp, zSql);
   alarm(gStmtWedgeSec);
   gRes[0] = 0;
   rc = sqlite3_exec(c->db, zSql, resCb, 0, &zE);
