@@ -159,3 +159,4 @@ doltlite_commit_publication
 doltlite_commit_active_write
 doltlite_sqlite_encoding
 doltlite_merge_reordered_drop
+doltlite_checkout_catalog_rollback

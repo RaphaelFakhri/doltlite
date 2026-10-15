@@ -1,0 +1,79 @@
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+
+foreach source {empty indexed reordered} {
+  foreach depth {1 2} {
+    reset_db
+    execsql {SELECT dolt_commit('--allow-empty','-m','empty')}
+    if {$source eq "empty"} {
+      execsql {SELECT dolt_branch('source')}
+    }
+    execsql {
+      CREATE TABLE w(id INTEGER PRIMARY KEY,v TEXT);
+      INSERT INTO w VALUES(1,'base');
+    }
+    if {$source ne "empty"} {
+      execsql {
+        CREATE INDEX iw ON w(v);
+        SELECT dolt_commit('-Am','indexed');
+        SELECT dolt_branch('source');
+        DROP INDEX iw;
+        CREATE TABLE d(id INTEGER PRIMARY KEY);
+      }
+    }
+    if {$source eq "reordered"} {
+      execsql {CREATE INDEX target_iw ON w(v)}
+    }
+    execsql {
+      SELECT dolt_commit('-Am','target');
+      SELECT dolt_checkout('source');
+      BEGIN;
+      SAVEPOINT s;
+    }
+    if {$depth==2} {execsql {SAVEPOINT s2}}
+    execsql {
+      SELECT dolt_checkout('main');
+      INSERT INTO w VALUES(2,'rolled back');
+      SAVEPOINT tail;
+      ROLLBACK;
+    }
+    set prefix checkout-catalog-rollback-$source-$depth
+    do_execsql_test $prefix-branch {
+      SELECT active_branch();
+      SELECT id,v FROM w ORDER BY id;
+    } {main 1 base}
+    do_execsql_test $prefix-schema {
+      SELECT count(*) FROM sqlite_schema WHERE name='iw';
+      SELECT count(*) FROM sqlite_schema WHERE name='d';
+    } [list 0 [expr {$source ne "empty"}]]
+    do_execsql_test $prefix-integrity {PRAGMA integrity_check} {ok}
+    if {$source ne "reordered"} {
+      do_execsql_test $prefix-create-index {CREATE INDEX target_iw ON w(v)} {}
+    }
+    do_execsql_test $prefix-write {
+      INSERT INTO w VALUES(3,'after');
+      SELECT id FROM w INDEXED BY target_iw WHERE v='base';
+      SELECT id,v FROM w ORDER BY id;
+      SELECT dolt_add('w');
+      PRAGMA integrity_check;
+    } {1 1 base 3 after 0 ok}
+    sqlite3 peer test.db/main
+    do_test $prefix-peer {
+      peer eval {
+        SELECT id,v FROM w ORDER BY id;
+        SELECT id FROM w INDEXED BY target_iw WHERE v='after';
+        PRAGMA integrity_check;
+      }
+    } {1 base 3 after 3 ok}
+    peer close
+    execsql {SELECT dolt_commit('-m','stage w')}
+    db close
+    sqlite3 db test.db
+    do_execsql_test $prefix-reopen {
+      SELECT id,v FROM w ORDER BY id;
+      SELECT count(*) FROM dolt_status WHERE table_name='w';
+      PRAGMA integrity_check;
+    } {1 base 3 after 0 ok}
+  }
+}
+finish_test
