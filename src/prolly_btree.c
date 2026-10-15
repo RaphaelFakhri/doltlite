@@ -983,7 +983,7 @@ static int prollyBtreeOpenImpl(
       return rc;
     }
     *ppBtree = p;  /* registerDoltiteFunctions reads db->aDb[0].pBt */
-    rc = registerDoltiteFunctions(db);
+    rc = hasMainBtree ? SQLITE_OK : registerDoltiteFunctions(db);
     if( rc==SQLITE_NOMEM || rc==SQLITE_IOERR_NOMEM ){
       *ppBtree = 0;
       sqlite3BtreeClose(p);
@@ -1292,7 +1292,7 @@ static int prollyBtreeOpenImpl(
 
   *ppBtree = p;
 
-  rc = registerDoltiteFunctions(db);
+  rc = hasMainBtree ? SQLITE_OK : registerDoltiteFunctions(db);
   if( rc==SQLITE_NOMEM || rc==SQLITE_IOERR_NOMEM ){
     *ppBtree = 0;
     releaseOpenStoreFilename(zStoreFilename, bStoreUri);
@@ -1883,6 +1883,9 @@ void prollyBtreeGetMeta(Btree *p, int idx, u32 *pValue){
     }
   } else {
     *pValue = p->aMeta[idx];
+    if( idx==BTREE_SCHEMA_VERSION && p->db->init.busy ){
+      (void)sqlite3FaultSim(964);
+    }
   }
 }
 void sqlite3BtreeGetMeta(Btree *p, int idx, u32 *pValue){

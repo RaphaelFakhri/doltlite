@@ -695,9 +695,10 @@ int prollyBtreeBeginTrans(Btree *p, int wrFlag, int *pSchemaVersion){
   if( p->inTrans==TRANS_READ && !wrFlag ){
     /* Another statement still reading keeps this snapshot, as in stock WAL:
     ** a refresh under it would let a write computed from its rows pass the
-    ** stale-snapshot check. */
+    ** stale-snapshot check. Schema initialization also owns a read snapshot:
+    ** its cookie and sqlite_schema rows must come from the same catalog. */
     if( p->db && p->db->autoCommit && !p->db->pSavepoint
-     && p->db->nVdbeRead<=1 ){
+     && p->db->nVdbeRead<=1 && !p->db->init.busy ){
       p->inTrans = TRANS_NONE;
       p->inTransaction = TRANS_NONE;
       pBt->store.snapshotPinned = 0;

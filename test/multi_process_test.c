@@ -2326,9 +2326,119 @@ static void test_reader_during_publication_wait(void){
   remove(readyPath);
 }
 
+static int schemaRaceSend = -1;
+static int schemaRaceRecv = -1;
+static int schemaRaceFired = 0;
+
+static int schemaRaceFault(int iTest){
+  if( iTest==964 && !schemaRaceFired ){
+    char ch;
+    schemaRaceFired = 1;
+    mpWrite(schemaRaceSend, "a");
+    mpRead(schemaRaceRecv, &ch);
+  }
+  return 0;
+}
+
+static void test_schema_load_snapshot(void){
+  int withoutRowid, restore;
+  for(withoutRowid=0; withoutRowid<2; withoutRowid++){
+    for(restore=0; restore<3; restore++){
+      const char *path = DOLTLITE_TEST_TMPDIR "/multi_process_schema_snapshot.db";
+      const char *branchPath = DOLTLITE_TEST_TMPDIR "/multi_process_schema_snapshot.db@b1";
+      const char *azRestore[] = {
+        "SELECT dolt_revert('HEAD')",
+        "SELECT dolt_reset('--hard','HEAD~1')",
+        "SELECT dolt_checkout('HEAD~1','t')"
+      };
+      sqlite3 *db = 0;
+      sqlite3_stmt *stmt = 0;
+      int toPeer[2], fromPeer[2], status, rc;
+      char ch;
+      pid_t pid;
+
+      remove(path);
+      check("mp_schema_snapshot_setup_open", sqlite3_open(path, &db)==SQLITE_OK);
+      check("mp_schema_snapshot_create", execSql(db, withoutRowid
+          ? "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT) WITHOUT ROWID"
+          : "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT)")==SQLITE_OK);
+      check("mp_schema_snapshot_seed", execSql(db,
+          "INSERT INTO t VALUES(1,'base');"
+          "SELECT dolt_commit('-Am','base');"
+          "SELECT dolt_branch('b1')")==SQLITE_OK);
+      sqlite3_close(db);
+      db = 0;
+      mpPipe(toPeer);
+      mpPipe(fromPeer);
+      pid = fork();
+      if( pid<0 ){ perror("fork"); _exit(1); }
+      if( pid==0 ){
+        alarm(30);
+        close(toPeer[1]);
+        close(fromPeer[0]);
+        if( sqlite3_open(branchPath, &db)!=SQLITE_OK ) _exit(2);
+        sqlite3_busy_timeout(db, 5000);
+        mpRead(toPeer[0], &ch);
+        if( execSql(db,
+            "ALTER TABLE t ADD COLUMN old_column TEXT DEFAULT 'obsolete';"
+            "SELECT dolt_commit('-Am','add column')")!=SQLITE_OK ) _exit(3);
+        mpWrite(fromPeer[1], "a");
+        mpRead(toPeer[0], &ch);
+        if( execSql(db, azRestore[restore])!=SQLITE_OK ) _exit(4);
+        mpWrite(fromPeer[1], "r");
+        sqlite3_close(db);
+        _exit(0);
+      }
+      close(toPeer[0]);
+      close(fromPeer[1]);
+      schemaRaceSend = toPeer[1];
+      schemaRaceRecv = fromPeer[0];
+      schemaRaceFired = 0;
+      sqlite3_test_control(SQLITE_TESTCTRL_FAULT_INSTALL, schemaRaceFault);
+      check("mp_schema_snapshot_reader_open",
+            sqlite3_open(branchPath, &db)==SQLITE_OK);
+      rc = sqlite3_prepare_v2(db, "SELECT * FROM t", -1, &stmt, 0);
+      sqlite3_test_control(SQLITE_TESTCTRL_FAULT_INSTALL, 0);
+      check("mp_schema_snapshot_prepare", rc==SQLITE_OK);
+      check("mp_schema_snapshot_peer_ran", schemaRaceFired);
+      check("mp_schema_snapshot_cookie_matches_columns",
+            sqlite3_column_count(stmt)==2);
+      sqlite3_finalize(stmt);
+      if( !schemaRaceFired ) mpWrite(toPeer[1], "a");
+      mpWrite(toPeer[1], "r");
+      mpRead(fromPeer[0], &ch);
+      check("mp_schema_snapshot_peer_exit", waitpid(pid, &status, 0)==pid);
+      check("mp_schema_snapshot_peer_ok", WIFEXITED(status) && WEXITSTATUS(status)==0);
+      close(toPeer[1]);
+      close(fromPeer[0]);
+      check("mp_schema_snapshot_insert", execSql(db,
+          "INSERT INTO t(id,v) VALUES(2,'after restore')")==SQLITE_OK);
+      check("mp_schema_snapshot_integrity",
+            strcmp(queryScalarText(db, "PRAGMA integrity_check"), "ok")==0);
+      check("mp_schema_snapshot_commit", execSql(db,
+          "SELECT dolt_commit('-Am','after restore')")==SQLITE_OK);
+      sqlite3_close(db);
+      db = 0;
+      check("mp_schema_snapshot_reopen", sqlite3_open(branchPath, &db)==SQLITE_OK);
+      check("mp_schema_snapshot_durable_integrity",
+            strcmp(queryScalarText(db, "PRAGMA integrity_check"), "ok")==0);
+      check("mp_schema_snapshot_durable_rows", strcmp(queryScalarText(db,
+          "SELECT group_concat(id||':'||v, ',') FROM (SELECT * FROM t ORDER BY id)"),
+          "1:base,2:after restore")==0);
+      check("mp_schema_snapshot_new_column", execSql(db,
+          "ALTER TABLE t ADD COLUMN fresh TEXT DEFAULT 'fresh'")==SQLITE_OK);
+      check("mp_schema_snapshot_new_default", strcmp(queryScalarText(db,
+          "SELECT count(*) FROM t WHERE fresh='fresh'"), "2")==0);
+      sqlite3_close(db);
+      remove(path);
+    }
+  }
+}
+
 int main(){
   printf("=== Multi-Process Concurrency Tests ===\n\n");
 
+  test_schema_load_snapshot();
   test_publication_busy_commit();
   test_clean_reset_peer_process();
   test_ref_commands_busy_handler();

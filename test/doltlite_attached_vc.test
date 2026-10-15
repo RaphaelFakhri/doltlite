@@ -190,4 +190,34 @@ do_execsql_test attached-vc-transactions-kept {SELECT count(*) FROM main.t WHERE
 do_execsql_test attached-vc-integrity {PRAGMA main.integrity_check; PRAGMA aux.integrity_check} {ok ok}
 db close
 forcedelete attached-vc.db
+
+proc attached_vc_engine_override {} {return application}
+foreach engine {prolly sqlite} {
+  foreach {kind sql} {
+    temp {CREATE TEMP TABLE u(x)}
+    sqlite {ATTACH 'file:attached-vc-other.db?doltlite_engine=sqlite' AS aux}
+    prolly {ATTACH 'attached-vc-other.db' AS aux}
+    memory {ATTACH ':memory:' AS aux}
+  } {
+    forcedelete attached-vc-main.db attached-vc-other.db
+    sqlite3 db "file:attached-vc-main.db?doltlite_engine=$engine" -uri 1
+    db eval {SELECT doltlite_engine()}
+    db function doltlite_engine -argcount 0 attached_vc_engine_override
+    do_execsql_test attached-vc-$engine-$kind-registration-before {
+      SELECT doltlite_engine();
+    } {application}
+    do_execsql_test attached-vc-$engine-$kind-open $sql {}
+    do_execsql_test attached-vc-$engine-$kind-registration-after {
+      SELECT doltlite_engine();
+    } {application}
+    do_execsql_test attached-vc-$engine-$kind-main-still-usable {
+      CREATE TABLE t(x);
+      INSERT INTO t VALUES('main');
+      SELECT x FROM t;
+      PRAGMA integrity_check;
+    } {main ok}
+    db close
+  }
+}
+forcedelete attached-vc-main.db attached-vc-other.db
 finish_test

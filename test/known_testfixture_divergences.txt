@@ -1629,9 +1629,7 @@ corruptH corruptH-2.3 class=intentional  # stock freelist/child-page poke by pag
 corruptJ corruptJ-2.2 class=intentional  # stock page-image child-pointer poke/hexio; no page layout (architectural)
 incrblob3 incrblob3-7.2 class=intentional  # stock schema-cookie poke at offsets 40/24 corrupts the checksummed store
 incrblobfault incrblobfault-3-ioerr-persistent.2 class=intentional  # IO-fault point shift under fault injection
-incrblobfault incrblobfault-3-ioerr-persistent.3 class=intentional  # IO-fault point shift under fault injection
 incrblobfault incrblobfault-3-ioerr-transient.2 class=intentional  # IO-fault point shift under fault injection
-incrblobfault incrblobfault-3-ioerr-transient.3 class=intentional  # IO-fault point shift under fault injection
 journal1 journal1-1.2 class=unsupported issue=1836  # copies test.db-journal: no rollback-journal sidecar
 lock lock-2.3.2 class=intentional issue=2493  # locking model: snapshot reads proceed; lock_status reports doltlite states; journal_mode cascade
 lock lock-2.4.2 class=intentional issue=2493  # locking model: snapshot reads proceed; lock_status reports doltlite states; journal_mode cascade
@@ -1899,10 +1897,6 @@ exclusive2 exclusive2-3.6 class=intentional  # exclusive-mode read-marks; chunk 
 # ioerr: auto_vacuum rejected on doltlite-format databases; the prep
 # aborts before creating its tables and the body then errors without an
 # IO fault, breaking the hit-XOR-success invariant (cascade).
-ioerr3 ioerr3-2.3.3 class=intentional  # IO-fault point shift
-ioerr3 ioerr3-2.4.3 class=intentional  # IO-fault point shift
-ioerr3 ioerr3-2.5.3 class=intentional  # IO-fault point shift
-ioerr3 ioerr3-2.6.3 class=intentional  # IO-fault point shift
 journal2 journal2-1.1 class=unsupported issue=1836  # hot-journal crash simulation needs -journal sidecar; copied state differs
 journal2 journal2-1.2 class=unsupported issue=1836  # hot-journal crash simulation needs -journal sidecar; copied state differs
 journal2 journal2-1.5 class=unsupported issue=1836  # hot-journal crash simulation needs -journal sidecar; copied state differs
@@ -4794,7 +4788,6 @@ ioerr ioerr-7.53.1 class=intentional  # hot-journal prep copies absent -journal 
 ioerr ioerr-7.54.1 class=intentional  # hot-journal prep copies absent -journal sidecar
 ioerr ioerr-7.55.1 class=intentional  # hot-journal prep copies absent -journal sidecar
 ioerr ioerr-7.56.1 class=intentional  # hot-journal prep copies absent -journal sidecar
-ioerr ioerr-7.57.1 class=intentional  # hot-journal prep copies absent -journal sidecar
 ioerr ioerr-9.1.1 class=intentional  # master-journal prep copies absent -journal sidecar
 # ioerr4: PRAGMA auto_vacuum=INCREMENTAL is a silent no-op on doltlite
 # format (read-back 0, not 2), and the chunk store has no page freelist,
