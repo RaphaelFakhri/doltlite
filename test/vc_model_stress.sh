@@ -11,7 +11,7 @@
 #                 (duplicates replay a seed under another process schedule)
 # VCMODEL_CLUSTERED  0=rowid alias, 1=clustered PK (default varies by seed)
 # VCMODEL_PAR      seeds run at once (default: CPU count)
-# VCMODEL_OUT      where failing runs are kept (default ./vc-model-stress)
+# VCMODEL_OUT      parent for run directories (default ./vc-model-stress)
 
 set -euo pipefail
 set -f
@@ -57,6 +57,7 @@ case "${VCMODEL_CLUSTERED-0}" in
 esac
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
+OUT=$(mktemp -d "$OUT/run.XXXXXX")
 {
   printf 'revision=%s\nbinary=%s\n' "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "$BIN"
   printf 'seconds=%s\nparallel=%s\nfirst=%s\n' "$SECONDS_BUDGET" "$PAR" "$FIRST"
@@ -99,6 +100,7 @@ run_seed(){
 export -f run_seed
 
 echo "vc_model_stress: seeds ${VCMODEL_SEEDS:-from $FIRST}, ${SECONDS_BUDGET}s, $PAR at a time"
+echo "vc_model_stress: output $OUT"
 {
   attempt=0
   if [ "${VCMODEL_SEEDS+x}" ]; then
