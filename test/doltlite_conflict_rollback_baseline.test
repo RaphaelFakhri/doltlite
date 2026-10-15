@@ -73,6 +73,7 @@ foreach {layout key} {integer {INTEGER PRIMARY KEY} clustered {INT PRIMARY KEY}}
         SELECT dolt_commit('-Am','base');
         SELECT dolt_checkout('-b','other');
         UPDATE w SET v='other';
+        INSERT INTO u VALUES(2);
         SELECT dolt_commit('-am','other');
         SELECT dolt_checkout('main');
         UPDATE w SET v='main';
@@ -86,16 +87,18 @@ foreach {layout key} {integer {INTEGER PRIMARY KEY} clustered {INT PRIMARY KEY}}
         set result [catchsql {SELECT dolt_cherry_pick('other')}]
         list [lindex $result 0] [string match {*1 conflict*} [lindex $result 1]]
       } {1 1}
+      set staged [execsql {SELECT dolt_hashof_db('STAGED')}]
       execsql {INSERT INTO u VALUES(99)}
       do_test $prefix-refused {
         set result [catchsql $sql]
-        list [lindex $result 0] [string match {*unresolved conflicts*} [lindex $result 1]]
+        list [lindex $result 0] [regexp {unresolved conflicts|conflicts detected} [lindex $result 1]]
       } {1 1}
+      do_execsql_test $prefix-staged-kept {SELECT dolt_hashof_db('STAGED')} $staged
       do_test $prefix-transaction-open {sqlite3_get_autocommit db} 0
       do_execsql_test $prefix-state-kept {
         SELECT count(*) FROM dolt_conflicts;
         SELECT * FROM u;
-      } {1 99}
+      } {1 2 99}
       do_execsql_test $prefix-head-kept {SELECT dolt_hashof('HEAD')} $head
       if {$finish eq "resolve"} {
         execsql {SELECT dolt_conflicts_resolve('--ours','w'); COMMIT}
@@ -110,7 +113,7 @@ foreach {layout key} {integer {INTEGER PRIMARY KEY} clustered {INT PRIMARY KEY}}
       } {0 ok}
       db close
       sqlite3 db test.db
-      set expected [expr {$finish eq "resolve" ? 1 : 0}]
+      set expected [expr {$finish eq "resolve" ? 2 : 0}]
       do_execsql_test $prefix-reopen {
         SELECT * FROM w;
         SELECT count(*) FROM u;

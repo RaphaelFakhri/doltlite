@@ -738,7 +738,7 @@ static void doltliteResetFunc(
   }
 
   doltliteGetSessionMergeState(db, &isMerging, 0, 0);
-  if( isMerging && !isHard ){
+  if( (isMerging || doltliteSessionHasUnresolvedConflicts(db)) && !isHard ){
     sqlite3_free(azPaths);
     azPaths = 0;
     sqlite3_result_error(context,
