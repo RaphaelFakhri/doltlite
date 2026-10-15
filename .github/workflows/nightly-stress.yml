@@ -305,7 +305,7 @@ jobs:
 
           vc-model)
             echo "=== multi-process VC model stress (${VC_MODEL_SECONDS}s) ===" | tee "$log"
-            if ! VCMODEL_SECONDS="$VC_MODEL_SECONDS" VCMODEL_OUT="$outdir/runs" \
+            if ! VCMODEL_SECONDS="$VC_MODEL_SECONDS" VCMODEL_PRELOG=1 VCMODEL_OUT="$outdir/runs" \
                  bash ../test/vc_model_stress.sh ./vc_model_stress_test \
                  >>"$log" 2>&1; then
               rc=1

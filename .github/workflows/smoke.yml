@@ -55,7 +55,7 @@ jobs:
     - name: Run multi-process version-control model stress
       run: |
         cd build
-        VCMODEL_SECONDS=600 VCMODEL_WEDGE_SEC=300 \
+        VCMODEL_SECONDS=600 VCMODEL_WEDGE_SEC=300 VCMODEL_PRELOG=1 \
         VCMODEL_OUT="$GITHUB_WORKSPACE/vc-model-stress" \
           bash ../test/vc_model_stress.sh ./vc_model_stress_test
       timeout-minutes: 22
