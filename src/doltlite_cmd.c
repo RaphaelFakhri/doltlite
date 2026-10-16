@@ -22,15 +22,28 @@ void doltliteAuthShieldLeave(DoltliteAuthShield *p){
 #endif
 }
 
-static void doltliteCommandFuncShield(
+static int doltliteBeginSessionRead(sqlite3 *db){
+  if( db->autoCommit || !doltliteGetChunkStore(db) ) return SQLITE_OK;
+  return sqlite3BtreeBeginTrans(db->aDb[0].pBt, 0, 0);
+}
+
+static void doltliteInvokeShieldedFunc(
   sqlite3_context *ctx,
   int argc,
-  sqlite3_value **argv
+  sqlite3_value **argv,
+  int bRead
 ){
+  sqlite3 *db = sqlite3_context_db_handle(ctx);
   void (*xFunc)(sqlite3_context*,int,sqlite3_value**) = sqlite3_user_data(ctx);
   DoltliteAuthShield shield;
-  doltliteAuthShieldEnter(sqlite3_context_db_handle(ctx), &shield);
-  xFunc(ctx, argc, argv);
+  int rc;
+  doltliteAuthShieldEnter(db, &shield);
+  rc = bRead ? doltliteBeginSessionRead(db) : SQLITE_OK;
+  if( rc==SQLITE_OK ){
+    xFunc(ctx, argc, argv);
+  }else{
+    sqlite3_result_error_code(ctx, rc);
+  }
   doltliteAuthShieldLeave(&shield);
   /* SQLITE_NOTFOUND is the store's internal "no such chunk"; one that escapes
   ** a command is a chunk the database should hold. A host chunk source may
@@ -43,6 +56,15 @@ static void doltliteCommandFuncShield(
     }
     sqlite3_result_error_code(ctx, SQLITE_CORRUPT);
   }
+}
+
+static void doltliteCommandFuncShield(
+  sqlite3_context *ctx,
+  int argc,
+  sqlite3_value **argv
+){
+  sqlite3 *db = sqlite3_context_db_handle(ctx);
+  doltliteInvokeShieldedFunc(ctx, argc, argv, db->pVcCommand==0);
 }
 
 int doltliteCreateShieldedFunc(
@@ -76,7 +98,7 @@ static void doltliteCommandFunc(
   sqlite3 *db = sqlite3_context_db_handle(ctx);
   Vdbe *pOuter = db->pVcCommand;
   db->pVcCommand = ctx->pVdbe;
-  doltliteCommandFuncShield(ctx, argc, argv);
+  doltliteInvokeShieldedFunc(ctx, argc, argv, pOuter==0);
   if( !ctx->isError ){
     doltliteVcCommandInstalled(db);
   }else if( !ctx->pVdbe->vcInstalled && AtomicLoad(&db->u1.isInterrupted) ){
@@ -164,7 +186,8 @@ static int smOpen(sqlite3_vtab *pVtab, sqlite3_vtab_cursor **ppCursor){
   ShieldedModule *p = SM_VTAB(pVtab);
   int rc;
   SM_ENTER(p);
-  rc = p->pInner->xOpen(pVtab, ppCursor);
+  rc = p->db->pVcCommand ? SQLITE_OK : doltliteBeginSessionRead(p->db);
+  if( rc==SQLITE_OK ) rc = p->pInner->xOpen(pVtab, ppCursor);
   SM_LEAVE();
   return rc;
 }
@@ -222,7 +245,8 @@ static int smUpdate(sqlite3_vtab *pVtab, int argc, sqlite3_value **argv,
   ShieldedModule *p = SM_VTAB(pVtab);
   int rc;
   SM_ENTER(p);
-  rc = p->pInner->xUpdate(pVtab, argc, argv, pRowid);
+  rc = p->db->pVcCommand ? SQLITE_OK : doltliteBeginSessionRead(p->db);
+  if( rc==SQLITE_OK ) rc = p->pInner->xUpdate(pVtab, argc, argv, pRowid);
   SM_LEAVE();
   return rc;
 }
@@ -230,7 +254,8 @@ static int smBegin(sqlite3_vtab *pVtab){
   ShieldedModule *p = SM_VTAB(pVtab);
   int rc;
   SM_ENTER(p);
-  rc = p->pInner->xBegin(pVtab);
+  rc = p->db->pVcCommand ? SQLITE_OK : doltliteBeginSessionRead(p->db);
+  if( rc==SQLITE_OK ) rc = p->pInner->xBegin(pVtab);
   SM_LEAVE();
   return rc;
 }
