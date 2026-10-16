@@ -1,0 +1,99 @@
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+
+set armed 0
+proc reset_collect_peer {} {
+  if {!$::armed} {return 0}
+  incr ::calls
+  if {$::calls==$::at} {
+    set ::fired 1
+    set ::peerResult [catch {
+      peer eval {UPDATE w SET v='peer' WHERE id=100}
+      if {$::advance eq "amend"} {
+        peer eval {SELECT dolt_commit('-a','--amend','-m','peer')}
+      }
+      peer eval {SELECT dolt_gc()}
+    }]
+    if {!$::peerResult} {
+      incr ::wins
+      set ::peerHead [peer one {SELECT dolt_hashof('HEAD')}]
+    }
+  }
+  return 0
+}
+
+proc reset_collect_read {method filename args} {
+  if {[file tail $filename] eq "test.db"} {reset_collect_peer}
+  return SQLITE_OK
+}
+testvfs resetcollectio
+resetcollectio filter {xRead}
+resetcollectio script reset_collect_read
+
+foreach layout {rowid clustered} {
+  reset_db
+  set key "INTEGER PRIMARY KEY"
+  if {$layout eq "clustered"} {set key "INT PRIMARY KEY"}
+  execsql "CREATE TABLE w(id $key,v TEXT)"
+  execsql {
+    INSERT INTO w VALUES(1,'base');
+    SELECT dolt_commit('-Am','base');
+    INSERT INTO w VALUES(2,'next');
+    SELECT dolt_commit('-am','next');
+    INSERT INTO w VALUES(3,'tip');
+    SELECT dolt_commit('-am','tip');
+  }
+  db close
+  file copy -force test.db reset-collect-base.db
+  foreach advance {amend write} {
+    foreach {target sql} {
+      head {SELECT dolt_reset('--hard','HEAD')}
+      ancestor {SELECT dolt_reset('--hard','HEAD~1')}
+    } {
+      set wins 0
+      set refusals 0
+      for {set at 1} {$at<=400} {incr at} {
+        forcedelete test.db
+        file copy -force reset-collect-base.db test.db
+        sqlite3 db test.db -vfs resetcollectio
+        sqlite3 peer test.db
+        peer eval {
+          INSERT INTO w VALUES(100,'before');
+          SELECT dolt_commit('-a','--amend','-m','before');
+        }
+        set calls 0
+        set fired 0
+        set peerResult 1
+        set armed 1
+        db progress 1 reset_collect_peer
+        set result [catchsql $sql]
+        set code [sqlite3_extended_errcode db]
+        set armed 0
+        db progress 0 {}
+        set prefix reset-collected-$layout-$advance-$target-$at
+        do_test $prefix.result {
+          expr {![lindex $result 0] || [string match SQLITE_BUSY* $code]}
+        } 1
+        if {$fired && !$peerResult && [string match SQLITE_BUSY* $code]} {
+          incr refusals
+          do_test $prefix.peer-kept {
+            list [peer one {SELECT dolt_hashof('HEAD')}] \
+                 [peer eval {SELECT id,v FROM w WHERE id=100}]
+          } [list $peerHead {100 peer}]
+          do_test $prefix.retry {catchsql $sql} {0 0}
+        }
+        do_execsql_test $prefix.integrity {PRAGMA integrity_check} {ok}
+        peer close
+        db close
+        if {!$fired} {break}
+      }
+      do_test reset-collected-$layout-$advance-$target.exhausted {
+        expr {$at<=400 && $wins>0 && ($advance eq "write" || $refusals>0)}
+      } 1
+    }
+  }
+  forcedelete reset-collect-base.db
+  sqlite3 db test.db
+}
+resetcollectio delete
+finish_test
