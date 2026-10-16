@@ -615,6 +615,10 @@ int applyMergedCatalogAndCommit(
   int bOwnTxn = db->autoCommit;
   int rc;
   if( bOwnTxn ){
+    ChunkStore *cs = doltliteGetChunkStore(db);
+    rc = doltliteRefreshAndConfirmHead(db, cs, ourHead);
+    if( rc!=SQLITE_OK ) return rc;
+    chunkStoreUnlock(cs);
     /* Keep nested SQL private while retaining autocommit conflict handling. */
     rc = sqlite3_exec(db, "SAVEPOINT doltlite_apply", 0, 0, 0);
     if( rc!=SQLITE_OK ) return rc;
