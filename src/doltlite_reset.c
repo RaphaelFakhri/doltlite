@@ -460,7 +460,8 @@ static int doltlitePreserveUntrackedOnHardReset(
         "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name=?",
         -1, &pStmt, 0);
     for(j=0; rc==SQLITE_OK && j<nUntracked; j++){
-      int keep = 1;
+      int keep = findSchemaEntry(aTargetSchema, nTargetSchema,
+                                 azUntracked[j])==0;
       sqlite3_bind_text(pStmt, 1, azUntracked[j], -1, SQLITE_STATIC);
       while( keep && sqlite3_step(pStmt)==SQLITE_ROW ){
         const char *zIdx = (const char*)sqlite3_column_text(pStmt, 0);

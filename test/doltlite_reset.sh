@@ -591,6 +591,24 @@ run_test "rollback_after_hard_reset_is_durable" \
   "1" "$RB_DB"
 rm -f "$RB_DB"
 
+# A working table that is untracked before the reset but tracked in the
+# target is reset to the target's table, whatever its schema.
+UT_DB=/tmp/test_reset_hard_untracked_in_target_$$.db
+for ddl in "CREATE TABLE d(id INTEGER PRIMARY KEY, x TEXT); INSERT INTO d VALUES(9,'new');" \
+           "CREATE TABLE d(k INTEGER PRIMARY KEY, y INT, z TEXT); INSERT INTO d VALUES(9,9,'new');"; do
+  rm -f "$UT_DB"
+  echo "CREATE TABLE d(id INTEGER PRIMARY KEY, x TEXT); INSERT INTO d VALUES(1,'old');
+SELECT dolt_commit('-Am','add d'); SELECT dolt_revert('HEAD'); $ddl
+SELECT dolt_reset('--hard','HEAD~1');" | $DOLTLITE "$UT_DB" > /dev/null 2>&1
+  run_test "hard_reset_target_wins_over_untracked: $ddl" \
+    "SELECT sql FROM sqlite_master WHERE name='d'; SELECT id||'|'||x FROM d; SELECT count(*) FROM dolt_status; PRAGMA integrity_check;" \
+    "CREATE TABLE d(id INTEGER PRIMARY KEY, x TEXT)
+1|old
+0
+ok" "$UT_DB"
+done
+rm -f "$UT_DB"
+
 rm -f "$DB" "$DB2" "$DB3" "$DB3B" "$DB3C" "$DB4" "$DB5" "$DB5B" "$DB5C" "$DB5C.hash" "$DB6" "$DB7" "$DB8" "$DB9" "$DB10" "$DB11" "$DB12" "$DB13" "$DB14" "$DB15" "$DB16" "$DB17" "$DB18"
 
 dltest_finish
