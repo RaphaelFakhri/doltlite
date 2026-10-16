@@ -120,6 +120,49 @@ foreach txn {begin savepoint nested} {
   }
 }
 
+foreach txn {begin savepoint nested} {
+  foreach observation {head status log} {
+    foreach operation {branch tag remote gc} {
+      set prefix vc-deferred-ref-peer-$txn.$observation.$operation
+      reset_db
+      db eval {
+        CREATE TABLE w(id INTEGER PRIMARY KEY,v TEXT);
+        INSERT INTO w VALUES(1,'base');
+        SELECT dolt_commit('-Am','base');
+      }
+      set head [db one {SELECT dolt_hashof('HEAD')}]
+      sqlite3 peer test.db
+      switch $txn {
+        begin {db eval BEGIN}
+        savepoint {db eval {SAVEPOINT caller}}
+        nested {db eval {BEGIN; SAVEPOINT caller}}
+      }
+      switch $observation {
+        head {db eval {SELECT dolt_hashof('HEAD')}}
+        status {db eval {SELECT count(*) FROM dolt_status}}
+        log {db eval {SELECT message FROM dolt_log LIMIT 1}}
+      }
+      switch $operation {
+        branch {peer eval {SELECT dolt_branch('peer')}}
+        tag {peer eval {SELECT dolt_tag('peer')}}
+        remote {peer eval {SELECT dolt_remote('add','peer','file:///tmp/peer')}}
+        gc {peer eval {SELECT dolt_gc()}}
+      }
+      do_test $prefix.head {
+        db one {SELECT dolt_hashof('HEAD')}
+      } $head
+      do_execsql_test $prefix.write {
+        INSERT INTO w VALUES(2,'local');
+        COMMIT;
+        SELECT id FROM w ORDER BY id;
+      } {1 2}
+      do_test $prefix.peer {peer eval {SELECT id FROM w ORDER BY id}} {1 2}
+      do_execsql_test $prefix.integrity {PRAGMA integrity_check} ok
+      peer close
+    }
+  }
+}
+
 foreach txn {begin nested} {
   set prefix vc-deferred-staged-$txn
   reset_db
