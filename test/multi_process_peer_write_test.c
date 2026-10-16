@@ -705,6 +705,11 @@ static void test_process_apply_clean_peer(
     int peerRc = sqlite3_open(zPath, &peer);
     char zTip[64] = {0};
     if( read(p.toPeer[0], &ch, 1)!=1 ) _exit(1);
+    if( peerRc==SQLITE_OK && afterInstall ){
+      const char *zExpectedTip = revert ? "Revert \"drop index\"" : "index";
+      if( strcmp(queryText(peer, "SELECT message FROM dolt_log LIMIT 1"),
+                 zExpectedTip)!=0 ) peerRc = SQLITE_ERROR;
+    }
     if( peerRc==SQLITE_OK && afterInstall && commitPeer ){
       peerRc = execSql(peer,
           "INSERT INTO t VALUES(98,'peer commit');"
@@ -738,7 +743,8 @@ static void test_process_apply_clean_peer(
   check("apply_clean_hook_fired", p.fired==1);
   check("apply_clean_peer_acknowledged", p.peerRc==SQLITE_OK);
   check("apply_clean_scan_released_snapshot", p.txnState==SQLITE_TXN_NONE);
-  check("apply_clean_refused_busy", rc==SQLITE_BUSY);
+  check(afterInstall ? "apply_published_success" : "apply_clean_refused_busy",
+        rc==(afterInstall ? SQLITE_OK : SQLITE_BUSY));
   if( !p.fired && write(p.toPeer[1], &ch, 1)!=1 ) exit(1);
   if( write(p.toPeer[1], &ch, 1)!=1
    || read(p.fromPeer[0], zPeerHead, sizeof(zPeerHead))!=sizeof(zPeerHead) ) exit(1);
@@ -776,7 +782,7 @@ static void test_process_apply_clean_peer(
       "SELECT count(*) FROM sqlite_master WHERE name='tv'"), afterInstall ? "1" : "0")==0);
   check("apply_clean_original_tip_kept", strcmp(queryText(db,
       "SELECT dolt_hashof('after')"), zPeerHead)==0);
-  check("apply_clean_peer_commit_state", commitPeer ? strcmp(zHead,zPeerHead)!=0
+  check("apply_clean_peer_commit_state", (commitPeer || afterInstall) ? strcmp(zHead,zPeerHead)!=0
                                                    : strcmp(zHead,zPeerHead)==0);
   check("apply_clean_integrity", strcmp(queryText(db, "PRAGMA integrity_check"), "ok")==0);
   sqlite3_close(db);

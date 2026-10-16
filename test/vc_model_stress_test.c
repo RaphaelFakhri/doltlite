@@ -969,25 +969,24 @@ static int anyBetween(int f, const char *br, long long lo, long long hi){
 }
 /* Does the commit m, followed through amends before time t, carry the
 ** message zVictim? */
-static long long cmtEndOf(const char *zMsg){
-  int i;
-  for(i=0;i<nCm;i++) if( !strcmp(aCm[i].msg, zMsg) ) return aCm[i].E;
-  return 0;
-}
 static int chainHits(const Cmt *m, long long t, const char *zVictim){
   char cur[64];
   int i, changed = 1, guard = 0;
+  long long curS = m->S, curE = m->E;
   snprintf(cur, sizeof(cur), "%s", m->msg);
   if( !strcmp(cur, zVictim) ) return 1;
   while( changed && guard++<1000 ){
     changed = 0;
     for(i=0;i<nX;i++){
       const Xev *x = &aX[i];
-      if( strcmp(x->op, "amend") || x->E <= m->S || x->S >= t ) continue;
+      if( strcmp(x->op, "amend") || x->E <= curS || x->S >= t ) continue;
       if( strcmp(x->br, m->br) || !x->newmsg[0] ) continue;
-      if( !strcmp(x->victim, cur) || !strcmp(x->victim, "*") || cmtEndOf(cur) > x->S ){
+      if( !strcmp(x->newmsg, cur) ) continue;
+      if( !strcmp(x->victim, cur) || !strcmp(x->victim, "*") || curE > x->S ){
         if( !strcmp(x->victim, "*") ) return 1;
         snprintf(cur, sizeof(cur), "%s", x->newmsg);
+        curS = x->S;
+        curE = x->E;
         if( !strcmp(cur, zVictim) ) return 1;
         changed = 1;
       }

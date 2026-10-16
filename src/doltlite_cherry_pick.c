@@ -1,6 +1,7 @@
 #ifdef DOLTLITE_PROLLY
 
 #include "sqliteInt.h"
+#include "vdbeInt.h"
 #include "prolly_hash.h"
 #include "prolly_hashset.h"
 #include "chunk_store.h"
@@ -316,7 +317,7 @@ stage_done:
   return rc;
 }
 
-int applyMergedCatalogAndCommit(
+static int applyMergedCatalogAndCommitInTxn(
   sqlite3 *db,
   sqlite3_context *context,
   const ProllyHash *ancCatHash,
@@ -455,7 +456,8 @@ int applyMergedCatalogAndCommit(
     if( rc!=SQLITE_OK ) goto apply_rollback;
   }
 
-  rc = doltliteFlushCatalogToHash(db, &liveMergedCatHash);
+  rc = sqlite3VtabSync(db, context->pVdbe);
+  if( rc==SQLITE_OK ) rc = doltliteFlushCatalogToHash(db, &liveMergedCatHash);
   if( rc==SQLITE_OK ){
     rc = doltliteSwitchCatalog(db, &liveMergedCatHash);
   }
@@ -573,6 +575,7 @@ int applyMergedCatalogAndCommit(
       db, ourHead, pCleanWorkingSet, &commitHash, &commitCatHash,
       commitSplit ? &liveMergedCatHash : 0);
   if( rc!=SQLITE_OK ) goto apply_rollback;
+  doltliteAdoptRollbackBaseline(db, &liveMergedCatHash);
 
   if( graphLocked ){
     chunkStoreUnlock(cs);
@@ -592,6 +595,54 @@ apply_rollback:
     chunkStoreUnlock(cs);
   }
   return cherryPickRestoreAndPersist(db, &savedState, &commitHash, rc);
+}
+
+int applyMergedCatalogAndCommit(
+  sqlite3 *db,
+  sqlite3_context *context,
+  const ProllyHash *ancCatHash,
+  const ProllyHash *ourCatHash,
+  const ProllyHash *theirCatHash,
+  const ProllyHash *ourHead,
+  const ProllyHash *pCommitOurCatHash,
+  const char *zMessage,
+  const char *zAuthorName,
+  const char *zAuthorEmail,
+  int bPreferOurMaster,
+  int bRejectUnchanged,
+  int *pnConflicts,
+  int *pnViolations,
+  char **pzApplyErr,
+  char *hexBuf
+){
+  int bOwnTxn = db->autoCommit;
+  int rc;
+  if( bOwnTxn ){
+    ChunkStore *cs = doltliteGetChunkStore(db);
+    rc = doltliteRefreshAndConfirmHead(db, cs, ourHead);
+    if( rc!=SQLITE_OK ) return rc;
+    chunkStoreUnlock(cs);
+    /* Keep nested SQL private while retaining autocommit conflict handling. */
+    rc = sqlite3_exec(db, "SAVEPOINT doltlite_apply", 0, 0, 0);
+    if( rc!=SQLITE_OK ) return rc;
+  }
+  rc = applyMergedCatalogAndCommitInTxn(db, context, ancCatHash,
+      ourCatHash, theirCatHash, ourHead, pCommitOurCatHash, zMessage,
+      zAuthorName, zAuthorEmail, bPreferOurMaster, bRejectUnchanged,
+      pnConflicts, pnViolations, pzApplyErr, hexBuf);
+  if( bOwnTxn && !db->autoCommit ){
+    int erc;
+    db->nVcInterruptMask++;
+    erc = sqlite3_exec(db, "ROLLBACK", 0, 0, 0);
+    if( erc!=SQLITE_OK ){
+      sqlite3RollbackAll(db, SQLITE_OK);
+      sqlite3CloseSavepoints(db);
+      db->autoCommit = 1;
+      rc = erc;
+    }
+    db->nVcInterruptMask--;
+  }
+  return rc;
 }
 
 static void doltliteCherryPickFunc(
@@ -734,7 +785,6 @@ static void doltliteCherryPickFunc(
       "no changes were made, nothing to commit",
       "cherry-pick of %s failed", "cherry-pick failed", hexBuf);
 }
-
 
 int doltliteCherryPickRegister(sqlite3 *db){
   return doltliteCreateCommandFunc(db, "dolt_cherry_pick", -1,

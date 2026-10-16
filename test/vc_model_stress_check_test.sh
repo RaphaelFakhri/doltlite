@@ -17,12 +17,15 @@ fails=0
 
 check(){
   name=$1 want=$2 dir=$3
-  out=$("$BIN" --check "$dir" 1 2>&1)
+  status=0
+  out=$("$BIN" --check "$dir" "${4:-1}" 2>&1) || status=$?
+  want_status=0
+  if [ "$want" -ne 0 ]; then want_status=1; fi
   got=$(echo "$out" | grep -c '^VIOLATION')
-  if [ "$got" = "$want" ]; then
+  if [ "$got" = "$want" ] && [ "$status" = "$want_status" ]; then
     echo "ok $name"
   else
-    echo "FAIL $name: expected $want violations, got $got"
+    echo "FAIL $name: expected $want violations/status $want_status, got $got/status $status"
     echo "$out" | sed 's/^/  /'
     fails=$((fails+1))
   fi
@@ -56,6 +59,26 @@ printf '%s\n' \
   $'X\t4\tmain\t4000\t4500\tamend\tm_9\tm_13' \
   $'C\tm_13\tmain\t4000\t4500\t1' > "$d/log.0"
 check reset_other_victim_lost 1 "$d"
+
+
+for swapped in 0 1; do
+  for victim in m_d m_unrelated; do
+    d=$(newdir "amend_chain_${swapped}_${victim}")
+    printf '%s\n' \
+      $'I\t100000012\tmain\t1000\t1100' \
+      $'X\t4\tmain\t2000\t2100\tamend\tm_before\tm_a' \
+      $'C\tm_a\tmain\t2000\t2100\t1' \
+      $'X\t4\tmain\t4000\t4100\tamend\tm_c\tm_d' \
+      $'C\tm_d\tmain\t4000\t4100\t1' > "$d/log.$swapped"
+    printf 'X\t7\tmain\t5000\t5100\treset_hard_1\t%s\n' "$victim" >> "$d/log.$swapped"
+    printf '%s\n' \
+      $'X\t4\tmain\t3000\t3100\tamend\tm_a\tm_c' \
+      $'C\tm_c\tmain\t3000\t3100\t1' > "$d/log.$((1-swapped))"
+    want=0
+    if [ "$victim" = m_unrelated ]; then want=1; fi
+    check "amend_chain_${swapped}_${victim}" "$want" "$d" 2
+  done
+done
 
 if [ "$fails" -ne 0 ]; then
   echo "vc_model_stress_check: $fails failed"
