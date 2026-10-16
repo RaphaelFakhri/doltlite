@@ -997,14 +997,16 @@ static int chainHits(const Cmt *m, long long t, const char *zVictim){
 }
 
 /* Row p was in an acked commit -a on its branch that was still HEAD's
-** ancestor (no HEAD regression) by time t. */
-static int committedBefore(const struct Ins *p, long long t, const char *zVictim){
+** ancestor (no HEAD regression) by time t. The victim is read under the
+** rewriting op's lock, so amends up to tVictim (its end) can produce it. */
+static int committedBefore(const struct Ins *p, long long t,
+                           const char *zVictim, long long tVictim){
   int i;
   for(i=0;i<nCm;i++){
     const Cmt *m = &aCm[i];
     if( !m->all || strcmp(m->br, p->br) ) continue;
     if( m->S <= p->E || m->E >= t ) continue;
-    if( zVictim && chainHits(m, t, zVictim) ) continue;
+    if( zVictim && chainHits(m, tVictim, zVictim) ) continue;
     if( anyBetween(FW|FR, p->br, p->S, m->E) ) continue;
     if( anyBetween(FK, p->br, m->S, t) ) continue;
     return 1;
@@ -1019,7 +1021,7 @@ static const Xev *rowExcused(const struct Ins *p){
     if( x->E <= p->S || !onBr(x, p->br) ) continue;
     if( x->flags & FR ) return x;
     if( (x->flags & FW) && (x->flags & FK) && !strcmp(x->victim, "*") ) return x;
-    if( (x->flags & FW) && !committedBefore(p, x->S, (x->flags & FK) ? x->victim : 0) ) return x;
+    if( (x->flags & FW) && !committedBefore(p, x->S, (x->flags & FK) ? x->victim : 0, x->E) ) return x;
   }
   return 0;
 }

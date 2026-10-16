@@ -52,6 +52,11 @@ jobs:
     - name: Allow stack capture of wedged workers
       run: sudo sysctl -w kernel.yama.ptrace_scope=0
 
+    - name: Check model stress verdicts on recorded logs
+      run: |
+        cd build
+        bash ../test/vc_model_stress_check_test.sh ./vc_model_stress_test ./doltlite
+
     - name: Run multi-process version-control model stress
       run: |
         cd build
