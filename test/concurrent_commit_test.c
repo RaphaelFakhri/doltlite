@@ -235,6 +235,121 @@ static void test_sequential_multi_connection(void){
   remove(dbpath);
 }
 
+static void test_checkout_then_peer_write(void){
+  const char *azCreate[] = {
+    "CREATE TABLE w(id INTEGER PRIMARY KEY,v TEXT)",
+    "CREATE TABLE w(id INT PRIMARY KEY,v TEXT)",
+    "CREATE TABLE w(id INT PRIMARY KEY,v TEXT) WITHOUT ROWID"
+  };
+  int layout, sameBranch, busy;
+  for(layout=0; layout<3; layout++){
+    for(sameBranch=0; sameBranch<2; sameBranch++){
+      for(busy=0; busy<2; busy++){
+        char path[512], branchPath[544], otherPath[544];
+        sqlite3 *db = 0, *peer = 0, *other = 0;
+        int rc;
+        char *err = 0;
+        snprintf(path, sizeof(path), DOLTLITE_TEST_TMPDIR
+            "/checkout_peer_%d_%d_%d.db", layout, sameBranch, busy);
+        snprintf(branchPath, sizeof(branchPath), "%s@b1", path);
+        snprintf(otherPath, sizeof(otherPath), "%s@other", path);
+        remove(path);
+        printf("--- Checkout peer: layout=%d same_branch=%d busy=%d ---\n",
+               layout, sameBranch, busy);
+        check("checkout_peer_open_setup", sqlite3_open(path, &db)==SQLITE_OK);
+        check("checkout_peer_create", execSql(db, azCreate[layout])==SQLITE_OK);
+        check("checkout_peer_setup", execSql(db,
+            "INSERT INTO w VALUES(1,'base'),(2,'tracked');"
+            "CREATE INDEX ix_w_v ON w(v);"
+            "SELECT dolt_commit('-Am','base');"
+            "SELECT dolt_branch('b1');"
+            "SELECT dolt_checkout('-b','other');"
+            "INSERT INTO w VALUES(3,'other');"
+            "SELECT dolt_commit('-am','other');")==SQLITE_OK);
+        sqlite3_close(db);
+        db = 0;
+        check("checkout_peer_open_victim",
+              sqlite3_open(branchPath, &db)==SQLITE_OK);
+        check("checkout_peer_open_writer",
+              sqlite3_open(branchPath, &peer)==SQLITE_OK);
+        check("checkout_peer_open_other",
+              sqlite3_open(otherPath, &other)==SQLITE_OK);
+        sqlite3_busy_timeout(db, 0);
+        sqlite3_busy_timeout(peer, 0);
+        sqlite3_busy_timeout(other, 0);
+        check("checkout_peer_load_view", strcmp(queryScalarText(db,
+              "SELECT count(*) FROM w"), "2")==0);
+        if( sameBranch ){
+          if( busy ){
+            check("checkout_peer_hold_merge_lock",
+                  execSql(other, "BEGIN IMMEDIATE")==SQLITE_OK);
+            rc = sqlite3_exec(db, "SELECT dolt_merge('other')", 0, 0, &err);
+            check("checkout_peer_merge_busy", (rc&0xff)==SQLITE_BUSY);
+            sqlite3_free(err);
+            err = 0;
+            check("checkout_peer_release_merge_lock",
+                  execSql(other, "ROLLBACK")==SQLITE_OK);
+          }
+        }else{
+          check("checkout_peer_discard", execSql(db,
+              "DELETE FROM w WHERE id=2;"
+              "SELECT dolt_checkout('w');")==SQLITE_OK);
+          check("checkout_peer_soft_reset",
+                execSql(peer, "SELECT dolt_reset('--soft')")==SQLITE_OK);
+        }
+        check("checkout_peer_acknowledged", execSql(peer,
+              "INSERT INTO w VALUES(99,'peer')")==SQLITE_OK);
+        if( sameBranch ){
+          check("checkout_peer_advance", execSql(peer,
+              "CREATE INDEX ix_peer ON w(id,v);"
+              "SELECT dolt_commit('-Am','peer');")==SQLITE_OK);
+          check("checkout_peer_same_branch",
+                execSql(db, "SELECT dolt_checkout('b1')")==SQLITE_OK);
+        }else{
+          if( busy ){
+            check("checkout_peer_hold_begin_lock",
+                  execSql(other, "BEGIN IMMEDIATE")==SQLITE_OK);
+            rc = sqlite3_exec(db, "BEGIN IMMEDIATE", 0, 0, &err);
+            check("checkout_peer_begin_busy", (rc&0xff)==SQLITE_BUSY);
+            sqlite3_free(err);
+            err = 0;
+            check("checkout_peer_release_begin_lock",
+                  execSql(other, "COMMIT")==SQLITE_OK);
+          }
+          check("checkout_peer_begin",
+                execSql(db, "BEGIN IMMEDIATE")==SQLITE_OK);
+        }
+        check("checkout_peer_publish", execSql(db, sameBranch
+              ? "SELECT dolt_commit('-Am','after','--allow-empty')"
+              : "SELECT dolt_commit('-am','after')")==SQLITE_OK);
+        check("checkout_peer_committed_row", strcmp(queryScalarText(db,
+              "SELECT count(*) FROM dolt_at_w('HEAD') WHERE id=99"), "1")==0);
+        check("checkout_peer_parent", strcmp(queryScalarText(db,
+              "SELECT message FROM dolt_log LIMIT 1 OFFSET 1"),
+              sameBranch ? "peer" : "base")==0);
+        check("checkout_peer_committed_index", strcmp(queryScalarText(db,
+              "SELECT count(*) FROM sqlite_schema WHERE type='index' "
+              "AND name IN ('ix_w_v','ix_peer')"), sameBranch ? "2" : "1")==0);
+        sqlite3_close(other);
+        sqlite3_close(peer);
+        sqlite3_close(db);
+        db = 0;
+        check("checkout_peer_reopen", sqlite3_open(branchPath, &db)==SQLITE_OK);
+        check("checkout_peer_durable_rows", strcmp(queryScalarText(db,
+              "SELECT group_concat(id) FROM (SELECT id FROM w ORDER BY id)"),
+              "1,2,99")==0);
+        check("checkout_peer_durable_indexes", strcmp(queryScalarText(db,
+              "SELECT count(*) FROM sqlite_schema WHERE type='index' "
+              "AND name IN ('ix_w_v','ix_peer')"), sameBranch ? "2" : "1")==0);
+        check("checkout_peer_integrity", strcmp(queryScalarText(db,
+              "PRAGMA integrity_check"), "ok")==0);
+        sqlite3_close(db);
+        remove(path);
+      }
+    }
+  }
+}
+
 int main(){
   printf("=== Concurrent Commit Test ===\n\n");
 
@@ -242,6 +357,7 @@ int main(){
   test_pinned_session_commit_rejected();
   test_single_connection();
   test_sequential_multi_connection();
+  test_checkout_then_peer_write();
 
   printf("\nResults: %d passed, %d failed out of %d tests\n",
     nPass, nFail, nPass+nFail);
