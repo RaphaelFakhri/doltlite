@@ -875,6 +875,15 @@ static void doltliteResetFunc(
     rc = doltlitePreserveUntrackedOnHardReset(
       db, cs, &preResetStagedCatHash, &targetWorkingCatHash
     );
+    if( rc==SQLITE_NOTFOUND && !doltliteChunkSourceActive(db) ){
+      int confirmRc = doltliteRefreshAndConfirmHead(db, cs,
+                                                   &sessionHeadBeforeLock);
+      if( confirmRc==SQLITE_OK ){
+        graphLocked = 1;
+        confirmRc = doltliteConfirmWorkingSet(db, cs, &wsBasis);
+      }
+      if( confirmRc!=SQLITE_OK ) rc = confirmRc;
+    }
     if( rc!=SQLITE_OK ){
       sqlite3_result_error_code(context, rc);
       goto reset_cleanup;
