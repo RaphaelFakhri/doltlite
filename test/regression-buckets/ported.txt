@@ -162,3 +162,4 @@ doltlite_merge_reordered_drop
 doltlite_checkout_catalog_rollback
 doltlite_open_root_allocation
 doltlite_reset_collected_catalog
+doltlite_vc_deferred_snapshot

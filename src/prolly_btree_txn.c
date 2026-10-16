@@ -750,6 +750,24 @@ int prollyBtreeBeginTrans(Btree *p, int wrFlag, int *pSchemaVersion){
     if( p->inTrans==TRANS_READ ){
       int bChanged = 0;
       rc = chunkStoreHasExternalChanges(&pBt->store, &bChanged);
+      if( rc==SQLITE_OK && bChanged ){
+        const char *zBranch = p->zBranch ? p->zBranch : "main";
+        ProllyHash head, workingSet, basis;
+        int foundHead = 0, foundWorkingSet = 0;
+        chunkStorePeekWorkingSetBasis(&pBt->store, zBranch, &basis);
+        rc = chunkStoreReadDiskBranchTip(
+            &pBt->store, zBranch, &head, &foundHead);
+        if( rc==SQLITE_OK ){
+          rc = chunkStoreReadDiskBranchWorkingSet(
+              &pBt->store, zBranch, &workingSet, &foundWorkingSet);
+        }
+        if( rc==SQLITE_OK && foundHead
+         && prollyHashCompare(&head, &p->headCommit)==0
+         && prollyHashCompare(&workingSet, &basis)==0 ){
+          rc = chunkStoreForceRefresh(&pBt->store);
+          if( rc==SQLITE_OK ) bChanged = 0;
+        }
+      }
       if( rc!=SQLITE_OK ){
         chunkStoreUnlock(&pBt->store);
         return rc;

@@ -1,0 +1,203 @@
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+
+foreach layout {rowid clustered} {
+  foreach txn {begin savepoint nested} {
+    foreach gc {0 1} {
+      foreach op {tag tag-head branch branch-head head working staged log status checkout cherry revert} {
+        set prefix vc-deferred-$layout.$txn.$gc.$op
+        reset_db
+        set key {INTEGER PRIMARY KEY}
+        if {$layout eq "clustered"} {set key {INT PRIMARY KEY}}
+        db eval "CREATE TABLE w(id $key,v TEXT)"
+        db eval {
+          INSERT INTO w VALUES(1,'c1');
+          SELECT dolt_commit('-Am','c1');
+          INSERT INTO w VALUES(2,'c2');
+          SELECT dolt_commit('-am','c2');
+          SELECT dolt_branch('b2');
+          INSERT INTO w VALUES(4,'source');
+          SELECT dolt_commit('-am','source');
+          SELECT dolt_checkout('b2');
+          INSERT INTO w VALUES(3,'old tip');
+          SELECT dolt_commit('-am','old tip');
+          INSERT INTO w VALUES(10,'cached');
+        }
+        sqlite3 peer test.db
+        peer eval {
+          SELECT dolt_checkout('b2');
+          BEGIN IMMEDIATE;
+          SELECT dolt_reset('--hard','HEAD~1');
+          COMMIT;
+        }
+        set head [peer one {SELECT dolt_hashof('HEAD')}]
+        set catalog [peer one {SELECT dolt_hashof_catalog('WORKING')}]
+        if {$gc} {
+          sqlite3 collector test.db
+          collector eval {SELECT dolt_gc()}
+          collector close
+        }
+        switch $txn {
+          begin {db eval BEGIN}
+          savepoint {db eval {SAVEPOINT caller}}
+          nested {db eval {BEGIN; SAVEPOINT caller}}
+        }
+        set expected 0
+        switch $op {
+          tag {set sql {SELECT dolt_tag('probe')}}
+          tag-head {set sql {SELECT dolt_tag('probe','HEAD')}}
+          branch {set sql {SELECT dolt_branch('probe')}}
+          branch-head {set sql {SELECT dolt_branch('probe','HEAD')}}
+          head {set sql {SELECT dolt_hashof('HEAD')}; set expected $head}
+          working {set sql {SELECT dolt_hashof_catalog('WORKING')}; set expected $catalog}
+          staged {set sql {SELECT dolt_hashof_catalog('STAGED')}; set expected $catalog}
+          log {set sql {SELECT message FROM dolt_log LIMIT 1}; set expected c2}
+          status {set sql {SELECT count(*) FROM dolt_status}}
+          checkout {set sql {SELECT dolt_checkout('main')}}
+          cherry {set sql {SELECT length(dolt_cherry_pick('main'))}; set expected 40}
+          revert {set sql {SELECT length(dolt_revert('HEAD'))}; set expected 40}
+        }
+        do_test $prefix.first-vc {catchsql $sql} [list 0 $expected]
+        if {$op in {tag tag-head}} {
+          do_test $prefix.tag-tip {
+            peer one {SELECT tag_hash FROM dolt_tags WHERE tag_name='probe'}
+          } $head
+        }
+        if {$op in {branch branch-head}} {
+          do_test $prefix.branch-tip {
+            peer one {SELECT dolt_hashof('probe')}
+          } $head
+        }
+        set rows {1 2}
+        if {$op in {checkout cherry}} {set rows {1 2 4}}
+        if {$op eq "revert"} {set rows 1}
+        do_execsql_test $prefix.rows {SELECT id FROM w ORDER BY id} $rows
+        do_execsql_test $prefix.clean {SELECT count(*) FROM dolt_status} 0
+        catch {db eval ROLLBACK}
+        do_execsql_test $prefix.integrity {PRAGMA integrity_check} ok
+        peer close
+      }
+    }
+  }
+}
+
+foreach txn {begin savepoint nested} {
+  foreach observation {head status log} {
+    set prefix vc-deferred-pinned-$txn.$observation
+    reset_db
+    db eval {
+      CREATE TABLE w(id INTEGER PRIMARY KEY,v TEXT);
+      INSERT INTO w VALUES(1,'base');
+      SELECT dolt_commit('-Am','base');
+    }
+    set head [db one {SELECT dolt_hashof('HEAD')}]
+    sqlite3 peer test.db
+    switch $txn {
+      begin {db eval BEGIN}
+      savepoint {db eval {SAVEPOINT caller}}
+      nested {db eval {BEGIN; SAVEPOINT caller}}
+    }
+    switch $observation {
+      head {db eval {SELECT dolt_hashof('HEAD')}}
+      status {db eval {SELECT count(*) FROM dolt_status}}
+      log {db eval {SELECT message FROM dolt_log LIMIT 1}}
+    }
+    peer eval {
+      INSERT INTO w VALUES(2,'peer');
+      SELECT dolt_commit('-am','peer');
+    }
+    do_test $prefix.head {
+      db one {SELECT dolt_hashof('HEAD')}
+    } $head
+    do_execsql_test $prefix.rows {SELECT id FROM w ORDER BY id} 1
+    do_test $prefix.write-refused {
+      list [catch {db eval {INSERT INTO w VALUES(3,'stale')}}] \
+        [sqlite3_extended_errcode db]
+    } {1 SQLITE_BUSY_SNAPSHOT}
+    db eval ROLLBACK
+    do_execsql_test $prefix.after {SELECT id FROM w ORDER BY id} {1 2}
+    peer close
+  }
+}
+
+foreach txn {begin savepoint nested} {
+  foreach observation {head status log} {
+    foreach operation {branch tag remote gc} {
+      set prefix vc-deferred-ref-peer-$txn.$observation.$operation
+      reset_db
+      db eval {
+        CREATE TABLE w(id INTEGER PRIMARY KEY,v TEXT);
+        INSERT INTO w VALUES(1,'base');
+        SELECT dolt_commit('-Am','base');
+      }
+      set head [db one {SELECT dolt_hashof('HEAD')}]
+      sqlite3 peer test.db
+      switch $txn {
+        begin {db eval BEGIN}
+        savepoint {db eval {SAVEPOINT caller}}
+        nested {db eval {BEGIN; SAVEPOINT caller}}
+      }
+      switch $observation {
+        head {db eval {SELECT dolt_hashof('HEAD')}}
+        status {db eval {SELECT count(*) FROM dolt_status}}
+        log {db eval {SELECT message FROM dolt_log LIMIT 1}}
+      }
+      switch $operation {
+        branch {peer eval {SELECT dolt_branch('peer')}}
+        tag {peer eval {SELECT dolt_tag('peer')}}
+        remote {peer eval {SELECT dolt_remote('add','peer','file:///tmp/peer')}}
+        gc {peer eval {SELECT dolt_gc()}}
+      }
+      do_test $prefix.head {
+        db one {SELECT dolt_hashof('HEAD')}
+      } $head
+      do_execsql_test $prefix.write {
+        INSERT INTO w VALUES(2,'local');
+        COMMIT;
+        SELECT id FROM w ORDER BY id;
+      } {1 2}
+      do_test $prefix.peer {peer eval {SELECT id FROM w ORDER BY id}} {1 2}
+      do_execsql_test $prefix.integrity {PRAGMA integrity_check} ok
+      peer close
+    }
+  }
+}
+
+foreach txn {begin nested} {
+  set prefix vc-deferred-staged-$txn
+  reset_db
+  db eval {
+    CREATE TABLE w(id INTEGER PRIMARY KEY,v TEXT);
+    INSERT INTO w VALUES(1,'base');
+    SELECT dolt_commit('-Am','base');
+    INSERT INTO w VALUES(2,'working');
+  }
+  set base [db one {SELECT dolt_hashof_catalog('HEAD')}]
+  switch $txn {
+    begin {db eval BEGIN}
+    nested {db eval {BEGIN; SAVEPOINT caller}}
+  }
+  db eval {SELECT dolt_add('w')}
+  set staged [db one {SELECT dolt_hashof_catalog('STAGED')}]
+  do_test $prefix.staged {expr {$staged ne $base}} 1
+  db eval {
+    SAVEPOINT inner;
+    INSERT INTO w VALUES(3,'inner');
+    SELECT dolt_add('w');
+    ROLLBACK TO inner;
+    RELEASE inner;
+  }
+  do_test $prefix.restored {
+    db one {SELECT dolt_hashof_catalog('STAGED')}
+  } $staged
+  do_execsql_test $prefix.status {
+    SELECT staged,status FROM dolt_status;
+  } {1 modified}
+  db eval ROLLBACK
+  do_test $prefix.rollback {
+    db one {SELECT dolt_hashof_catalog('STAGED')}
+  } $base
+  do_execsql_test $prefix.working {SELECT id FROM w ORDER BY id} {1 2}
+}
+
+finish_test
