@@ -415,7 +415,7 @@ int doltliteValidateRefsTargetGraph(
   return rc;
 }
 
-#define SYNC_BATCH_SIZE 256
+#define SYNC_BATCH_SIZE 4096
 
 typedef struct SyncBatchBuf SyncBatchBuf;
 struct SyncBatchBuf {
