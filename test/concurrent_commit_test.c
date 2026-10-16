@@ -350,6 +350,103 @@ static void test_checkout_then_peer_write(void){
   }
 }
 
+typedef struct ApplyPeerProbe ApplyPeerProbe;
+struct ApplyPeerProbe {
+  sqlite3 *peer;
+  int fired;
+  int rc;
+};
+
+static int applyPeerTrace(unsigned type, void *pArg, void *pStmt, void *pSql){
+  ApplyPeerProbe *p = (ApplyPeerProbe*)pArg;
+  const char *sql = sqlite3_sql((sqlite3_stmt*)pStmt);
+  (void)pSql;
+  if( type==SQLITE_TRACE_STMT && !p->fired && sql
+   && strstr(sql, "SELECT 1 FROM main.sqlite_master WHERE")
+   && strstr(sql, "REFERENCES") ){
+    p->fired = 1;
+    p->rc = sqlite3_exec(p->peer, "BEGIN IMMEDIATE", 0, 0, 0);
+  }
+  return 0;
+}
+
+static void test_apply_keeps_write_lock(void){
+  const char *azCreate[] = {
+    "CREATE TABLE w(id INTEGER PRIMARY KEY,v TEXT)",
+    "CREATE TABLE w(id INT PRIMARY KEY,v TEXT)",
+    "CREATE TABLE w(id INT PRIMARY KEY,v TEXT) WITHOUT ROWID"
+  };
+  int layout, revert, otherBranch;
+  for(layout=0; layout<3; layout++){
+    for(revert=0; revert<2; revert++){
+      for(otherBranch=0; otherBranch<2; otherBranch++){
+        char path[512], branchPath[544], peerPath[544];
+        sqlite3 *db = 0, *peer = 0;
+        ApplyPeerProbe probe;
+        int rc;
+        snprintf(path, sizeof(path), DOLTLITE_TEST_TMPDIR
+            "/apply_peer_%d_%d_%d.db", layout, revert, otherBranch);
+        snprintf(branchPath, sizeof(branchPath), "%s@%s", path,
+                 revert ? "feature" : "main");
+        snprintf(peerPath, sizeof(peerPath), "%s@%s", path,
+                 otherBranch ? "other" : (revert ? "feature" : "main"));
+        remove(path);
+        printf("--- Apply peer: layout=%d revert=%d other_branch=%d ---\n",
+               layout, revert, otherBranch);
+        check("apply_peer_setup_open", sqlite3_open(path, &db)==SQLITE_OK);
+        check("apply_peer_create", execSql(db, azCreate[layout])==SQLITE_OK);
+        check("apply_peer_setup", execSql(db,
+            "INSERT INTO w VALUES(1,'base');"
+            "CREATE INDEX ix_w_v ON w(v);"
+            "SELECT dolt_commit('-Am','base');"
+            "SELECT dolt_checkout('-b','feature');"
+            "DROP INDEX ix_w_v; INSERT INTO w VALUES(2,'feature');"
+            "SELECT dolt_commit('-Am','feature');"
+            "SELECT dolt_branch('other');")==SQLITE_OK);
+        sqlite3_close(db);
+        db = 0;
+        check("apply_peer_open", sqlite3_open(branchPath, &db)==SQLITE_OK);
+        check("apply_peer_writer_open", sqlite3_open(peerPath, &peer)==SQLITE_OK);
+        sqlite3_busy_timeout(db, 0);
+        sqlite3_busy_timeout(peer, 0);
+        memset(&probe, 0, sizeof(probe));
+        probe.peer = peer;
+        probe.rc = SQLITE_ERROR;
+        sqlite3_trace_v2(db, SQLITE_TRACE_STMT, applyPeerTrace, &probe);
+        rc = sqlite3_exec(db, revert ? "SELECT dolt_revert('HEAD')"
+            : "SELECT dolt_cherry_pick('feature')", 0, 0, 0);
+        sqlite3_trace_v2(db, 0, 0, 0);
+        check("apply_peer_attempted", probe.fired);
+        check("apply_peer_write_blocked", (probe.rc&0xff)==SQLITE_BUSY);
+        if( !sqlite3_get_autocommit(peer) ){
+          check("apply_peer_release", execSql(peer, "ROLLBACK")==SQLITE_OK);
+        }
+        check("apply_peer_success", rc==SQLITE_OK);
+        check("apply_peer_autocommit", sqlite3_get_autocommit(db));
+        check("apply_peer_txn_ended", sqlite3_txn_state(db, "main")==SQLITE_TXN_NONE);
+        check("apply_peer_head_rows", strcmp(queryScalarText(db,
+            "SELECT group_concat(id) FROM "
+            "(SELECT id FROM dolt_at_w('HEAD') ORDER BY id)"),
+            revert ? "1" : "1,2")==0);
+        sqlite3_close(peer);
+        sqlite3_close(db);
+        db = 0;
+        check("apply_peer_reopen", sqlite3_open(branchPath, &db)==SQLITE_OK);
+        check("apply_peer_durable_rows", strcmp(queryScalarText(db,
+            "SELECT group_concat(id) FROM (SELECT id FROM w ORDER BY id)"),
+            revert ? "1" : "1,2")==0);
+        check("apply_peer_durable_index", strcmp(queryScalarText(db,
+            "SELECT count(*) FROM sqlite_schema WHERE name='ix_w_v'"),
+            revert ? "1" : "0")==0);
+        check("apply_peer_durable_integrity", strcmp(queryScalarText(db,
+            "PRAGMA integrity_check"), "ok")==0);
+        sqlite3_close(db);
+        remove(path);
+      }
+    }
+  }
+}
+
 int main(){
   printf("=== Concurrent Commit Test ===\n\n");
 
@@ -358,6 +455,7 @@ int main(){
   test_single_connection();
   test_sequential_multi_connection();
   test_checkout_then_peer_write();
+  test_apply_keeps_write_lock();
 
   printf("\nResults: %d passed, %d failed out of %d tests\n",
     nPass, nFail, nPass+nFail);

@@ -316,7 +316,7 @@ stage_done:
   return rc;
 }
 
-int applyMergedCatalogAndCommit(
+static int applyMergedCatalogAndCommitInTxn(
   sqlite3 *db,
   sqlite3_context *context,
   const ProllyHash *ancCatHash,
@@ -594,6 +594,50 @@ apply_rollback:
   return cherryPickRestoreAndPersist(db, &savedState, &commitHash, rc);
 }
 
+int applyMergedCatalogAndCommit(
+  sqlite3 *db,
+  sqlite3_context *context,
+  const ProllyHash *ancCatHash,
+  const ProllyHash *ourCatHash,
+  const ProllyHash *theirCatHash,
+  const ProllyHash *ourHead,
+  const ProllyHash *pCommitOurCatHash,
+  const char *zMessage,
+  const char *zAuthorName,
+  const char *zAuthorEmail,
+  int bPreferOurMaster,
+  int bRejectUnchanged,
+  int *pnConflicts,
+  int *pnViolations,
+  char **pzApplyErr,
+  char *hexBuf
+){
+  int bOwnTxn = db->autoCommit;
+  int rc;
+  if( bOwnTxn ){
+    /* Keep nested SQL private while retaining autocommit conflict handling. */
+    rc = sqlite3_exec(db, "SAVEPOINT doltlite_apply", 0, 0, 0);
+    if( rc!=SQLITE_OK ) return rc;
+  }
+  rc = applyMergedCatalogAndCommitInTxn(db, context, ancCatHash,
+      ourCatHash, theirCatHash, ourHead, pCommitOurCatHash, zMessage,
+      zAuthorName, zAuthorEmail, bPreferOurMaster, bRejectUnchanged,
+      pnConflicts, pnViolations, pzApplyErr, hexBuf);
+  if( bOwnTxn && !db->autoCommit ){
+    int erc;
+    db->nVcInterruptMask++;
+    erc = sqlite3_exec(db, "ROLLBACK", 0, 0, 0);
+    if( erc!=SQLITE_OK ){
+      sqlite3RollbackAll(db, SQLITE_OK);
+      sqlite3CloseSavepoints(db);
+      db->autoCommit = 1;
+      rc = erc;
+    }
+    db->nVcInterruptMask--;
+  }
+  return rc;
+}
+
 static void doltliteCherryPickFunc(
   sqlite3_context *context,
   int argc,
@@ -734,7 +778,6 @@ static void doltliteCherryPickFunc(
       "no changes were made, nothing to commit",
       "cherry-pick of %s failed", "cherry-pick failed", hexBuf);
 }
-
 
 int doltliteCherryPickRegister(sqlite3 *db){
   return doltliteCreateCommandFunc(db, "dolt_cherry_pick", -1,

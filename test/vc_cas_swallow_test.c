@@ -876,6 +876,95 @@ static void test_ff_interrupt_after_advance(void){
   remove(zPath);
 }
 
+static int failApplyPublishTrace(
+  unsigned type, void *pArg, void *pStmt, void *pSql
+){
+  int *pFired = (int*)pArg;
+  const char *sql = sqlite3_sql((sqlite3_stmt*)pStmt);
+  (void)pSql;
+  if( type==SQLITE_TRACE_STMT && !*pFired && sql
+   && strstr(sql, "SELECT 1 FROM main.sqlite_master WHERE")
+   && strstr(sql, "REFERENCES") ){
+    *pFired = 1;
+    doltliteTestFailNextHeadConfirm();
+  }
+  return 0;
+}
+
+static void test_apply_publish_failure_is_atomic(void){
+  const char *azCreate[] = {
+    "CREATE TABLE t(id INTEGER PRIMARY KEY,v TEXT)",
+    "CREATE TABLE t(id INT PRIMARY KEY,v TEXT)",
+    "CREATE TABLE t(id INT PRIMARY KEY,v TEXT) WITHOUT ROWID"
+  };
+  int layout, revert;
+  for(layout=0; layout<3; layout++){
+    for(revert=0; revert<2; revert++){
+      char path[512], branchPath[544];
+      sqlite3 *db;
+      char *before, *after, *rows, *err = 0;
+      ProllyHash beforeCat, afterCat;
+      int fired = 0, rc, n = -1;
+      snprintf(path, sizeof(path), DOLTLITE_TEST_TMPDIR
+          "/cas_apply_publish_%d_%d_%d.db", (int)getpid(), layout, revert);
+      snprintf(branchPath, sizeof(branchPath), "%s@%s", path,
+               revert ? "feature" : "main");
+      db = openDb(path);
+      check("apply failure: open", db!=0);
+      if( !db ) continue;
+      check("apply failure: create", exec(db, azCreate[layout])==SQLITE_OK);
+      check("apply failure: setup", exec(db,
+          "INSERT INTO t VALUES(1,'base');"
+          "CREATE INDEX ix_t_v ON t(v);"
+          "SELECT dolt_commit('-Am','base');"
+          "SELECT dolt_checkout('-b','feature');"
+          "DROP INDEX ix_t_v; INSERT INTO t VALUES(2,'feature');"
+          "SELECT dolt_commit('-Am','feature');")==SQLITE_OK);
+      if( !revert ){
+        check("apply failure: checkout", exec(db,
+            "SELECT dolt_checkout('main')")==SQLITE_OK);
+      }
+      before = queryText(db, "SELECT dolt_hashof('HEAD')");
+      check("apply failure: initial catalog",
+            doltliteGetPersistedWorkingCatalogHash(db, &beforeCat)==SQLITE_OK);
+      sqlite3_trace_v2(db, SQLITE_TRACE_STMT, failApplyPublishTrace, &fired);
+      rc = execQuiet(db, revert ? "SELECT dolt_revert('HEAD')"
+          : "SELECT dolt_cherry_pick('feature')", &err);
+      sqlite3_trace_v2(db, 0, 0, 0);
+      doltliteTestClearFaults();
+      check("apply failure: final confirm reached", fired);
+      check("apply failure: busy", rc==SQLITE_BUSY);
+      check("apply failure: autocommit", sqlite3_get_autocommit(db));
+      check("apply failure: transaction ended",
+            sqlite3_txn_state(db, "main")==SQLITE_TXN_NONE);
+      check("apply failure: catalog unchanged",
+            doltliteGetPersistedWorkingCatalogHash(db, &afterCat)==SQLITE_OK
+            && prollyHashCompare(&beforeCat, &afterCat)==0);
+      after = queryText(db, "SELECT dolt_hashof('HEAD')");
+      check("apply failure: head unchanged",
+            before && after && strcmp(before, after)==0);
+      sqlite3_free(before);
+      sqlite3_free(after);
+      sqlite3_free(err);
+      sqlite3_close(db);
+      db = 0;
+      check("apply failure: reopen", sqlite3_open(branchPath, &db)==SQLITE_OK);
+      rows = queryText(db,
+          "SELECT group_concat(id) FROM (SELECT id FROM t ORDER BY id)");
+      check("apply failure: durable rows unchanged",
+            rows && strcmp(rows, revert ? "1,2" : "1")==0);
+      sqlite3_free(rows);
+      check("apply failure: durable index unchanged", queryInt(db,
+          "SELECT count(*) FROM sqlite_schema WHERE name='ix_t_v'", &n)==SQLITE_OK
+          && n==(revert ? 0 : 1));
+      check("apply failure: retry", exec(db, revert
+          ? "SELECT dolt_revert('HEAD')"
+          : "SELECT dolt_cherry_pick('feature')")==SQLITE_OK);
+      closeRm(db, path);
+    }
+  }
+}
+
 int main(void){
   sqlite3_initialize();
   test_force_commit_keeps_cvs();
@@ -896,6 +985,7 @@ int main(void){
   test_merge_install_reindex_all_or_nothing();
   test_cherry_pick_install_all_or_nothing();
   test_ff_interrupt_after_advance();
+  test_apply_publish_failure_is_atomic();
   printf("vc_cas_swallow_test: %d passed, %d failed\n", nPass, nFail);
   return nFail ? 1 : 0;
 }
