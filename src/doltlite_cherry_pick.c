@@ -1,6 +1,7 @@
 #ifdef DOLTLITE_PROLLY
 
 #include "sqliteInt.h"
+#include "vdbeInt.h"
 #include "prolly_hash.h"
 #include "prolly_hashset.h"
 #include "chunk_store.h"
@@ -455,7 +456,8 @@ static int applyMergedCatalogAndCommitInTxn(
     if( rc!=SQLITE_OK ) goto apply_rollback;
   }
 
-  rc = doltliteFlushCatalogToHash(db, &liveMergedCatHash);
+  rc = sqlite3VtabSync(db, context->pVdbe);
+  if( rc==SQLITE_OK ) rc = doltliteFlushCatalogToHash(db, &liveMergedCatHash);
   if( rc==SQLITE_OK ){
     rc = doltliteSwitchCatalog(db, &liveMergedCatHash);
   }

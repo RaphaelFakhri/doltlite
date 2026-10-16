@@ -1081,4 +1081,39 @@ run_test "cp_conflict_index_working_kept" \
 ok" "$DB"
 rm -f "$DB"
 
+for op in pick revert rebase interactive; do
+  DB=/tmp/test_cp_fts_${op}_$$.db; rm -f "$DB"
+  case "$op" in
+    pick) APPLY="SELECT dolt_cherry_pick('side');"; ROWS=1,2,3 ;;
+    revert) APPLY="SELECT dolt_cherry_pick('side'); SELECT dolt_revert('HEAD');"; ROWS=1,3 ;;
+    rebase) APPLY="SELECT dolt_rebase('side');"; ROWS=1,2,3 ;;
+    interactive)
+      APPLY="SELECT dolt_rebase('-i','side');
+UPDATE dolt_rebase SET action='pick'; SELECT dolt_rebase('--continue');"
+      ROWS=1,2,3 ;;
+  esac
+  if "$DOLTLITE" "$DB" "CREATE VIRTUAL TABLE docs USING fts5(body);
+INSERT INTO docs(rowid,body) VALUES(1,'base doc');
+SELECT dolt_commit('-Am','base'); SELECT dolt_checkout('-b','side');
+INSERT INTO docs(rowid,body) VALUES(2,'side doc');
+SELECT dolt_commit('-Am','side'); SELECT dolt_checkout('main');
+INSERT INTO docs(rowid,body) VALUES(3,'main doc');
+SELECT dolt_commit('-Am','main'); $APPLY
+SELECT dolt_branch('snapshot','HEAD');" >/dev/null 2>&1; then
+    dltest_pass
+  else
+    dltest_fail "${op}_fts_applies" "apply failed"
+  fi
+  for branch in main snapshot; do
+    run_test "${op}_fts_${branch}" \
+      "PRAGMA integrity_check;
+SELECT group_concat(rowid) FROM (SELECT rowid FROM docs WHERE docs MATCH 'doc' ORDER BY rowid);
+SELECT count(*) FROM dolt_status;" \
+      "ok
+$ROWS
+0" "$DB/$branch"
+  done
+  rm -f "$DB"
+done
+
 dltest_finish
