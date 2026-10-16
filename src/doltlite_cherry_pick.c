@@ -573,6 +573,7 @@ static int applyMergedCatalogAndCommitInTxn(
       db, ourHead, pCleanWorkingSet, &commitHash, &commitCatHash,
       commitSplit ? &liveMergedCatHash : 0);
   if( rc!=SQLITE_OK ) goto apply_rollback;
+  doltliteAdoptRollbackBaseline(db, &liveMergedCatHash);
 
   if( graphLocked ){
     chunkStoreUnlock(cs);
