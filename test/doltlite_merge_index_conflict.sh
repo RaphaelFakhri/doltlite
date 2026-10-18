@@ -314,17 +314,22 @@ EOF
 DROP INDEX iv;
 SELECT dolt_commit('-A','-m','drop-index');
 EOF
-out=$("$DOLTLITE" "$DB/feat" <<'EOF' 2>/dev/null | tail -1
+out=$("$DOLTLITE" "$DB/feat" <<'EOF' 2>"$TMPROOT/parent-rename.err" | tail -1
 BEGIN;
 SELECT dolt_cherry_pick('main');
 SELECT (SELECT count(*) FROM dolt_status WHERE status='schema conflict') || '|' ||
        (SELECT count(*) FROM sqlite_schema WHERE name='t') || '|' ||
        (SELECT count(*) FROM sqlite_schema WHERE name='renamed') || '|' ||
-       (SELECT count(*) FROM sqlite_schema WHERE name='iv');
+       (SELECT count(*) FROM sqlite_schema WHERE name='iv') || '|' ||
+       (SELECT count(*) FROM sqlite_schema WHERE name='dropme') || '|' ||
+       (SELECT count(*) FROM dolt_status) || '|' ||
+       (SELECT message FROM dolt_log LIMIT 1);
 ROLLBACK;
 EOF
 )
-check "index_drop_vs_parent_rename_conflicts" "1|1|0|0" "$out"
+check "index_drop_vs_parent_rename_keeps_state" "0|1|0|0|1|0|drop-index" "$out"
+check "index_drop_vs_parent_rename_refuses" "1" \
+  "$(grep -c 'cannot apply: schema conflicts detected' "$TMPROOT/parent-rename.err")"
 
 DB="$TMPROOT/index_retarget_to_divergent_rename.db"
 "$DOLTLITE" "$DB" <<'EOF' >/dev/null 2>&1

@@ -163,3 +163,4 @@ doltlite_checkout_catalog_rollback
 doltlite_open_root_allocation
 doltlite_reset_collected_catalog
 doltlite_vc_deferred_snapshot
+doltlite_replay_schema_conflict
