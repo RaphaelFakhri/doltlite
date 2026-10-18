@@ -178,10 +178,10 @@ echo "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT); INSERT INTO t VALUES(1,'ba
 
 run_test "diff_revert_schema_only_replay_stat_count" \
   "SELECT count(*) FROM dolt_diff_stat('HEAD~1', 'HEAD');" \
-  "1" "$DB11"
-run_test "diff_revert_schema_only_replay_stat_row" \
-  "SELECT table_name || '|' || rows_added || '|' || rows_modified || '|' || rows_deleted FROM dolt_diff_stat('HEAD~1', 'HEAD');" \
-  "t|0|0|0" "$DB11"
+  "0" "$DB11"
+run_test "diff_revert_schema_only_replay_summary" \
+  "SELECT from_table_name || '|' || to_table_name || '|' || diff_type || '|' || data_change || '|' || schema_change FROM dolt_diff_summary('HEAD~1', 'HEAD');" \
+  "t|t|modified|0|1" "$DB11"
 
 DB12=/tmp/test_diff12_$$.db; rm -f "$DB12"
 echo "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT); INSERT INTO t VALUES(1,'base'); SELECT dolt_commit('-A','-m','c1'); SELECT dolt_checkout('-b','feat'); CREATE TABLE u(id INTEGER PRIMARY KEY, v TEXT); INSERT INTO u VALUES(1,'feat'); SELECT dolt_commit('-A','-m','feat_add_u'); SELECT dolt_checkout('main'); CREATE TABLE t_new(id INTEGER PRIMARY KEY, v TEXT CHECK (length(v) > 0)); INSERT INTO t_new SELECT * FROM t; DROP TABLE t; ALTER TABLE t_new RENAME TO t; SELECT dolt_commit('-A','-m','main_check'); SELECT dolt_merge('feat');" | $DOLTLITE "$DB12" > /dev/null 2>&1

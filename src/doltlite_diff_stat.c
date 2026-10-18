@@ -703,6 +703,24 @@ static int dsComputeTableStats(
   if( schemaChanged
    && rowsAdd==0 && rowsDel==0 && rowsMod==0
    && cellsAdd==0 && cellsDel==0 && cellsMod==0 ){
+    /* Dolt reports a schema-only change only when the primary key set
+    ** changed, as an empty row; any other one has no row at all. */
+    char *zFromSig = 0, *zToSig = 0;
+    int pkChanged = ((fromFlags ^ toFlags) & PROLLY_NODE_INTKEY)!=0;
+    if( !pkChanged ){
+      int rcSig = doltliteTablePkSignature(zFromSql, zFromName, &zFromSig);
+      if( rcSig==SQLITE_OK ){
+        rcSig = doltliteTablePkSignature(zToSql, zToName, &zToSig);
+      }
+      pkChanged = rcSig!=SQLITE_OK || sqlite3_stricmp(zFromSig, zToSig)!=0;
+    }
+    sqlite3_free(zFromSig);
+    sqlite3_free(zToSig);
+    if( !pkChanged ){
+      sqlite3_free(pOut->zTableName);
+      pOut->zTableName = 0;
+      goto done;
+    }
     pOut->rowsUnmodified = 0;
     pOut->oldRowCount = 0;
     pOut->newRowCount = 0;

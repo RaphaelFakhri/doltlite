@@ -1996,6 +1996,8 @@ int doltliteMergeCatalogs(sqlite3 *db,
     char ***pazRebuildVtabs, int *pnRebuildVtabs);
 void doltliteFreeNameList(char **az, int n);
 int doltliteRebuildVirtualTables(sqlite3 *db, char **azRebuild, int nRebuild);
+int doltliteTablePkSignature(const char *zSql, const char *zTableName,
+                             char **pzSig);
 int doltliteIndexSchemaRowsDifferForTable(SchemaEntry *aA, int nA,
     SchemaEntry *aB, int nB, const char *zTable);
 int doltliteDisjoinCatalogEntries(sqlite3 *db,

@@ -1142,9 +1142,9 @@ ALTER TABLE t ADD COLUMN computed INT GENERATED ALWAYS AS (a * 3) VIRTUAL;
 INSERT INTO t(id,a) VALUES(3,11);
 SELECT dolt_commit('-Am','main_generated');
 SQL
-expect_merge_ok "generated_both_add_different_expression_ours_wins" "$DB"
-expect_dual_value "generated_both_add_different_expression_ours_value" "$DB" \
-  "1:15,2:21,3:33" \
+expect_merge_conflict "generated_both_add_different_expression_conflicts" "$DB"
+expect_dual_value "generated_both_add_different_expression_ours_kept" "$DB" \
+  "1:15,3:33" \
   "SELECT group_concat(id || ':' || computed, ',') FROM (SELECT id,computed FROM t ORDER BY id);" \
   "SELECT GROUP_CONCAT(CONCAT(id, ':', computed) ORDER BY id SEPARATOR ',') FROM t;"
 
@@ -1241,8 +1241,8 @@ SELECT dolt_checkout('main');
 ALTER TABLE t ADD COLUMN x INT;
 SELECT dolt_commit('-Am','main_plain');
 SQL
-expect_merge_ok "generated_vs_plain_ours_plain" "$DB"
-expect_dual_value "generated_vs_plain_ours_plain_value" "$DB" "null" \
+expect_merge_conflict "generated_vs_plain_ours_plain_conflicts" "$DB"
+expect_dual_value "generated_vs_plain_ours_plain_kept" "$DB" "null" \
   "SELECT CASE WHEN x IS NULL THEN 'null' ELSE CAST(x AS TEXT) END FROM t WHERE id=1;" \
   "SELECT CASE WHEN x IS NULL THEN 'null' ELSE CAST(x AS CHAR) END FROM t WHERE id=1;"
 
@@ -1261,9 +1261,9 @@ ALTER TABLE t ADD COLUMN x INT GENERATED ALWAYS AS (a * 2) VIRTUAL;
 INSERT INTO t(id,a) VALUES(3,11);
 SELECT dolt_commit('-Am','main_generated');
 SQL
-expect_merge_ok "generated_vs_plain_ours_generated" "$DB"
-expect_dual_value "generated_vs_plain_ours_generated_value" "$DB" \
-  "1:10,2:14,3:22" \
+expect_merge_conflict "generated_vs_plain_ours_generated_conflicts" "$DB"
+expect_dual_value "generated_vs_plain_ours_generated_kept" "$DB" \
+  "1:10,3:22" \
   "SELECT group_concat(id || ':' || x, ',') FROM (SELECT id,x FROM t ORDER BY id);" \
   "SELECT GROUP_CONCAT(CONCAT(id, ':', x) ORDER BY id SEPARATOR ',') FROM t;"
 

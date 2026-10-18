@@ -538,7 +538,7 @@ static int mergePass1AppendSigRow(
   return zNew ? SQLITE_OK : SQLITE_NOMEM;
 }
 
-static int mergePass1PkSignature(
+int doltliteTablePkSignature(
   const char *zSql,
   const char *zTableName,
   char **pzSig
@@ -629,10 +629,10 @@ static int mergePass1CheckPrimaryKeysMatch(
     return SQLITE_OK;
   }
 
-  rc = mergePass1PkSignature(ancSE->zSql, zName, &zAncSig);
-  if( rc==SQLITE_OK ) rc = mergePass1PkSignature(ourSE->zSql, zName, &zOursSig);
+  rc = doltliteTablePkSignature(ancSE->zSql, zName, &zAncSig);
+  if( rc==SQLITE_OK ) rc = doltliteTablePkSignature(ourSE->zSql, zName, &zOursSig);
   if( rc==SQLITE_OK ){
-    rc = mergePass1PkSignature(theirSE->zSql, zName, &zTheirsSig);
+    rc = doltliteTablePkSignature(theirSE->zSql, zName, &zTheirsSig);
   }
   if( rc==SQLITE_OK ){
     vsTheirs = sqlite3_stricmp(zOursSig, zTheirsSig)!=0
