@@ -487,23 +487,42 @@ int parsedColumnAddsAsNull(const ParsedColumn *pCol){
       && schemaGeneratedTailStart(pCol->zDef, 0)==0;
 }
 
+static int schemaGeneratedExpr(
+  const char *zTail,
+  const char **pzExpr,
+  const char **pzExprEnd
+){
+  const char *zEnd = zTail + strlen(zTail);
+  const char *zAs = schemaFindToken(zTail, zEnd, "AS", 2);
+  const char *p;
+  int type, n;
+  if( !zAs || schemaGetToken(zAs, zEnd, &type, &n)!=SQLITE_OK ) return 0;
+  p = schemaSkipTrivia(zAs + n, zEnd);
+  *pzExpr = p;
+  return schemaSkipParenthesized(p, zEnd, pzExprEnd)==SQLITE_OK;
+}
+
+/* Both branches added the column. As Dolt, a generated column merges only
+** with one of the same expression and VIRTUAL/STORED mode. */
 static int schemaColumnsMergeEquivalent(
   const char *zOurs,
   const char *zTheirs
 ){
-  const char *zOurTail;
-  const char *zTheirTail;
-  int nOurs;
-  int nTheirs;
+  const char *zOurTail, *zTheirTail;
+  const char *zOurExpr, *zOurExprEnd, *zTheirExpr, *zTheirExprEnd;
+  int bOurVirtual = 1, bTheirVirtual = 1;
 
   if( schemaDefinitionsEquivalent(zOurs, zTheirs) ) return 1;
-  zOurTail = schemaGeneratedTailStart(zOurs, 0);
-  zTheirTail = schemaGeneratedTailStart(zTheirs, 0);
-  if( !zOurTail && !zTheirTail ) return 0;
-  nOurs = zOurTail ? (int)(zOurTail-zOurs) : (int)strlen(zOurs);
-  nTheirs = zTheirTail ? (int)(zTheirTail-zTheirs) : (int)strlen(zTheirs);
-  return schemaTokensEquivalent(
-      zOurs, zOurs + nOurs, zTheirs, zTheirs + nTheirs);
+  zOurTail = schemaGeneratedTailStart(zOurs, &bOurVirtual);
+  zTheirTail = schemaGeneratedTailStart(zTheirs, &bTheirVirtual);
+  if( !zOurTail || !zTheirTail || bOurVirtual!=bTheirVirtual ) return 0;
+  if( !schemaTokensEquivalent(zOurs, zOurTail, zTheirs, zTheirTail) ) return 0;
+  if( !schemaGeneratedExpr(zOurTail, &zOurExpr, &zOurExprEnd)
+   || !schemaGeneratedExpr(zTheirTail, &zTheirExpr, &zTheirExprEnd) ){
+    return 0;
+  }
+  return schemaTokensEquivalent(zOurExpr, zOurExprEnd,
+                                zTheirExpr, zTheirExprEnd);
 }
 
 static const char *schemaFindToken(
