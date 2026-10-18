@@ -1185,6 +1185,19 @@ int doltliteMergeCatalogs(
                           pazReindex, pnReindex);
   if( rc!=SQLITE_OK ) goto merge_cleanup;
 
+  if( !bBranchMerge && hasAnySchemaConflict(aConflictTables, nConflictTables) ){
+    if( pzErrMsg ){
+      sqlite3_free(*pzErrMsg);
+      *pzErrMsg = sqlite3_mprintf("cannot apply: schema conflicts detected");
+      if( !*pzErrMsg ){
+        rc = SQLITE_NOMEM;
+        goto merge_cleanup;
+      }
+    }
+    rc = SQLITE_ERROR;
+    goto merge_cleanup;
+  }
+
   rc = rebuildDisjointSchemaRows(db, aMerged, nMerged,
                                  aTheirsSchema, nTheirsSchema,
                                  aAncSchema, nAncSchema,

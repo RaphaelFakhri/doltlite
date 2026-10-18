@@ -593,13 +593,13 @@ SELECT dolt_commit('-Am','mine');
 run_db_error "rebase_schema_rename_twin_index_conflict" "
 $RENAME_TWIN_INDEX_SETUP
 SELECT dolt_rebase('up');
-" 'conflict rebasing "mine"; rebase aborted, branch restored to pre-rebase state'
+" 'cannot apply: schema conflicts detected'
 
 run_db_error "rebase_schema_rename_twin_index_cherry_pick_conflict" "
 $RENAME_TWIN_INDEX_SETUP
 SELECT dolt_checkout('up');
 SELECT dolt_cherry_pick('main');
-" "cannot merge: conflicts detected, autocommit transaction rolled back. Run the merge inside BEGIN/COMMIT to inspect dolt_conflicts and dolt_schema_conflicts, resolve with dolt_conflicts_resolve(), then commit with dolt_commit(). Conflicts are never committed as conflicts"
+" "cannot apply: schema conflicts detected"
 
 run_db_eq "rebase_schema_rename_dependent_index_row" "
 CREATE TABLE t(id INTEGER PRIMARY KEY, num NUMERIC, trail TEXT);

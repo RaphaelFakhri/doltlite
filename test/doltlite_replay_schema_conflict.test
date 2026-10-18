@@ -1,0 +1,88 @@
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+
+foreach {layout key} {rowid {INTEGER PRIMARY KEY} clustered {INT PRIMARY KEY}} {
+  foreach {index ddl} {
+    ordinary {CREATE INDEX it ON t(n)}
+    unique {CREATE UNIQUE INDEX it ON t(n)}
+    partial {CREATE INDEX it ON t(n) WHERE n IS NOT NULL}
+    expression {CREATE INDEX it ON t(n+1)}
+  } {
+    foreach operation {rebase interactive cherry-pick revert} {
+      foreach txn {autocommit begin savepoint nested} {
+        reset_db
+        db eval "CREATE TABLE t(id $key,n INT)"
+        db eval $ddl
+        db eval {
+          INSERT INTO t VALUES(1,10);
+          SELECT dolt_commit('-Am','base');
+          SELECT dolt_checkout('-b','feature');
+          ALTER TABLE t RENAME TO s;
+          SELECT dolt_commit('-Am','rename table');
+          SELECT dolt_checkout('main');
+          ALTER TABLE t ADD COLUMN x TEXT;
+          SELECT dolt_commit('-Am','add column');
+        }
+        set branch feature
+        switch $operation {
+          rebase {set sql {SELECT dolt_rebase('main')}}
+          interactive {
+            set sql {
+              SELECT dolt_rebase('-i','main');
+              SELECT dolt_rebase('--continue');
+            }
+          }
+          cherry-pick {
+            set branch main
+            set sql {SELECT dolt_cherry_pick('feature')}
+          }
+          revert {
+            db eval {
+              SELECT dolt_checkout('feature');
+              ALTER TABLE s ADD COLUMN x TEXT;
+              SELECT dolt_commit('-Am','add column after rename');
+            }
+            set sql {SELECT dolt_revert('HEAD~1')}
+          }
+        }
+        db eval "SELECT dolt_checkout('$branch')"
+        set table [expr {$branch eq "feature" ? "s" : "t"}]
+        set state "SELECT * FROM $table ORDER BY id;\n"
+        append state "SELECT id FROM $table INDEXED BY it WHERE n+1=11;\n"
+        append state {
+          SELECT active_branch();
+          SELECT name,tbl_name,sql FROM sqlite_schema ORDER BY type,name;
+          SELECT dolt_hashof('HEAD');
+          SELECT dolt_hashof_catalog('STAGED');
+          SELECT table_name,staged,status FROM dolt_status ORDER BY table_name,staged;
+          SELECT count(*) FROM dolt_conflicts;
+          PRAGMA integrity_check;
+        }
+        set expected [db eval $state]
+        set head [db eval {SELECT name,hash FROM dolt_branches ORDER BY name}]
+        switch $txn {
+          begin {db eval BEGIN}
+          savepoint {db eval {SAVEPOINT caller}}
+          nested {db eval {BEGIN; SAVEPOINT caller}}
+        }
+        set prefix replay-schema-$layout.$index.$operation.$txn
+        set error {cannot apply: schema conflicts detected}
+        if {$operation eq "interactive"} {
+          set error "rebase failed — $error — branch restored to pre-rebase state"
+        }
+        do_test $prefix.refused {catchsql $sql} [list 1 $error]
+        do_test $prefix.state {catchsql $state} [list 0 $expected]
+        do_execsql_test $prefix.refs {
+          SELECT name,hash FROM dolt_branches ORDER BY name;
+        } $head
+        catch {db eval ROLLBACK}
+        do_test $prefix.rollback {catchsql $state} [list 0 $expected]
+        db close
+        sqlite3 db test.db/$branch
+        do_test $prefix.reopen {catchsql $state} [list 0 $expected]
+      }
+    }
+  }
+}
+
+finish_test
