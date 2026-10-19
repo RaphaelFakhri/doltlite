@@ -611,4 +611,72 @@ rm -f "$UT_DB"
 
 rm -f "$DB" "$DB2" "$DB3" "$DB3B" "$DB3C" "$DB4" "$DB5" "$DB5B" "$DB5C" "$DB5C.hash" "$DB6" "$DB7" "$DB8" "$DB9" "$DB10" "$DB11" "$DB12" "$DB13" "$DB14" "$DB15" "$DB16" "$DB17" "$DB18"
 
+# --- ignored AUTOINCREMENT sequence state across a hard reset -----------------
+# A hard reset preserves untracked tables. sqlite_sequence holds the
+# AUTOINCREMENT high-water marks of exactly those tables, so dropping it left a
+# preserved table unusable and rewound allocation over deleted IDs.
+
+DB19=/tmp/test_reset19_$$.db; rm -f "$DB19"
+
+reset19_seed() {
+  rm -f "$DB19"
+  echo "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS dolt_ignore(pattern TEXT NOT NULL, ignored TINYINT NOT NULL, PRIMARY KEY(pattern));
+INSERT INTO dolt_ignore VALUES('runtime_%',1),('sqlite_sequence',1);
+SELECT dolt_commit('-A','-m','init');
+CREATE TABLE runtime_jobs(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT);
+CREATE INDEX runtime_jobs_kind ON runtime_jobs(kind);
+INSERT INTO runtime_jobs(kind) VALUES('a'),('b');
+DELETE FROM runtime_jobs WHERE id=2;
+SELECT dolt_reset('--hard');" | $DOLTLITE "$DB19" > /dev/null 2>&1
+}
+
+reset19_seed
+run_test "hard_reset_keeps_ignored_sequence_high_water_mark" \
+  "SELECT name || '=' || seq FROM sqlite_sequence;" \
+  "runtime_jobs=2" "$DB19"
+
+reset19_seed
+run_test "hard_reset_keeps_ignored_rows_and_index" \
+  "SELECT count(*) FROM runtime_jobs; SELECT count(*) FROM sqlite_master WHERE name='runtime_jobs_kind';" \
+  "1
+1" "$DB19"
+
+reset19_seed
+echo "INSERT INTO runtime_jobs(kind) VALUES('c');" | $DOLTLITE "$DB19" > /dev/null 2>&1
+run_test "hard_reset_allocation_exceeds_deleted_id" \
+  "SELECT max(id) FROM runtime_jobs; PRAGMA integrity_check;" \
+  "3
+ok" "$DB19"
+
+# A tracked sqlite_sequence still belongs to the target catalog: the reset
+# rewinds it with the rest of the tracked state, exactly as before.
+DB20=/tmp/test_reset20_$$.db; rm -f "$DB20"
+echo "CREATE TABLE tracked_jobs(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT);
+INSERT INTO tracked_jobs(kind) VALUES('committed');
+SELECT dolt_commit('-A','-m','init');
+INSERT INTO tracked_jobs(kind) VALUES('uncommitted');
+SELECT dolt_reset('--hard');" | $DOLTLITE "$DB20" > /dev/null 2>&1
+run_test "hard_reset_rewinds_tracked_sequence" \
+  "SELECT name || '=' || seq FROM sqlite_sequence; SELECT count(*) FROM tracked_jobs;" \
+  "tracked_jobs=1
+1" "$DB20"
+
+# No AUTOINCREMENT anywhere: the reset must not invent sqlite_sequence.
+DB21=/tmp/test_reset21_$$.db; rm -f "$DB21"
+echo "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS dolt_ignore(pattern TEXT NOT NULL, ignored TINYINT NOT NULL, PRIMARY KEY(pattern));
+INSERT INTO dolt_ignore VALUES('runtime_%',1),('sqlite_sequence',1);
+SELECT dolt_commit('-A','-m','init');
+CREATE TABLE runtime_plain(id INTEGER PRIMARY KEY, kind TEXT);
+INSERT INTO runtime_plain VALUES(1,'a');
+SELECT dolt_reset('--hard');" | $DOLTLITE "$DB21" > /dev/null 2>&1
+run_test "hard_reset_invents_no_sequence_table" \
+  "SELECT count(*) FROM sqlite_master WHERE name='sqlite_sequence'; SELECT count(*) FROM runtime_plain;" \
+  "0
+1" "$DB21"
+
+rm -f "$DB19" "$DB20" "$DB21"
+
+
 dltest_finish
