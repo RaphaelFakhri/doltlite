@@ -548,7 +548,8 @@ int prollyBtCursorPayload(BtCursor *pCur, u32 offset, u32 amt, void *pBuf){
 }
 int sqlite3BtreePayload(BtCursor *pCur, u32 offset, u32 amt, void *pBuf){
   if( !pCur ) return SQLITE_OK;
-  return pCur->pCurOps->xPayload(pCur, offset, amt, pBuf);
+  return btreeReadResult(pCur->pBtree,
+      pCur->pCurOps->xPayload(pCur, offset, amt, pBuf));
 }
 
 static SQLITE_NOINLINE const void *prollyBtCursorPayloadFetchSlow(

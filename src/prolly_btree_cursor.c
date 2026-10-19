@@ -621,7 +621,8 @@ int prollyBtCursorFirst(BtCursor *pCur, int *pRes){
 }
 int sqlite3BtreeFirst(BtCursor *pCur, int *pRes){
   if( !pCur ) return SQLITE_OK;
-  return pCur->pCurOps->xFirst(pCur, pRes);
+  return btreeReadResult(pCur->pBtree,
+      pCur->pCurOps->xFirst(pCur, pRes));
 }
 
 int prollyBtCursorLast(BtCursor *pCur, int *pRes){
@@ -657,7 +658,8 @@ int prollyBtCursorLast(BtCursor *pCur, int *pRes){
 }
 int sqlite3BtreeLast(BtCursor *pCur, int *pRes){
   if( !pCur ) return SQLITE_OK;
-  return pCur->pCurOps->xLast(pCur, pRes);
+  return btreeReadResult(pCur->pBtree,
+      pCur->pCurOps->xLast(pCur, pRes));
 }
 
 static SQLITE_INLINE int prollyBtCursorStepPrologue(
@@ -827,9 +829,10 @@ int prollyBtCursorNext(BtCursor *pCur, int flags){
 int sqlite3BtreeNext(BtCursor *pCur, int flags){
   if( !pCur ) return SQLITE_DONE;
   if( pCur->pCurOps==&prollyCursorOps ){
-    return prollyBtCursorNext(pCur, flags);
+    return btreeReadResult(pCur->pBtree, prollyBtCursorNext(pCur, flags));
   }
-  return pCur->pCurOps->xNext(pCur, flags);
+  return btreeReadResult(pCur->pBtree,
+      pCur->pCurOps->xNext(pCur, flags));
 }
 
 int prollyBtCursorPrevious(BtCursor *pCur, int flags){
@@ -893,7 +896,8 @@ int prollyBtCursorPrevious(BtCursor *pCur, int flags){
 }
 int sqlite3BtreePrevious(BtCursor *pCur, int flags){
   if( !pCur ) return SQLITE_DONE;
-  return pCur->pCurOps->xPrevious(pCur, flags);
+  return btreeReadResult(pCur->pBtree,
+      pCur->pCurOps->xPrevious(pCur, flags));
 }
 
 int prollyBtCursorEof(BtCursor *pCur){
@@ -912,7 +916,8 @@ int prollyBtCursorEof(BtCursor *pCur){
 int doltliteBtreeCursorFaultCode(BtCursor *pCur){
   if( !pCur || pCur->pCurOps!=&prollyCursorOps ) return SQLITE_OK;
   if( pCur->eState!=CURSOR_FAULT ) return SQLITE_OK;
-  return pCur->skipNext ? pCur->skipNext : SQLITE_ERROR;
+  return btreeReadResult(pCur->pBtree,
+      pCur->skipNext ? pCur->skipNext : SQLITE_ERROR);
 }
 
 int sqlite3BtreeEof(BtCursor *pCur){

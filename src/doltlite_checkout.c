@@ -224,9 +224,18 @@ static int checkoutCaptureOldCatalog(sqlite3 *db, ChunkStore *cs,
   if( cs->refs.nBranches>0
    && chunkStoreFindBranch(cs, doltliteGetSessionBranch(db), 0)
       ==SQLITE_NOTFOUND ){
+    u64 corruptRdOnly = db->flags & SQLITE_CorruptRdOnly;
     *pMissing = 1;
     rc = doltliteFlushCatalogToHash(db, pOldCatHash);
-    if( rc!=SQLITE_NOTFOUND && (rc&0xff)!=SQLITE_CORRUPT ) return rc;
+    if( rc==SQLITE_BUSY
+     && sqlite3_extended_errcode(db)==SQLITE_BUSY_SNAPSHOT ){
+      rc = SQLITE_BUSY_SNAPSHOT;
+    }
+    if( rc!=SQLITE_NOTFOUND && rc!=SQLITE_BUSY_SNAPSHOT
+     && (rc&0xff)!=SQLITE_CORRUPT ) return rc;
+    /* A collected source is disposable; its probe must not poison the
+    ** target transaction. Preserve any corruption predating the probe. */
+    db->flags = (db->flags & ~(u64)SQLITE_CorruptRdOnly) | corruptRdOnly;
     memset(pOldCatHash, 0, sizeof(*pOldCatHash));
     return doltliteMaterializeEmptyCatalog(db, pOldCatHash);
   }

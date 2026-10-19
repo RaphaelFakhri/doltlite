@@ -2071,7 +2071,8 @@ int sqlite3BtreeCursor(
   BtCursor *pCur
 ){
   if( !p ) return SQLITE_MISUSE;
-  return p->pOps->xCursor(p, iTable, wrFlag, pKeyInfo, pCur);
+  return btreeReadResult(p,
+      p->pOps->xCursor(p, iTable, wrFlag, pKeyInfo, pCur));
 }
 
 int prollyBtCursorCloseCursor(BtCursor *pCur){
@@ -2197,7 +2198,8 @@ int prollyBtCursorCursorRestore(BtCursor *pCur, int *pDifferentRow){
 }
 int sqlite3BtreeCursorRestore(BtCursor *pCur, int *pDifferentRow){
   if( !pCur ) return SQLITE_OK;
-  return pCur->pCurOps->xCursorRestore(pCur, pDifferentRow);
+  return btreeReadResult(pCur->pBtree,
+      pCur->pCurOps->xCursorRestore(pCur, pDifferentRow));
 }
 
 #ifdef SQLITE_DEBUG

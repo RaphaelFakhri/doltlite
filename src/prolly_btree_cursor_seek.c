@@ -202,7 +202,8 @@ int sqlite3BtreeTableMoveto(
   int *pRes
 ){
   if( !pCur ) return SQLITE_OK;
-  return pCur->pCurOps->xTableMoveto(pCur, intKey, bias, pRes);
+  return btreeReadResult(pCur->pBtree,
+      pCur->pCurOps->xTableMoveto(pCur, intKey, bias, pRes));
 }
 u32 btreeSerialType(Mem *pMem, u32 *pLen){
   int flags = pMem->flags;
@@ -1371,7 +1372,8 @@ int sqlite3BtreeIndexMoveto(
   int *pRes
 ){
   if( !pCur ) return SQLITE_OK;
-  return pCur->pCurOps->xIndexMoveto(pCur, pIdxKey, pRes);
+  return btreeReadResult(pCur->pBtree,
+      pCur->pCurOps->xIndexMoveto(pCur, pIdxKey, pRes));
 }
 int cachedSeekKeyMatchesCurrent(BtCursor *pCur){
   const u8 *pKey = 0;

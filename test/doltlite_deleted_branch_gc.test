@@ -9,6 +9,168 @@ while {[file type $executable] eq "link"} {
 set engine [file join [file dirname $executable] doltlite]
 if {$tcl_platform(platform) eq "windows"} {append engine .exe}
 
+foreach key {INTEGER INT} {
+  foreach dirty {0 1} {
+    foreach boundary {autocommit begin savepoint nested} {
+      foreach target {main recreated} {
+        set prefix deleted-branch-direct-$key.$dirty.$boundary.$target
+        reset_db
+        db eval "CREATE TABLE t(id $key PRIMARY KEY,v TEXT)"
+        db eval {
+          CREATE INDEX tv ON t(v);
+          INSERT INTO t VALUES(1,'main');
+          SELECT dolt_commit('-Am','main');
+          SELECT dolt_checkout('-b','feat');
+          CREATE TABLE feat_only(id INTEGER PRIMARY KEY);
+          INSERT INTO t VALUES(2,'feat');
+          SELECT dolt_commit('-Am','feat');
+        }
+        if {$dirty} {db eval {INSERT INTO t VALUES(3,'dirty')}}
+        switch $boundary {
+          begin {db eval BEGIN}
+          savepoint {db eval {SAVEPOINT caller}}
+          nested {db eval {BEGIN; SAVEPOINT caller}}
+        }
+        exec $engine -bail [file normalize test.db] {
+          SELECT dolt_branch('-D','feat'); SELECT dolt_gc();
+        }
+        db eval {PRAGMA shrink_memory}
+        set sql {SELECT dolt_checkout('main')}
+        if {$target eq "recreated"} {
+          set sql {SELECT dolt_checkout('-b','feat','main')}
+        }
+        do_test $prefix.checkout {catchsql $sql} {0 0}
+        do_execsql_test $prefix.target {
+          SELECT id FROM t INDEXED BY tv ORDER BY id;
+          SELECT count(*) FROM sqlite_schema WHERE name='feat_only';
+          SELECT count(*) FROM dolt_status;
+          PRAGMA integrity_check;
+        } {1 0 0 ok}
+        do_execsql_test $prefix.branch {
+          SELECT active_branch();
+          SELECT count(*) FROM dolt_branches WHERE name='feat';
+        } [expr {$target eq "main" ? "main 0" : "feat 1"}]
+        do_execsql_test $prefix.write {
+          INSERT INTO t VALUES(4,'recovered');
+          SELECT length(dolt_commit('-am','recovered'));
+        } 40
+        if {![sqlite3_get_autocommit db]} {
+          do_test $prefix.commit {catchsql COMMIT} {0 {}}
+        }
+        do_test $prefix.reopen {
+          db close
+          sqlite3 db test.db
+          db eval {
+            SELECT id FROM dolt_at_t('main') ORDER BY id;
+            SELECT count(*) FROM dolt_branches WHERE name='feat';
+            PRAGMA integrity_check;
+          }
+        } [expr {$target eq "main" ? "1 4 0 ok" : "1 1 ok"}]
+      }
+    }
+  }
+}
+
+foreach key {INTEGER INT} {
+  foreach {mode sql} {
+    scan {SELECT * FROM t}
+    reverse {SELECT * FROM t ORDER BY id DESC}
+    seek {SELECT * FROM t WHERE id=2}
+    count {SELECT count(*) FROM t}
+    index {SELECT * FROM t INDEXED BY tv WHERE v='feat'}
+    insert {INSERT INTO t VALUES(3,'rejected')}
+  } {
+    reset_db
+    db eval "CREATE TABLE t(id $key PRIMARY KEY,v TEXT)"
+    db eval {
+      CREATE INDEX tv ON t(v);
+      INSERT INTO t VALUES(1,'main');
+      SELECT dolt_commit('-Am','main');
+      SELECT dolt_checkout('-b','feat');
+      CREATE TABLE feat_only(id INTEGER PRIMARY KEY);
+      INSERT INTO t VALUES(2,'feat');
+      SELECT dolt_commit('-Am','feat');
+    }
+    exec $engine -bail [file normalize test.db] {
+      SELECT dolt_branch('-D','feat'); SELECT dolt_gc();
+    }
+    db eval {PRAGMA shrink_memory; BEGIN}
+    do_test deleted-branch-read-$key.$mode.refused {
+      list [catch {db eval $sql} message] [expr {[db errorcode]&255}]
+    } {1 5}
+    do_catchsql_test deleted-branch-read-$key.$mode.checkout {
+      SELECT dolt_checkout('main');
+    } {0 0}
+    do_execsql_test deleted-branch-read-$key.$mode.target {
+      INSERT INTO t VALUES(4,'recovered');
+      SELECT length(dolt_commit('-am','recovered'));
+      SELECT id FROM t ORDER BY id;
+      SELECT count(*) FROM dolt_branches WHERE name='feat';
+      PRAGMA integrity_check;
+    } {40 1 4 0 ok}
+    if {![sqlite3_get_autocommit db]} {db eval COMMIT}
+  }
+}
+
+set deletedReadArmed 0
+proc deleted_read_error {method filename args} {
+  if {$::deletedReadArmed && [file tail $filename] eq "test.db"} {
+    incr ::deletedReadHits
+    return SQLITE_IOERR
+  }
+  return SQLITE_OK
+}
+testvfs deletedio
+deletedio filter {xRead}
+deletedio script deleted_read_error
+
+foreach error {corrupt ioerr} {
+  reset_db
+  db close
+  sqlite3 db test.db -vfs deletedio
+  db eval {
+    CREATE TABLE t(id INTEGER PRIMARY KEY);
+    INSERT INTO t VALUES(1);
+    SELECT dolt_commit('-Am','main');
+    SELECT dolt_checkout('-b','feat');
+    CREATE TABLE feat_only(id INTEGER PRIMARY KEY);
+    SELECT dolt_commit('-Am','feat');
+    BEGIN;
+  }
+  exec $engine -bail [file normalize test.db] {
+    SELECT dolt_branch('-D','feat'); SELECT dolt_gc();
+  }
+  db eval {PRAGMA shrink_memory}
+  if {$error eq "corrupt"} {
+    do_catchsql_test deleted-branch-prior-corrupt {
+      SELECT test_error('prior corruption',11);
+    } {1 {prior corruption}}
+    set expected 11
+  } else {
+    set deletedReadHits 0
+    set deletedReadArmed 1
+    set expected 10
+  }
+  do_test deleted-branch-$error.refused {
+    list [catch {db eval {SELECT dolt_checkout('main')}} message] \
+      [expr {[db errorcode]&255}]
+  } [list 1 $expected]
+  set deletedReadArmed 0
+  if {$error eq "ioerr"} {
+    do_test deleted-branch-ioerr.injected {expr {$deletedReadHits>0}} 1
+  }
+  if {![sqlite3_get_autocommit db]} {db eval ROLLBACK}
+  do_execsql_test deleted-branch-$error.rollback {
+    SELECT dolt_checkout('main');
+    SELECT id FROM t;
+    SELECT count(*) FROM dolt_branches WHERE name='feat';
+    PRAGMA integrity_check;
+  } {0 1 0 ok}
+}
+db close
+deletedio delete
+sqlite3 db test.db
+
 foreach gc {0 1} {
   foreach dirty {0 1} {
     foreach boundary {autocommit begin savepoint nested} {
