@@ -816,6 +816,64 @@ static void scenarioTrackingLocalFetch(void){
   wipe(remote);
 }
 
+static int wsIs(ChunkStore *cs, const char *name, const ProllyHash *want){
+  ProllyHash got;
+  if( chunkStoreGetBranchWorkingSet(cs, name, &got)!=SQLITE_OK ) return 0;
+  return memcmp(got.data, want->data, PROLLY_HASH_SIZE)==0;
+}
+
+static int peerSetWorkingSet(const char *path, const ProllyHash *pWs){
+  ChunkStore peer;
+  int rc;
+  if( openStore(&peer, path, 0)!=SQLITE_OK ) return 0;
+  rc = chunkStoreSetBranchWorkingSet(&peer, "main", pWs);
+  if( rc==SQLITE_OK ) rc = commitRefs(&peer);
+  chunkStoreClose(&peer);
+  return rc==SQLITE_OK;
+}
+
+/* A refresh adopts a peer's working set into the refs without the session
+** reading it. Publishing a working set computed from the one the session
+** did read would erase the peer's write, so the publish refuses. Once the
+** session reads the peer's working set, the same publish lands. */
+static void storeWorkingSetReplaceUnread(void){
+  char path[256];
+  ProllyHash w0, wPeer, wLocal, wNext;
+  ChunkStore local, fresh;
+  int changed = 0;
+  dbPath(path, (int)sizeof(path), "cswsunread");
+  hashOf(&w0, "ws-base");
+  hashOf(&wPeer, "ws-peer");
+  hashOf(&wLocal, "ws-local");
+  hashOf(&wNext, "ws-next");
+  check("cs_ws_unread_seed", seedBase(&local, path));
+  check("cs_ws_unread_base",
+        chunkStoreSetBranchWorkingSet(&local, "main", &w0)==SQLITE_OK
+        && commitRefs(&local)==SQLITE_OK);
+  chunkStoreAdoptWorkingSetBasis(&local, "main");
+  check("cs_ws_unread_own_rewrite",
+        chunkStoreSetBranchWorkingSet(&local, "main", &wLocal)==SQLITE_OK
+        && commitRefs(&local)==SQLITE_OK);
+  check("cs_ws_unread_peer", peerSetWorkingSet(path, &wPeer));
+  check("cs_ws_unread_refresh",
+        chunkStoreRefreshIfChanged(&local, &changed)==SQLITE_OK && changed);
+  check("cs_ws_unread_refused",
+        chunkStoreSetBranchWorkingSet(&local, "main", &wNext)==SQLITE_OK
+        && commitRefs(&local)==SQLITE_BUSY_SNAPSHOT);
+  check("cs_ws_unread_open", openStore(&fresh, path, 0)==SQLITE_OK);
+  check("cs_ws_unread_peer_kept", wsIs(&fresh, "main", &wPeer));
+  chunkStoreClose(&fresh);
+  chunkStoreAdoptWorkingSetBasis(&local, "main");
+  check("cs_ws_unread_after_read",
+        chunkStoreSetBranchWorkingSet(&local, "main", &wNext)==SQLITE_OK
+        && commitRefs(&local)==SQLITE_OK);
+  chunkStoreClose(&local);
+  check("cs_ws_unread_reopen", openStore(&fresh, path, 0)==SQLITE_OK);
+  check("cs_ws_unread_landed", wsIs(&fresh, "main", &wNext));
+  chunkStoreClose(&fresh);
+  wipe(path);
+}
+
 int main(void){
   snprintf(gPid, sizeof(gPid), "%ld", (long)getpid());
   scenarioTagAdd();
@@ -837,6 +895,7 @@ int main(void){
   storeTrackingAdd();
   storeTrackingReplace();
   storeTrackingDelete();
+  storeWorkingSetReplaceUnread();
   printf("Results: %d passed, %d failed out of %d tests\n",
          nPass, nFail, nPass + nFail);
   return nFail > 0 ? 1 : 0;

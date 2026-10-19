@@ -338,6 +338,12 @@ int chunkStoreSetBranchWorkingSet(ChunkStore *cs, const char *zBranch, const Pro
   int bChanged;
   if( i<0 ) return SQLITE_NOTFOUND;
   bChanged = prollyHashCompare(&cs->refs.aBranches[i].workingSetHash, pHash)!=0;
+  if( bChanged && !cs->bWsReplacing && cs->bWsBasis
+   && strcmp(csWsBranch(&cs->wsBasisBranch), zBranch)==0 ){
+    cs->bWsReplacing = 1;
+    cs->wsReplaced = cs->refs.aBranches[i].workingSetHash;
+    cs->wsReplacedBasis = cs->wsBasis;
+  }
   memcpy(&cs->refs.aBranches[i].workingSetHash, pHash, sizeof(ProllyHash));
   /* The basis tracks the session's branch; writing another branch's working
   ** set must not retarget it, or a peer's write to ours goes unnoticed. */
@@ -409,6 +415,19 @@ int chunkStoreWorkingSetMovedFromBasis(ChunkStore *cs, const char *zBranch){
   if( i<0 ) return 0;
   return prollyHashCompare(&cs->refs.aBranches[i].workingSetHash,
                            &cs->wsBasis)!=0;
+}
+
+/* Under the commit lock, before publishing. The batch may replace the
+** session branch's working set only if what it replaces is the one the
+** session read, or the one it published itself. */
+int csCheckWorkingSetReplace(ChunkStore *cs){
+  if( !cs->bWsReplacing ) return SQLITE_OK;
+  if( prollyHashCompare(&cs->wsReplaced, &cs->wsReplacedBasis)==0 ) return SQLITE_OK;
+  if( chunkStoreWorkingSetSelfPublished(cs, csWsBranch(&cs->wsBasisBranch),
+                                        &cs->wsReplaced) ){
+    return SQLITE_OK;
+  }
+  return SQLITE_BUSY_SNAPSHOT;
 }
 
 int chunkStoreFindTag(ChunkStore *cs, const char *zName, ProllyHash *pCommit){
