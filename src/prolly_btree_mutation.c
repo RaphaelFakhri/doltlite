@@ -1608,7 +1608,8 @@ int prollyBtCursorPayloadChecked(BtCursor *pCur, u32 offset, u32 amt, void *pBuf
   return SQLITE_OK;
 }
 int sqlite3BtreePayloadChecked(BtCursor *pCur, u32 offset, u32 amt, void *pBuf){
-  return pCur->pCurOps->xPayloadChecked(pCur, offset, amt, pBuf);
+  return btreeReadResult(pCur->pBtree,
+      pCur->pCurOps->xPayloadChecked(pCur, offset, amt, pBuf));
 }
 
 int prollyBtCursorPutData(BtCursor *pCur, u32 offset, u32 amt, void *pBuf){

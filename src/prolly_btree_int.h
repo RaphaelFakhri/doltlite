@@ -750,6 +750,7 @@ int btreeWriteWorkingState(ChunkStore*, const char*, const ProllyHash*,
 void btreeBumpLocalDataVersion(Btree*);
 int btreeRefreshFromDisk(Btree*);
 int btreeRefreshSharedWorkingState(Btree*);
+int btreeReadResult(Btree*, int);
 int btreeReloadBranchWorkingStateInto(Btree*, int, ProllyHash*);
 int doltliteBtreeHydrateDeferred(Btree*);
 int doltliteOriginSourceEnable(ChunkStore*, sqlite3*, int*);

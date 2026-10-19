@@ -365,7 +365,8 @@ int prollyBtCursorCountIndexRange(
 
 int sqlite3BtreeCount(sqlite3 *db, BtCursor *pCur, i64 *pnEntry){
   if( !pCur ) return SQLITE_OK;
-  return pCur->pCurOps->xCount(db, pCur, pnEntry);
+  return btreeReadResult(pCur->pBtree,
+      pCur->pCurOps->xCount(db, pCur, pnEntry));
 }
 
 int sqlite3BtreeCountRange(

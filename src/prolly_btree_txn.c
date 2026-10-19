@@ -873,7 +873,8 @@ int sqlite3BtreeBeginTrans(Btree *p, int wrFlag, int *pSchemaVersion){
     }
   }
   if( !p ) return SQLITE_OK;
-  return p->pOps->xBeginTrans(p, wrFlag, pSchemaVersion);
+  return btreeReadResult(p,
+      p->pOps->xBeginTrans(p, wrFlag, pSchemaVersion));
 }
 
 /* Conflicts are in-txn only. Veto here (phase two already writes). Nested

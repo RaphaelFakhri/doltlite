@@ -628,6 +628,35 @@ void btreeMarkWorkingStateChanged(Btree *p, int bLocal){
   assert( p->iLoadedWorkingStateVersion==pBt->iWorkingStateVersion );
 }
 
+int btreeReadResult(Btree *p, int rc){
+  ChunkStore *cs;
+  ProllyHash tip;
+  int found = 1;
+  int changed = 0;
+  int readRc;
+  if( rc!=SQLITE_NOTFOUND || !p || p->pOrigBtree || !p->pBt
+   || p->isDetached || p->inTrans==TRANS_WRITE
+   || prollyHashIsEmpty(&p->headCommit) ) return rc;
+  cs = &p->pBt->store;
+  if( cs->corruptMidStream || cs->corruptHeader ) return rc;
+  if( cs->lockDepth>0 ){
+    return chunkStoreFindBranch(cs, p->zBranch ? p->zBranch : "main", 0)
+        ==SQLITE_NOTFOUND ? SQLITE_BUSY_SNAPSHOT : rc;
+  }
+  readRc = chunkStoreLockAndRefreshChanged(cs, &changed);
+  if( readRc!=SQLITE_OK ) return readRc;
+  readRc = chunkStoreReadDiskBranchTip(cs,
+      p->zBranch ? p->zBranch : "main", &tip, &found);
+  if( changed ){
+    btreeMarkWorkingStateChanged(p, 0);
+    p->iLoadedWorkingStateVersion = p->pBt->iWorkingStateVersion - 1;
+    p->bForceCatalogReload = 1;
+  }
+  chunkStoreUnlock(cs);
+  if( readRc!=SQLITE_OK ) return readRc;
+  return !found ? SQLITE_BUSY_SNAPSHOT : rc;
+}
+
 int btreeRefreshSharedWorkingState(Btree *p){
   BtShared *pBt;
   ProllyHash loadedCatHash;

@@ -71,6 +71,47 @@ foreach key {INTEGER INT} {
   }
 }
 
+foreach key {INTEGER INT} {
+  foreach {mode sql} {
+    scan {SELECT * FROM t}
+    reverse {SELECT * FROM t ORDER BY id DESC}
+    seek {SELECT * FROM t WHERE id=2}
+    count {SELECT count(*) FROM t}
+    index {SELECT * FROM t INDEXED BY tv WHERE v='feat'}
+    insert {INSERT INTO t VALUES(3,'rejected')}
+  } {
+    reset_db
+    db eval "CREATE TABLE t(id $key PRIMARY KEY,v TEXT)"
+    db eval {
+      CREATE INDEX tv ON t(v);
+      INSERT INTO t VALUES(1,'main');
+      SELECT dolt_commit('-Am','main');
+      SELECT dolt_checkout('-b','feat');
+      CREATE TABLE feat_only(id INTEGER PRIMARY KEY);
+      INSERT INTO t VALUES(2,'feat');
+      SELECT dolt_commit('-Am','feat');
+    }
+    exec $engine -bail [file normalize test.db] {
+      SELECT dolt_branch('-D','feat'); SELECT dolt_gc();
+    }
+    db eval {PRAGMA shrink_memory; BEGIN}
+    do_test deleted-branch-read-$key.$mode.refused {
+      list [catch {db eval $sql} message] [expr {[db errorcode]&255}]
+    } {1 5}
+    do_catchsql_test deleted-branch-read-$key.$mode.checkout {
+      SELECT dolt_checkout('main');
+    } {0 0}
+    do_execsql_test deleted-branch-read-$key.$mode.target {
+      INSERT INTO t VALUES(4,'recovered');
+      SELECT length(dolt_commit('-am','recovered'));
+      SELECT id FROM t ORDER BY id;
+      SELECT count(*) FROM dolt_branches WHERE name='feat';
+      PRAGMA integrity_check;
+    } {40 1 4 0 ok}
+    if {![sqlite3_get_autocommit db]} {db eval COMMIT}
+  }
+}
+
 set deletedReadArmed 0
 proc deleted_read_error {method filename args} {
   if {$::deletedReadArmed && [file tail $filename] eq "test.db"} {
