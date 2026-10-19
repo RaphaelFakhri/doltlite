@@ -375,6 +375,69 @@ SELECT dolt_add('-A');
 SELECT dolt_commit('-m', 'c2');
 " "HEAD~1" "HEAD"
 
+echo "--- schema change: primary key set ---"
+
+# Re-keyed rows are not adds and deletes. The stat row is all zeros.
+# Summary omits the table, so that side is empty on purpose.
+pk_widen_with_rows="
+CREATE TABLE t(id INT NOT NULL, v INT NOT NULL, PRIMARY KEY(id));
+INSERT INTO t VALUES (1, 1);
+SELECT dolt_add('-A');
+SELECT dolt_commit('-m', 'c1');
+CREATE TABLE t_new(id INT NOT NULL, v INT NOT NULL, PRIMARY KEY(id, v));
+INSERT INTO t_new SELECT * FROM t;
+DROP TABLE t;
+ALTER TABLE t_new RENAME TO t;
+SELECT dolt_add('-A');
+SELECT dolt_commit('-m', 'widen_pk');
+"
+oracle_stat "pk_widen_with_rows" "$pk_widen_with_rows" "HEAD~1" "HEAD"
+oracle_summary "pk_widen_with_rows" "$pk_widen_with_rows" "HEAD~1" "HEAD" "" "EXPECT_EMPTY"
+
+pk_widen_empty="
+CREATE TABLE t(id INT NOT NULL, v INT NOT NULL, PRIMARY KEY(id));
+SELECT dolt_add('-A');
+SELECT dolt_commit('-m', 'c1');
+CREATE TABLE t_new(id INT NOT NULL, v INT NOT NULL, PRIMARY KEY(id, v));
+DROP TABLE t;
+ALTER TABLE t_new RENAME TO t;
+SELECT dolt_add('-A');
+SELECT dolt_commit('-m', 'widen_pk');
+"
+oracle_stat "pk_widen_empty" "$pk_widen_empty" "HEAD~1" "HEAD"
+oracle_summary "pk_widen_empty" "$pk_widen_empty" "HEAD~1" "HEAD" "" "EXPECT_EMPTY"
+
+pk_reorder_with_rows="
+CREATE TABLE t(id INT NOT NULL, v INT NOT NULL, PRIMARY KEY(id, v));
+INSERT INTO t VALUES (1, 1);
+SELECT dolt_add('-A');
+SELECT dolt_commit('-m', 'c1');
+CREATE TABLE t_new(id INT NOT NULL, v INT NOT NULL, PRIMARY KEY(v, id));
+INSERT INTO t_new SELECT * FROM t;
+DROP TABLE t;
+ALTER TABLE t_new RENAME TO t;
+SELECT dolt_add('-A');
+SELECT dolt_commit('-m', 'reorder_pk');
+"
+oracle_stat "pk_reorder_with_rows" "$pk_reorder_with_rows" "HEAD~1" "HEAD"
+oracle_summary "pk_reorder_with_rows" "$pk_reorder_with_rows" "HEAD~1" "HEAD" "" "EXPECT_EMPTY"
+
+oracle_both "pk_change_leaves_other_table" "
+CREATE TABLE t(id INT NOT NULL, v INT NOT NULL, PRIMARY KEY(id));
+CREATE TABLE u(id INT PRIMARY KEY, v INT);
+INSERT INTO t VALUES (1, 1);
+INSERT INTO u VALUES (1, 1);
+SELECT dolt_add('-A');
+SELECT dolt_commit('-m', 'c1');
+CREATE TABLE t_new(id INT NOT NULL, v INT NOT NULL, PRIMARY KEY(id, v));
+INSERT INTO t_new SELECT * FROM t;
+DROP TABLE t;
+ALTER TABLE t_new RENAME TO t;
+UPDATE u SET v = 2 WHERE id = 1;
+SELECT dolt_add('-A');
+SELECT dolt_commit('-m', 'widen_pk');
+" "HEAD~1" "HEAD"
+
 echo "--- schema change: DROP COLUMN ---"
 
 # Dropped cells are cells_deleted, never also modified.

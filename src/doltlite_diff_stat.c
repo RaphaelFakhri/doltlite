@@ -109,6 +109,42 @@ static int dsLoadCreateSql(
   return SQLITE_OK;
 }
 
+/* 1 when the primary-key set differs. A signature that cannot be read
+** counts as a different keyspace, except out-of-memory. */
+static int dsPkSetChanged(
+  const char *zFromSql,
+  const char *zFromName,
+  u8 fromFlags,
+  const char *zToSql,
+  const char *zToName,
+  u8 toFlags,
+  int *pChanged
+){
+  char *zFromSig;
+  char *zToSig;
+  int rc;
+
+  zFromSig = 0;
+  zToSig = 0;
+  *pChanged = ((fromFlags ^ toFlags) & PROLLY_NODE_INTKEY)!=0;
+  if( *pChanged ) return SQLITE_OK;
+  rc = doltliteTablePkSignature(zFromSql, zFromName, &zFromSig);
+  if( rc==SQLITE_OK ){
+    rc = doltliteTablePkSignature(zToSql, zToName, &zToSig);
+  }
+  if( rc==SQLITE_NOMEM ){
+    sqlite3_free(zFromSig);
+    sqlite3_free(zToSig);
+    return rc;
+  }
+  *pChanged = rc!=SQLITE_OK
+           || sqlite3_stricmp(zFromSig ? zFromSig : "",
+                              zToSig ? zToSig : "")!=0;
+  sqlite3_free(zFromSig);
+  sqlite3_free(zToSig);
+  return SQLITE_OK;
+}
+
 static int dsCountRows(sqlite3 *db, const ProllyHash *pRoot, u8 flags,
                        i64 *pnRow){
   ChunkStore *cs = doltliteGetChunkStore(db);
@@ -547,6 +583,7 @@ static int dsComputeTableStats(
   i64 oldCount = 0, newCount = 0;
   i64 rowsMod = 0, rowsAdd = 0, rowsDel = 0;
   i64 cellsMod = 0, cellsAdd = 0, cellsDel = 0;
+  int pkChanged;
   int rc;
 
   memset(pOut, 0, sizeof(*pOut));
@@ -594,21 +631,30 @@ static int dsComputeTableStats(
     hasFrom && hasTo &&
     strcmp(zFromSql ? zFromSql : "", zToSql ? zToSql : "")!=0;
 
+  /* A new primary-key set is a different keyspace. Dolt does not diff the
+  ** re-keyed rows; the stat row is all zeros. */
+  pkChanged = 0;
+  if( schemaChanged ){
+    rc = dsPkSetChanged(zFromSql, zFromName, fromFlags,
+                        zToSql, zToName, toFlags, &pkChanged);
+    if( rc!=SQLITE_OK ) goto done;
+  }
+
   if( hasFrom && hasTo ){
     rc = dsBuildColMap(&fromCi, &toCi, &colMap);
     if( rc!=SQLITE_OK ) goto done;
   }
 
-  if( hasFrom ){
+  if( !pkChanged && hasFrom ){
     rc = dsCountRows(db, &fromRoot, fromFlags, &oldCount);
     if( rc!=SQLITE_OK ) goto done;
   }
-  if( hasTo ){
+  if( !pkChanged && hasTo ){
     rc = dsCountRows(db, &toRoot, toFlags, &newCount);
     if( rc!=SQLITE_OK ) goto done;
   }
 
-  if( hasFrom && hasTo
+  if( !pkChanged && hasFrom && hasTo
    && prollyHashCompare(&fromRoot, &toRoot)!=0 ){
     ChunkStore *cs = doltliteGetChunkStore(db);
     ProllyCache *pCache = doltliteGetCache(db);
@@ -655,7 +701,7 @@ static int dsComputeTableStats(
 
   /* Dolt's net formula: row adds and deletes at the new width, with the
   ** change in total cell count folded into one side. */
-  if( hasFrom && hasTo ){
+  if( !pkChanged && hasFrom && hasTo ){
     i64 rowCellsAdd = rowsAdd * nToCols;
     i64 rowCellsDel = rowsDel * nToCols;
     i64 cellDiff = newCount * nToCols - oldCount * nFromCols;
@@ -673,11 +719,11 @@ static int dsComputeTableStats(
     }
   }
 
-  if( !hasFrom && hasTo ){
+  if( !pkChanged && !hasFrom && hasTo ){
     rowsAdd = newCount;
     cellsAdd = (i64)newCount * nToCols;
   }
-  if( hasFrom && !hasTo ){
+  if( !pkChanged && hasFrom && !hasTo ){
     rowsDel = oldCount;
     cellsDel = (i64)oldCount * nFromCols;
   }
@@ -685,7 +731,7 @@ static int dsComputeTableStats(
   pOut->zTableName     = sqlite3_mprintf("%s",
                              (hasTo && zToName) ? zToName : zFromName);
   pOut->schemaChanged  = schemaChanged;
-  pOut->schemaInPlace  = schemaChanged
+  pOut->schemaInPlace  = schemaChanged && !pkChanged
       && dsInPlaceColumnChange(&fromCi, &toCi);
   pOut->rowsAdded      = rowsAdd;
   pOut->rowsDeleted    = rowsDel;
@@ -700,32 +746,26 @@ static int dsComputeTableStats(
   pOut->oldCellCount   = (i64)oldCount * nFromCols;
   pOut->newCellCount   = (i64)newCount * nToCols;
 
-  if( schemaChanged
-   && rowsAdd==0 && rowsDel==0 && rowsMod==0
-   && cellsAdd==0 && cellsDel==0 && cellsMod==0 ){
-    /* Dolt reports a schema-only change only when the primary key set
-    ** changed, as an empty row; any other one has no row at all. */
-    char *zFromSig = 0, *zToSig = 0;
-    int pkChanged = ((fromFlags ^ toFlags) & PROLLY_NODE_INTKEY)!=0;
-    if( !pkChanged ){
-      int rcSig = doltliteTablePkSignature(zFromSql, zFromName, &zFromSig);
-      if( rcSig==SQLITE_OK ){
-        rcSig = doltliteTablePkSignature(zToSql, zToName, &zToSig);
-      }
-      pkChanged = rcSig!=SQLITE_OK || sqlite3_stricmp(zFromSig, zToSig)!=0;
-    }
-    sqlite3_free(zFromSig);
-    sqlite3_free(zToSig);
-    if( !pkChanged ){
-      sqlite3_free(pOut->zTableName);
-      pOut->zTableName = 0;
-      goto done;
-    }
+  if( pkChanged ){
+    /* The key set changed, so none of the row counts are meaningful. */
     pOut->rowsUnmodified = 0;
+    pOut->rowsAdded = 0;
+    pOut->rowsDeleted = 0;
+    pOut->rowsModified = 0;
+    pOut->cellsAdded = 0;
+    pOut->cellsDeleted = 0;
+    pOut->cellsModified = 0;
     pOut->oldRowCount = 0;
     pOut->newRowCount = 0;
     pOut->oldCellCount = 0;
     pOut->newCellCount = 0;
+  }else if( schemaChanged
+   && rowsAdd==0 && rowsDel==0 && rowsMod==0
+   && cellsAdd==0 && cellsDel==0 && cellsMod==0 ){
+    /* Any other schema-only change has no stat row at all. */
+    sqlite3_free(pOut->zTableName);
+    pOut->zTableName = 0;
+    goto done;
   }
 
 done:
@@ -1518,6 +1558,39 @@ static int dssAppendTableChange(
       schemasDiffer = 1;
     }
     if( !rootsDiffer && !schemasDiffer ) return SQLITE_OK;
+    if( schemasDiffer ){
+      char *zFromSql;
+      char *zToSql;
+      int pkChanged;
+
+      zFromSql = 0;
+      zToSql = 0;
+      pkChanged = 0;
+      rc = dsLoadCreateSql(db, &c->fctx.fromCat, pFromEntry->zName, &zFromSql);
+      if( rc==SQLITE_OK ){
+        rc = dsLoadCreateSql(db, &c->fctx.toCat, pToEntry->zName, &zToSql);
+      }
+      if( rc==SQLITE_OK ){
+        rc = dsPkSetChanged(zFromSql, pFromEntry->zName, pFromEntry->flags,
+                            zToSql, pToEntry->zName, pToEntry->flags,
+                            &pkChanged);
+      }
+      sqlite3_free(zFromSql);
+      sqlite3_free(zToSql);
+      if( rc!=SQLITE_OK ) return rc;
+      if( pkChanged ){
+        /* Unfiltered summary skips the table. Naming it is an error. */
+        if( c->fctx.zTblFilter ){
+          sqlite3_free(c->base.pVtab->zErrMsg);
+          c->base.pVtab->zErrMsg = sqlite3_mprintf(
+              "failed to compute diff summary for table %s: "
+              "primary key set changed",
+              zTableName);
+          return c->base.pVtab->zErrMsg ? SQLITE_ERROR : SQLITE_NOMEM;
+        }
+        return SQLITE_OK;
+      }
+    }
     if( rootsDiffer && schemasDiffer ){
       rc = dssDataActuallyChanged(db, &c->fctx, zTableName,
                                   pFromEntry, pToEntry, &rootsDiffer);

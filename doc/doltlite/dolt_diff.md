@@ -52,6 +52,10 @@ Revision spellings and which surfaces take ranges: [refs.md](refs.md).
 - `dolt_diff_stat` and `dolt_diff_summary` accept `(from, to)` or a single
   `..` / `...` range. A lone revision is still
   `dolt_diff_stat requires from_ref and to_ref`.
+- When the primary key set changes, `dolt_diff_stat` emits one all-zero row
+  for that table. The re-keyed rows are not counted as adds and deletes.
+  `dolt_diff_summary` omits that table. Naming it is an error:
+  `failed to compute diff summary for table <name>: primary key set changed`.
 - `dolt_patch` emits ordered, executable SQLite: `schema` statements first,
   then `data`. When `ALTER TABLE` cannot express a change it emits a rebuild.
 - `dolt_schema_diff` covers tables, views, indexes, and triggers.

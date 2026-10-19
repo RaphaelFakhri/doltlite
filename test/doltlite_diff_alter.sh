@@ -322,6 +322,29 @@ run_test "dropcol_then_addcol_default_rowid_table" \
   "SELECT quote(y) FROM t;" \
   "'dflt'" "$DB11"
 
-rm -f "$DB1" "$DB2" "$DB3" "$DB4" "$DB5" "$DB6" "$DB7" "$DB8" "$DB9" "$DB10" "$DB11" "$DB12" "$DB13"
+DB14=/tmp/test_diff_alter14_$$.db; rm -f "$DB14"
+
+echo "CREATE TABLE t(id INT NOT NULL, v INT NOT NULL, PRIMARY KEY(id));
+INSERT INTO t VALUES (1, 1);
+SELECT dolt_commit('-A','-m','c1');
+CREATE TABLE t_new(id INT NOT NULL, v INT NOT NULL, PRIMARY KEY(id, v));
+INSERT INTO t_new SELECT * FROM t;
+DROP TABLE t;
+ALTER TABLE t_new RENAME TO t;
+SELECT dolt_commit('-A','-m','widen_pk');" | $DOLTLITE "$DB14" > /dev/null 2>&1
+
+run_test "pk_widen_diff_stat_empty_row" \
+  "SELECT rows_unmodified||','||rows_added||','||rows_deleted||','||rows_modified||','||cells_added||','||cells_deleted||','||cells_modified||','||old_row_count||','||new_row_count||','||old_cell_count||','||new_cell_count FROM dolt_diff_stat('HEAD~1','HEAD','t');" \
+  "0,0,0,0,0,0,0,0,0,0,0" "$DB14"
+
+run_test "pk_widen_diff_summary_omits_table" \
+  "SELECT count(*) FROM dolt_diff_summary('HEAD~1','HEAD');" \
+  "0" "$DB14"
+
+run_test_error_match "pk_widen_diff_summary_names_table" \
+  "SELECT * FROM dolt_diff_summary('HEAD~1','HEAD','t');" \
+  "failed to compute diff summary for table t: primary key set changed" "$DB14"
+
+rm -f "$DB1" "$DB2" "$DB3" "$DB4" "$DB5" "$DB6" "$DB7" "$DB8" "$DB9" "$DB10" "$DB11" "$DB12" "$DB13" "$DB14"
 
 dltest_finish
