@@ -690,8 +690,6 @@ int prollyBtreeBeginTrans(Btree *p, int wrFlag, int *pSchemaVersion){
   if( p->inTrans==TRANS_WRITE ){
     return SQLITE_OK;
   }
-  pBt->bCommitAbortedUnlocked = 0;
-
   if( p->inTrans==TRANS_READ && !wrFlag ){
     /* Another statement still reading keeps this snapshot, as in stock WAL:
     ** a refresh under it would let a write computed from its rows pass the
@@ -842,6 +840,7 @@ int prollyBtreeBeginTrans(Btree *p, int wrFlag, int *pSchemaVersion){
       }
     }
     PROLLY_ASSERT_GRAPH_LOCKED(pBt);
+    pBt->bOwnsGraphLock = 1;
   } else {
     if( p->inTrans==TRANS_NONE ){
       p->inTrans = TRANS_READ;
@@ -896,8 +895,15 @@ int sqlite3BtreeCommitPhaseOne(Btree *p, const char *zSuperJrnl){
   return p->pOps->xCommitPhaseOne(p, zSuperJrnl);
 }
 
+static void btreeReleaseTxnGraphLock(BtShared *pBt){
+  if( pBt->bOwnsGraphLock ){
+    pBt->bOwnsGraphLock = 0;
+    chunkStoreUnlock(&pBt->store);
+  }
+}
+
 static void commitPhaseTwoReleaseGraph(BtShared *pBt){
-  chunkStoreUnlock(&pBt->store);
+  btreeReleaseTxnGraphLock(pBt);
   pBt->store.snapshotPinned = 0;
 }
 
@@ -919,7 +925,6 @@ static void commitPhaseTwoAbort(
   if( commitRc==SQLITE_BUSY ) return;
   chunkStoreRollback(&pBt->store);
   commitPhaseTwoReleaseGraph(pBt);
-  pBt->bCommitAbortedUnlocked = 1;
 }
 
 static int commitPhaseTwoStageCatalog(
@@ -1381,7 +1386,7 @@ static void rollbackAbandonWriteTxn(Btree *p, BtShared *pBt){
   p->inTrans = TRANS_NONE;
   p->inTransaction = TRANS_NONE;
   btreeDiscardAllSavepoints(p);
-  chunkStoreUnlock(&pBt->store);
+  btreeReleaseTxnGraphLock(pBt);
   pBt->store.snapshotPinned = 0;
 }
 
@@ -1415,8 +1420,7 @@ int prollyBtreeRollback(Btree *p, int tripCode, int writeOnly){
   if( p->inTrans==TRANS_WRITE ){
     /* A commit that aborted before publishing already released the lock;
     ** the rollback SQLite answers it with still has to undo the txn. */
-    if( !pBt->bCommitAbortedUnlocked ) PROLLY_ASSERT_GRAPH_LOCKED(pBt);
-    pBt->bCommitAbortedUnlocked = 0;
+    if( pBt->bOwnsGraphLock ) PROLLY_ASSERT_GRAPH_LOCKED(pBt);
     {
       BtCursor *pC;
       if( tripCode==SQLITE_OK || writeOnly ){
@@ -1471,7 +1475,7 @@ int prollyBtreeRollback(Btree *p, int tripCode, int writeOnly){
       p->inTransaction = TRANS_NONE;
       btreeDiscardAllSavepoints(p);
       chunkStoreRollback(&pBt->store);
-      chunkStoreUnlock(&pBt->store);
+      btreeReleaseTxnGraphLock(pBt);
       pBt->store.snapshotPinned = 0;
       return rc;
     }
@@ -1516,7 +1520,7 @@ int prollyBtreeRollback(Btree *p, int tripCode, int writeOnly){
                                    &p->vc.constraintViolationsHash);
       if( rc!=SQLITE_OK ){
         sqlite3_free(catData);
-        chunkStoreUnlock(&pBt->store);
+        btreeReleaseTxnGraphLock(pBt);
         pBt->store.snapshotPinned = 0;
         return rc;
       }
@@ -1559,7 +1563,7 @@ int prollyBtreeRollback(Btree *p, int tripCode, int writeOnly){
 
   commitPhaseTwoEndWriteTxn(p);
 
-  chunkStoreUnlock(&pBt->store);
+  btreeReleaseTxnGraphLock(pBt);
   pBt->store.snapshotPinned = p->inTrans==TRANS_READ;
 
   return rc==SQLITE_OK ? cursorRc : rc;

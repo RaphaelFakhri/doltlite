@@ -190,7 +190,9 @@ struct BtShared {
   int nRef;
   int nIncrblobCur;
   u8 inCatalogSerialize;
-  u8 bCommitAbortedUnlocked;
+  /* The write transaction holds one level of the graph lock. Only it may
+  ** release that level: a nested statement that never locked must not. */
+  u8 bOwnsGraphLock;
   ProllyStats stats;
 };
 
