@@ -427,8 +427,10 @@ static void runTxn(const Op *p, Tally *t){
 /* An autocommit VC operation in this process races a peer process's
 ** autocommit insert. In-process peers share the store's lock state and miss
 ** this, so the peer forks and fires from the operation's progress handler.
-** A follow-up clean then persists whatever working set this connection
-** holds; the peer's acknowledged row must survive both. */
+** An operation that holds its write transaction refuses the peer, which
+** then retries once the operation is done. A follow-up clean then persists
+** whatever working set this connection holds; the peer's acknowledged row
+** must survive both. */
 typedef struct ProcPeer ProcPeer;
 struct ProcPeer {
   int toPeer[2];
@@ -436,6 +438,7 @@ struct ProcPeer {
   int fireAt;
   int nCalls;
   int fired;
+  char ack;
 };
 
 static int fireProcPeer(void *arg){
@@ -443,7 +446,7 @@ static int fireProcPeer(void *arg){
   char ch = 'g';
   if( ++pp->nCalls==pp->fireAt && !pp->fired ){
     pp->fired = 1;
-    if( write(pp->toPeer[1], &ch, 1)!=1 || read(pp->fromPeer[0], &ch, 1)!=1 ){
+    if( write(pp->toPeer[1], &ch, 1)!=1 || read(pp->fromPeer[0], &pp->ack, 1)!=1 ){
       pp->fired = -1;
     }
   }
@@ -471,12 +474,19 @@ static int runProcPeer(const char *zPre, const char *zSql, int k, int *pLost){
     sqlite3 *peer = 0;
     int ok;
     sqlite3_open(zPath, &peer);
-    sqlite3_busy_timeout(peer, 5000);
+    sqlite3_busy_timeout(peer, 50);
     if( read(pp.toPeer[0], &ch, 1)!=1 || ch!='g' ) _exit(0);
     ok = execSql(peer, "INSERT INTO u VALUES(1)")==SQLITE_OK;
-    sqlite3_close(peer);
     ch = ok ? 'a' : 'n';
     if( write(pp.fromPeer[1], &ch, 1)!=1 ) _exit(1);
+    if( !ok ){
+      if( read(pp.toPeer[0], &ch, 1)!=1 ) _exit(1);
+      sqlite3_busy_timeout(peer, 5000);
+      ok = execSql(peer, "INSERT INTO u VALUES(1)")==SQLITE_OK;
+      ch = ok ? 'a' : 'n';
+      if( write(pp.fromPeer[1], &ch, 1)!=1 ) _exit(1);
+    }
+    sqlite3_close(peer);
     _exit(0);
   }
   if( pid<0 ){ perror("fork"); exit(1); }
@@ -487,12 +497,21 @@ static int runProcPeer(const char *zPre, const char *zSql, int k, int *pLost){
   execSql(db, zSql);
   sqlite3_progress_handler(db, 0, 0, 0);
   if( !pp.fired && write(pp.toPeer[1], &ch, 1)!=1 ){ perror("write"); exit(1); }
+  if( pp.fired==1 && pp.ack=='n' ){
+    ch = 'r';
+    if( write(pp.toPeer[1], &ch, 1)!=1 || read(pp.fromPeer[0], &pp.ack, 1)!=1 ){
+      perror("retry"); exit(1);
+    }
+  }
   execSql(db, "SELECT dolt_clean()");
   waitpid(pid, &status, 0);
   sqlite3_close(db);
   close(pp.toPeer[0]); close(pp.toPeer[1]);
   close(pp.fromPeer[0]); close(pp.fromPeer[1]);
-  if( pp.fired==1 ){
+  if( pp.fired==1 && pp.ack!='a' ){
+    fprintf(stderr, "  %s step %d: peer never acknowledged\n", zSql, k);
+    (*pLost)++;
+  }else if( pp.fired==1 ){
     sqlite3_open(zPath, &db);
     if( strcmp(queryText(db, "SELECT count(*) FROM u"), "1")!=0 ){
       fprintf(stderr, "  %s step %d: peer row lost\n", zSql, k);
@@ -705,28 +724,37 @@ static void test_process_apply_clean_peer(
     int peerRc = sqlite3_open(zPath, &peer);
     char zTip[64] = {0};
     if( read(p.toPeer[0], &ch, 1)!=1 ) _exit(1);
-    if( peerRc==SQLITE_OK && afterInstall ){
-      const char *zExpectedTip = revert ? "Revert \"drop index\"" : "index";
-      if( strcmp(queryText(peer, "SELECT message FROM dolt_log LIMIT 1"),
-                 zExpectedTip)!=0 ) peerRc = SQLITE_ERROR;
-    }
-    if( peerRc==SQLITE_OK && afterInstall && commitPeer ){
-      peerRc = execSql(peer,
-          "INSERT INTO t VALUES(98,'peer commit');"
-          "SELECT dolt_commit('-am','peer')");
-    }
     if( peerRc==SQLITE_OK ){
       peerRc = execSql(peer, "INSERT INTO t VALUES(99,'peer')");
     }
-    if( peerRc==SQLITE_OK && commitPeer && !afterInstall ){
-      peerRc = execSql(peer, "SELECT dolt_commit('-am','peer')");
-    }
-    if( peerRc==SQLITE_OK && afterInstall ){
-      peerRc = execSql(peer, "SELECT dolt_reset()");
+    if( write(p.fromPeer[1], &peerRc, sizeof(peerRc))!=sizeof(peerRc) ) _exit(1);
+    if( read(p.toPeer[0], &ch, 1)!=1 ) _exit(1);
+    sqlite3_busy_timeout(peer, 5000);
+    if( (peerRc&255)==SQLITE_BUSY ){
+      const char *zExpectedTip = revert ? "Revert \"drop index\"" : "index";
+      peerRc = SQLITE_OK;
+      if( afterInstall
+       && strcmp(queryText(peer, "SELECT message FROM dolt_log LIMIT 1"),
+                 zExpectedTip)!=0 ) peerRc = SQLITE_ERROR;
+      if( peerRc==SQLITE_OK && afterInstall && commitPeer ){
+        peerRc = execSql(peer,
+            "INSERT INTO t VALUES(98,'peer commit');"
+            "SELECT dolt_commit('-am','peer')");
+      }
+      if( peerRc==SQLITE_OK ){
+        peerRc = execSql(peer, "INSERT INTO t VALUES(99,'peer')");
+      }
+      if( peerRc==SQLITE_OK && commitPeer && !afterInstall ){
+        peerRc = execSql(peer, "SELECT dolt_commit('-am','peer')");
+      }
+      if( peerRc==SQLITE_OK && afterInstall ){
+        peerRc = execSql(peer, "SELECT dolt_reset()");
+      }
+    }else{
+      peerRc = SQLITE_ERROR;
     }
     snprintf(zTip, sizeof(zTip), "%s", queryText(peer, "SELECT dolt_hashof('HEAD')"));
     if( write(p.fromPeer[1], &peerRc, sizeof(peerRc))!=sizeof(peerRc) ) _exit(1);
-    if( read(p.toPeer[0], &ch, 1)!=1 ) _exit(1);
     if( write(p.fromPeer[1], zTip, sizeof(zTip))!=sizeof(zTip) ) _exit(1);
     sqlite3_close(peer);
     _exit(0);
@@ -741,13 +769,14 @@ static void test_process_apply_clean_peer(
                            : "SELECT dolt_cherry_pick('feat')");
   sqlite3_trace_v2(db, 0, 0, 0);
   check("apply_clean_hook_fired", p.fired==1);
-  check("apply_clean_peer_acknowledged", p.peerRc==SQLITE_OK);
-  check("apply_clean_scan_released_snapshot", p.txnState==SQLITE_TXN_NONE);
-  check(afterInstall ? "apply_published_success" : "apply_clean_refused_busy",
-        rc==(afterInstall ? SQLITE_OK : SQLITE_BUSY));
+  check("apply_clean_peer_refused", (p.peerRc&255)==SQLITE_BUSY);
+  check("apply_clean_scan_holds_txn", p.txnState==SQLITE_TXN_WRITE);
+  check("apply_published_success", rc==SQLITE_OK);
   if( !p.fired && write(p.toPeer[1], &ch, 1)!=1 ) exit(1);
   if( write(p.toPeer[1], &ch, 1)!=1
+   || read(p.fromPeer[0], &p.peerRc, sizeof(p.peerRc))!=sizeof(p.peerRc)
    || read(p.fromPeer[0], zPeerHead, sizeof(zPeerHead))!=sizeof(zPeerHead) ) exit(1);
+  check("apply_clean_peer_acknowledged", p.peerRc==SQLITE_OK);
   waitpid(pid, &status, 0);
   check("apply_clean_peer_exit", WIFEXITED(status) && WEXITSTATUS(status)==0);
   close(p.toPeer[0]); close(p.toPeer[1]);
@@ -771,19 +800,18 @@ static void test_process_apply_clean_peer(
                        : (commitPeer ? "1,2,3,4,98,99" : "1,2,3,4,99");
   }else{
     snprintf(zCheck, sizeof(zCheck), "process_apply_%s_%d_peer_kept", zOp, commitPeer);
+    zExpected = revert ? "1,4,99" : "1,2,3,4,99";
   }
   check(zCheck, strcmp(queryText(db,
       "SELECT group_concat(id) FROM (SELECT id FROM t ORDER BY id)"),
       zExpected)==0);
   check("apply_clean_peer_in_head", strcmp(queryText(db,
       "SELECT count(*) FROM dolt_at_t('HEAD') WHERE id=99"), "1")==0);
-  check(afterInstall ? "apply_install_index_kept" : "apply_clean_index_not_installed",
-      strcmp(queryText(db,
-      "SELECT count(*) FROM sqlite_master WHERE name='tv'"), afterInstall ? "1" : "0")==0);
+  check("apply_install_index_kept", strcmp(queryText(db,
+      "SELECT count(*) FROM sqlite_master WHERE name='tv'"), "1")==0);
   check("apply_clean_original_tip_kept", strcmp(queryText(db,
       "SELECT dolt_hashof('after')"), zPeerHead)==0);
-  check("apply_clean_peer_commit_state", (commitPeer || afterInstall) ? strcmp(zHead,zPeerHead)!=0
-                                                   : strcmp(zHead,zPeerHead)==0);
+  check("apply_clean_peer_commit_state", strcmp(zHead,zPeerHead)!=0);
   check("apply_clean_integrity", strcmp(queryText(db, "PRAGMA integrity_check"), "ok")==0);
   sqlite3_close(db);
   remove(zPath);

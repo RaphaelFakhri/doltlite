@@ -922,6 +922,7 @@ void doltliteInstallPreparedSessionBranch(
   assert( db!=0 && db->nDb>0 && db->aDb[0].pBt!=0 );
   assert( zPrepared!=0 );
   p = db->aDb[0].pBt;
+  if( !p->zBranch || strcmp(p->zBranch, zPrepared)!=0 ) p->nBranchInstall++;
   sqlite3_free(p->zBranch);
   p->zBranch = zPrepared;
   chunkStoreFollowWorkingSetBasis(&p->pBt->store, zPrepared);

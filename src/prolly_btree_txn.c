@@ -882,6 +882,7 @@ int prollyBtreeCommitPhaseOne(Btree *p, const char *zSuperJrnl){
   (void)zSuperJrnl;
   if( !p || p->inTrans!=TRANS_WRITE ) return SQLITE_OK;
   if( p->pBt && p->pBt->inCatalogSerialize ) return SQLITE_OK;
+  if( p->bCommandTxn ) return SQLITE_OK;
   if( p->db->nVdbeExec>1 ) return SQLITE_OK;
   if( !prollyHashIsEmpty(&p->vc.conflictsCatalogHash) ){
     sqlite3ErrorWithMsg(p->db, SQLITE_CONSTRAINT,
@@ -1246,6 +1247,7 @@ int prollyBtreeCommitPhaseTwo(Btree *p, int bCleanup){
 
   /* Nested commit from catalog-serialize SELECT finalize: no-op. */
   if( pBt->inCatalogSerialize ) return SQLITE_OK;
+  if( p->bCommandTxn && p->inTrans==TRANS_WRITE ) return SQLITE_OK;
 
   if( p->inTrans!=TRANS_WRITE ){
     commitPhaseTwoEndWriteTxn(p);
@@ -1254,6 +1256,88 @@ int prollyBtreeCommitPhaseTwo(Btree *p, int bCleanup){
   }
   return commitPhaseTwoWrite(p, pBt);
 }
+/* Open the write transaction a VC command runs in. Its statements commit
+** into it, so the command reads one snapshot under one lock and publishes
+** once, when doltliteBtreeEndCommandTxn ends it. */
+int doltliteBtreeBeginCommandTxn(Btree *p){
+  int rc;
+  if( !p || p->pOps!=&prollyBtreeOps || p->bCommandTxn
+   || p->inTrans==TRANS_WRITE ){
+    return SQLITE_DONE;
+  }
+  rc = sqlite3BtreeBeginTrans(p, 1, 0);
+  if( rc!=SQLITE_OK ) return rc;
+  p->bCommandTxn = 1;
+  p->bCommandWritesRows = 0;
+  p->nCommandBranchInstall = p->nBranchInstall;
+  return SQLITE_OK;
+}
+
+/* A command that left the session invalidated or on another branch
+** published what it meant to itself; the session it leaves behind is not
+** a working set to write back. A failed command that published nothing
+** rolls back to the snapshot it started from. */
+int doltliteBtreeEndCommandTxn(Btree *p, int bFailed, int bPublished){
+  BtShared *pBt;
+  sqlite3 *db;
+  int bHooks;
+  int rc;
+  if( !p || !p->bCommandTxn ) return SQLITE_OK;
+  p->bCommandTxn = 0;
+  if( p->inTrans!=TRANS_WRITE ) return SQLITE_OK;
+  pBt = p->pBt;
+  if( bPublished && !bFailed && !p->bCommandWritesRows
+   && pBt->store.staging.nPending==0
+   && prollyHashCompare(&pBt->store.refs.refsHash,
+                        &pBt->store.refs.committedRefsHash)==0 ){
+    btreeDiscardAllSavepoints(p);
+    commitPhaseTwoEndWriteTxn(p);
+    commitPhaseTwoReleaseGraph(pBt);
+    return SQLITE_OK;
+  }
+  if( p->bForceCatalogReload
+   || p->nCommandBranchInstall!=p->nBranchInstall
+   || (!prollyHashIsEmpty(&p->headCommit) && !p->isDetached
+       && pBt->store.refs.nBranches>0
+       && chunkStoreFindBranch(&pBt->store,
+                               p->zBranch ? p->zBranch : "main", 0)
+          ==SQLITE_NOTFOUND) ){
+    chunkStoreRollback(&pBt->store);
+    btreeDiscardAllSavepoints(p);
+    p->inTrans = TRANS_NONE;
+    p->inTransaction = TRANS_NONE;
+    btreeReleaseTxnGraphLock(pBt);
+    pBt->store.snapshotPinned = 0;
+    p->iLoadedWorkingStateVersion = pBt->iWorkingStateVersion - 1;
+    p->bForceCatalogReload = 1;
+    resetConnectionSchema(p);
+    return SQLITE_OK;
+  }
+  db = p->db;
+  /* Only a command that writes rows is an SQL transaction to the hooks; one
+  ** that only moves refs fires neither. */
+  bHooks = p->bCommandWritesRows && db;
+  if( bFailed && !bPublished ){
+    rc = sqlite3BtreeRollback(p, SQLITE_OK, 0);
+    if( bHooks && db->xRollbackCallback ) db->xRollbackCallback(db->pRollbackArg);
+    return rc;
+  }
+  if( bHooks && db->xCommitCallback && db->xCommitCallback(db->pCommitArg) ){
+    (void)sqlite3BtreeRollback(p, SQLITE_OK, 0);
+    if( db->xRollbackCallback ) db->xRollbackCallback(db->pRollbackArg);
+    return SQLITE_CONSTRAINT_COMMITHOOK;
+  }
+  rc = sqlite3BtreeCommit(p);
+  if( rc!=SQLITE_OK ) (void)sqlite3BtreeRollback(p, SQLITE_OK, 0);
+  return rc;
+}
+
+int doltliteInCommandTxn(sqlite3 *db){
+  Btree *p = (db && db->nDb>0) ? db->aDb[0].pBt : 0;
+  return p && p->pOps==&prollyBtreeOps && p->bCommandTxn
+      && p->inTrans==TRANS_WRITE;
+}
+
 int sqlite3BtreeCommitPhaseTwo(Btree *p, int bCleanup){
   if( !p ) return SQLITE_OK;
   return p->pOps->xCommitPhaseTwo(p, bCleanup);

@@ -3019,7 +3019,11 @@ static int vdbeCommit(sqlite3 *db, Vdbe *p){
 #endif
 
   /* If there are any write-transactions at all, invoke the commit hook */
+#ifdef DOLTLITE_PROLLY
+  if( needXcommit && db->xCommitCallback && !doltliteInCommandTxn(db) ){
+#else
   if( needXcommit && db->xCommitCallback ){
+#endif
     rc = db->xCommitCallback(db->pCommitArg);
     if( rc ){
       return SQLITE_CONSTRAINT_COMMITHOOK;

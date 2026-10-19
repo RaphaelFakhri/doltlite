@@ -90,15 +90,33 @@ void doltliteVcCommandInstalled(sqlite3 *db){
   }
 }
 
-static void doltliteCommandFunc(
+static void doltliteRunCommand(
   sqlite3_context *ctx,
   int argc,
-  sqlite3_value **argv
+  sqlite3_value **argv,
+  int bScoped
 ){
   sqlite3 *db = sqlite3_context_db_handle(ctx);
   Vdbe *pOuter = db->pVcCommand;
+  Btree *pMain = db->nDb>0 ? db->aDb[0].pBt : 0;
+  int bScope = 0;
   db->pVcCommand = ctx->pVdbe;
+  /* In autocommit the command is its own write transaction. Inside BEGIN
+  ** it joins the caller's. A command that cannot begin one (read-only,
+  ** busy, a peer-deleted branch) runs as before and reports its own
+  ** refusal. */
+  if( bScoped && !pOuter && db->autoCommit && !db->pSavepoint
+   && doltliteGetChunkStore(db) && !doltliteIsDetached(db) ){
+    bScope = doltliteBtreeBeginCommandTxn(pMain)==SQLITE_OK;
+  }
   doltliteInvokeShieldedFunc(ctx, argc, argv, pOuter==0);
+  if( bScope ){
+    int rc = doltliteBtreeEndCommandTxn(pMain, ctx->isError!=0,
+                                        ctx->pVdbe->vcInstalled);
+    if( rc!=SQLITE_OK && !ctx->isError ){
+      sqlite3_result_error_code(ctx, rc);
+    }
+  }
   if( !ctx->isError ){
     doltliteVcCommandInstalled(db);
   }else if( !ctx->pVdbe->vcInstalled && AtomicLoad(&db->u1.isInterrupted) ){
@@ -113,6 +131,38 @@ static void doltliteCommandFunc(
   db->pVcCommand = pOuter;
 }
 
+static void doltliteCommandFunc(
+  sqlite3_context *ctx,
+  int argc,
+  sqlite3_value **argv
+){
+  doltliteRunCommand(ctx, argc, argv, 1);
+}
+
+static void doltliteUnscopedCommandFunc(
+  sqlite3_context *ctx,
+  int argc,
+  sqlite3_value **argv
+){
+  doltliteRunCommand(ctx, argc, argv, 0);
+}
+
+/* Commands that switch the session's branch, move data over the network
+** without holding the local lock, or need the lock free (gc) manage their
+** own transactions. */
+static int doltliteCommandIsUnscoped(const char *zName){
+  static const char *azUnscoped[] = {
+    "dolt_checkout", "dolt_connect_branch", "dolt_config", "dolt_creds",
+    "dolt_creds_new", "dolt_gc", "dolt_remote", "dolt_push", "dolt_fetch",
+    "dolt_pull", "dolt_clone", "dolt_rebase",
+  };
+  int i;
+  for(i=0; i<ArraySize(azUnscoped); i++){
+    if( sqlite3_stricmp(zName, azUnscoped[i])==0 ) return 1;
+  }
+  return 0;
+}
+
 int doltliteCreateCommandFunc(
   sqlite3 *db,
   const char *zName,
@@ -120,7 +170,9 @@ int doltliteCreateCommandFunc(
   void (*xFunc)(sqlite3_context*,int,sqlite3_value**)
 ){
   return sqlite3_create_function(db, zName, nArg,
-      DOLTLITE_COMMAND_FUNC_FLAGS, (void*)xFunc, doltliteCommandFunc, 0, 0);
+      DOLTLITE_COMMAND_FUNC_FLAGS, (void*)xFunc,
+      doltliteCommandIsUnscoped(zName) ? doltliteUnscopedCommandFunc
+                                       : doltliteCommandFunc, 0, 0);
 }
 
 /* Every method of a version-control virtual table runs internal SQL on the

@@ -322,6 +322,12 @@ struct Btree {
   u8 bDeferredRevision;
   u8 bDeferredRegister;
   u8 bBeginTransBranchMissing;
+  /* A VC command opened this write transaction and ends it; nested
+  ** statements inside the command must not commit or unlock it. */
+  u8 bCommandTxn;
+  u8 bCommandWritesRows;
+  u32 nBranchInstall;
+  u32 nCommandBranchInstall;
   u8 bPreserveDeferFks;
   ProllyHash preserveDeferFkCatalog;
   Pgno mxPageCount;
