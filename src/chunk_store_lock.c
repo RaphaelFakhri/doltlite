@@ -7,6 +7,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <limits.h>
+#ifdef _MSC_VER
+# include <malloc.h>
+#endif
 
 static int csReloadFromDisk(ChunkStore *cs);
 
@@ -179,17 +182,17 @@ static char *csLockPath(const char *path){
   return sqlite3_mprintf("%.*s.%s-lock", nDir, path, zBase);
 }
 
-/* Delete the graph-lock sidecar a store at zPath would hold. A replaced
-** temporary store leaves its sidecar behind: the store name is gone, so
-** nothing would ever remove it (doltlite#3961). Builds the sidecar name on
-** the stack so a backup does not add heap allocations that would shift the
-** malloc-failure sequence the OOM tests inject around this path, and
-** returns the delete's result so a failure surfaces in the caller's rc. */
+/* Keep the path on the stack so backup fault injection still reaches the
+** delete operation at the same allocation. */
 int csLockSidecarDelete(sqlite3_vfs *pVfs, const char *zPath){
   int nPath = (int)strlen(zPath);
   const char *zBase = strrchr(zPath, '/');
   int nDir = zBase ? (int)(zBase - zPath) + 1 : 0;
-  char zLock[nDir + (nPath - nDir) + sizeof(".-lock") + 1];
+#ifdef _MSC_VER
+  char *zLock = (char*)_alloca(nPath + sizeof(".-lock"));
+#else
+  char zLock[nPath + sizeof(".-lock")];
+#endif
   int rc;
 
   if( nPath - nDir <= 0 ) return SQLITE_OK;
