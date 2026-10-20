@@ -6741,6 +6741,44 @@ static void run_revert_conflict_is_not_a_merge(void){
   removeDbFiles(dbpath);
 }
 
+/* A command's staged view of the published refs lasts only until it ends.
+** One that ended with nothing new to write left it set, so the next command
+** read a refs blob a peer's commit and gc could already have swept. */
+static void run_command_end_clears_staged_view(void){
+  static const char *azOp[] = {
+    "SELECT dolt_reset()", "SELECT dolt_reset('--hard')",
+    "SELECT dolt_reset('--soft')", "SELECT dolt_add('.')",
+    "SELECT dolt_tag('tg')", "SELECT dolt_commit('-am','c')",
+  };
+  char dbpath[256];
+  char zCheck[128];
+  int op, dirty;
+
+  printf("=== Command End Clears Staged View Test ===\n\n");
+  make_dbpath(dbpath, sizeof(dbpath), "test_command_end_clears_staged_view");
+  for(dirty=0; dirty<2; dirty++){
+    for(op=0; op<(int)(sizeof(azOp)/sizeof(azOp[0])); op++){
+      sqlite3 *db = 0;
+      ChunkStore *cs;
+      removeDbFiles(dbpath);
+      check("staged_view_open", open_db(dbpath, &db)==SQLITE_OK);
+      if( !db ) continue;
+      check("staged_view_seed", execSql(db,
+        "CREATE TABLE w(id INTEGER PRIMARY KEY, v TEXT);"
+        "INSERT INTO w VALUES(1,'a');"
+        "SELECT dolt_commit('-Am','base');")==SQLITE_OK);
+      if( dirty ) execSql(db, "UPDATE w SET v='d' WHERE id=1");
+      execSqlSilent(db, azOp[op]);
+      cs = doltliteGetChunkStore(db);
+      sqlite3_snprintf(sizeof(zCheck), zCheck,
+                       "staged_view_cleared_%d_%d", dirty, op);
+      check(zCheck, cs && !cs->bPublishDeferred);
+      sqlite3_close(db);
+    }
+  }
+  removeDbFiles(dbpath);
+}
+
 static void run_cherry_pick_seal_fail_keeps_advanced_tip(void){
   sqlite3 *db = 0;
   ChunkStore *cs;
@@ -18646,6 +18684,7 @@ static const RegressionCase aCases[] = {
   { "cherry_pick_conflict_ours_commits_single_parent", "Cherry-pick Conflict Ours Commits Single Parent Test", run_cherry_pick_conflict_ours_commits_single_parent },
   { "revert_conflict_is_not_a_merge", "Revert Conflict Is Not A Merge Test", run_revert_conflict_is_not_a_merge },
   { "cherry_pick_seal_fail_keeps_advanced_tip", "Cherry-pick Seal Failure Leaves Tip and Session Together Test", run_cherry_pick_seal_fail_keeps_advanced_tip },
+  { "command_end_clears_staged_view", "Command End Clears Staged View Test", run_command_end_clears_staged_view },
   { "failed_cherry_pick_reopen_preserves_conflict_state", "Failed Cherry-pick Reopen Preserves Conflict State Test", run_failed_cherry_pick_reopen_preserves_conflict_state },
   { "branches_metadata_corruption", "Branches Metadata Corruption Test", run_branches_metadata_corruption },
   { "gc_rewrite_failure", "GC Rewrite Failure Test", run_gc_rewrite_failure },

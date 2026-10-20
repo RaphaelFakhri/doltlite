@@ -1285,6 +1285,7 @@ int doltliteBtreeBeginCommandTxn(Btree *p){
   p->bCommandWritesRows = 0;
   p->nCommandBranchInstall = p->nBranchInstall;
   p->pBt->store.bDeferPublish = 1;
+  p->pBt->store.bPublishDeferred = 0;
   return SQLITE_OK;
 }
 
@@ -1331,6 +1332,9 @@ int doltliteBtreeEndCommandTxn(Btree *p, int bFailed, int bPublished){
   pBt = p->pBt;
   pBt->store.bDeferPublish = 0;
   bStaged = pBt->store.bPublishDeferred;
+  /* Past this point reads of the published refs must see disk again; a
+  ** staged view left set would outlive the chunks it names. */
+  pBt->store.bPublishDeferred = 0;
   db = p->db;
   bHooks = p->bCommandWritesRows && db;
   if( bFailed ){

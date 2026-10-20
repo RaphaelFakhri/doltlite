@@ -784,6 +784,7 @@ static int csCommitWithBusyHandler(
    && !cs->bRefsStale
    && prollyHashCompare(&cs->refs.refsHash,
                         &cs->refs.committedRefsHash)==0 ){
+    cs->bPublishDeferred = 0;
     rc = SQLITE_OK;
   }else{
     rc = csCommitToFile(cs, xBusy, pBusyArg, retryBusy);
