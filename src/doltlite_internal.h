@@ -1940,7 +1940,6 @@ int doltliteMergeInstallStepFails(void);
 int doltliteCommitInternalTxn(sqlite3 *db);
 int doltliteMergeAutocommitTxnBegin(sqlite3 *db, int *pbBegan);
 int doltliteMergeAutocommitTxnEnd(sqlite3 *db, int bBegan, int rc);
-void doltliteTestSetRebaseBeforeAdvanceHook(void (*xHook)(void));
 
 const char *doltliteGetAuthorName(sqlite3 *db);
 int doltliteSetAuthorName(sqlite3 *db, const char *zName);

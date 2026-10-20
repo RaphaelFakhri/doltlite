@@ -1425,22 +1425,11 @@ static int rebasePauseLinearConflict(
   return SQLITE_OK;
 }
 
-static void (*rebaseBeforeAdvanceHook)(void) = 0;
-
-void doltliteTestSetRebaseBeforeAdvanceHook(void (*xHook)(void)){
-  rebaseBeforeAdvanceHook = xHook;
-}
-
 /* Refresh now at lockDepth==1. A post-CreateAndStoreCommit ForceRefresh
 ** would drop the pending commit; CompareAndAdvance's reentrant refresh is
 ** a no-op. */
 static int rebaseRefreshWorkingRefs(sqlite3 *db){
   ChunkStore *cs = doltliteGetChunkStore(db);
-  if( rebaseBeforeAdvanceHook ){
-    void (*xHook)(void) = rebaseBeforeAdvanceHook;
-    rebaseBeforeAdvanceHook = 0;
-    xHook();
-  }
   if( !cs ) return SQLITE_ERROR;
   return chunkStoreForceRefresh(cs);
 }
@@ -3001,7 +2990,10 @@ static void doltliteRebasePausedContinue(
     sqlite3_free(zWorking);
     if( arc!=SQLITE_OK ){
       rebaseResultRecoveryFailure(context, arc);
-    }else if( rc==SQLITE_CONSTRAINT ){
+      return;
+    }
+    doltliteCommandKeepEffects(db);
+    if( rc==SQLITE_CONSTRAINT ){
       doltliteVcResultErrorCode(context, db,
           "data conflicts from rebase — rebase has been aborted", rc);
     }else{
@@ -3197,6 +3189,7 @@ static void doltliteRebaseInteractiveAbort(
   if( origMissing ){
     char *zErr = sqlite3_mprintf(
         "branch not found: %s; interactive rebase aborted", zOrigBranch);
+    doltliteCommandKeepEffects(db);
     if( zErr ) sqlite3_result_error(context, zErr, -1);
     else sqlite3_result_error_nomem(context);
     sqlite3_free(zErr);
@@ -3596,7 +3589,8 @@ abort_err_conflict:
   sqlite3_free(zReplayErr);
   recoveryRc = rebaseAbortConflictedContinue(
       db, zOrigBranch, zReturnBranch, zWorking);
-  if( doltliteVcTxnMode(db)==DOLTLITE_VC_TXN_AUTOCOMMIT_LIKE ){
+  if( !db->autoCommit
+   && doltliteVcTxnMode(db)==DOLTLITE_VC_TXN_AUTOCOMMIT_LIKE ){
     (void)sqlite3_exec(db, "COMMIT", 0, 0, 0);
   }
   sqlite3_free(zOrigBranch);
@@ -3605,6 +3599,7 @@ abort_err_conflict:
   if( recoveryRc!=SQLITE_OK ){
     rebaseResultRecoveryFailure(context, recoveryRc);
   }else{
+    doltliteCommandKeepEffects(db);
     doltliteVcResultErrorCode(context, db,
       "data conflicts from rebase — rebase has been aborted", rc);
   }
@@ -3671,7 +3666,10 @@ abort_err:
   if( recoveryRc!=SQLITE_OK ){
     sqlite3_free(zReplayErr);
     rebaseResultRecoveryFailure(context, recoveryRc);
-  }else if( zReplayErr ){
+    return;
+  }
+  doltliteCommandKeepEffects(db);
+  if( zReplayErr ){
     char *zMsg = sqlite3_mprintf(
       "rebase failed — %s — branch restored to pre-rebase state", zReplayErr);
     sqlite3_free(zReplayErr);
