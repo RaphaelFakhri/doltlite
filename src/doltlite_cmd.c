@@ -90,11 +90,15 @@ void doltliteVcCommandInstalled(sqlite3 *db){
   }
 }
 
+#define DOLTLITE_CMD_UNSCOPED 0
+#define DOLTLITE_CMD_SCOPED   1
+#define DOLTLITE_CMD_NOWAIT   2
+
 static void doltliteRunCommand(
   sqlite3_context *ctx,
   int argc,
   sqlite3_value **argv,
-  int bScoped
+  int eScope
 ){
   sqlite3 *db = sqlite3_context_db_handle(ctx);
   Vdbe *pOuter = db->pVcCommand;
@@ -105,9 +109,9 @@ static void doltliteRunCommand(
   ** it joins the caller's. A command that cannot begin one (read-only,
   ** busy, a peer-deleted branch) runs as before and reports its own
   ** refusal. */
-  if( bScoped && !pOuter && db->autoCommit && !db->pSavepoint
-   && doltliteGetChunkStore(db) && !doltliteIsDetached(db) ){
-    int rc = doltliteBtreeBeginCommandTxn(pMain);
+  if( eScope!=DOLTLITE_CMD_UNSCOPED && !pOuter && db->autoCommit
+   && !db->pSavepoint && doltliteGetChunkStore(db) && !doltliteIsDetached(db) ){
+    int rc = doltliteBtreeBeginCommandTxn(pMain, eScope==DOLTLITE_CMD_SCOPED);
     bScope = rc==SQLITE_OK;
     /* A refresh that failed partway leaves no snapshot to run on. */
     if( rc!=SQLITE_OK && rc!=SQLITE_DONE
@@ -145,7 +149,15 @@ static void doltliteCommandFunc(
   int argc,
   sqlite3_value **argv
 ){
-  doltliteRunCommand(ctx, argc, argv, 1);
+  doltliteRunCommand(ctx, argc, argv, DOLTLITE_CMD_SCOPED);
+}
+
+static void doltliteNoWaitCommandFunc(
+  sqlite3_context *ctx,
+  int argc,
+  sqlite3_value **argv
+){
+  doltliteRunCommand(ctx, argc, argv, DOLTLITE_CMD_NOWAIT);
 }
 
 static void doltliteUnscopedCommandFunc(
@@ -153,23 +165,34 @@ static void doltliteUnscopedCommandFunc(
   int argc,
   sqlite3_value **argv
 ){
-  doltliteRunCommand(ctx, argc, argv, 0);
+  doltliteRunCommand(ctx, argc, argv, DOLTLITE_CMD_UNSCOPED);
 }
 
-/* Commands that switch the session's branch, move data over the network
-** without holding the local lock, or need the lock free (gc) manage their
-** own transactions. */
-static int doltliteCommandIsUnscoped(const char *zName){
-  static const char *azUnscoped[] = {
-    "dolt_checkout", "dolt_connect_branch", "dolt_config", "dolt_creds",
-    "dolt_creds_new", "dolt_gc", "dolt_remote", "dolt_push", "dolt_fetch",
-    "dolt_pull", "dolt_clone", "dolt_rebase",
-  };
+static int doltliteNameIn(const char *zName, const char *const *azList, int n){
   int i;
-  for(i=0; i<ArraySize(azUnscoped); i++){
-    if( sqlite3_stricmp(zName, azUnscoped[i])==0 ) return 1;
+  for(i=0; i<n; i++){
+    if( sqlite3_stricmp(zName, azList[i])==0 ) return 1;
   }
   return 0;
+}
+
+/* Commands that move data over the network without holding the local lock,
+** or need the lock free (gc), manage their own transactions. dolt_clean and
+** dolt_reset may change nothing, and such a call must not wait on a peer. */
+static int doltliteCommandScope(const char *zName){
+  static const char *const azUnscoped[] = {
+    "dolt_connect_branch", "dolt_config", "dolt_creds", "dolt_creds_new",
+    "dolt_gc", "dolt_remote", "dolt_push", "dolt_fetch", "dolt_pull",
+    "dolt_clone", "dolt_rebase",
+  };
+  static const char *const azNoWait[] = { "dolt_clean", "dolt_reset" };
+  if( doltliteNameIn(zName, azUnscoped, ArraySize(azUnscoped)) ){
+    return DOLTLITE_CMD_UNSCOPED;
+  }
+  if( doltliteNameIn(zName, azNoWait, ArraySize(azNoWait)) ){
+    return DOLTLITE_CMD_NOWAIT;
+  }
+  return DOLTLITE_CMD_SCOPED;
 }
 
 int doltliteCreateCommandFunc(
@@ -178,10 +201,12 @@ int doltliteCreateCommandFunc(
   int nArg,
   void (*xFunc)(sqlite3_context*,int,sqlite3_value**)
 ){
+  int eScope = doltliteCommandScope(zName);
   return sqlite3_create_function(db, zName, nArg,
       DOLTLITE_COMMAND_FUNC_FLAGS, (void*)xFunc,
-      doltliteCommandIsUnscoped(zName) ? doltliteUnscopedCommandFunc
-                                       : doltliteCommandFunc, 0, 0);
+      eScope==DOLTLITE_CMD_UNSCOPED ? doltliteUnscopedCommandFunc
+      : eScope==DOLTLITE_CMD_NOWAIT ? doltliteNoWaitCommandFunc
+      : doltliteCommandFunc, 0, 0);
 }
 
 /* Every method of a version-control virtual table runs internal SQL on the

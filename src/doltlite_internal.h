@@ -42,7 +42,7 @@ struct DoltliteAuthShield {
 void doltliteAuthShieldEnter(sqlite3 *db, DoltliteAuthShield *p);
 void doltliteAuthShieldLeave(DoltliteAuthShield *p);
 void doltliteVcCommandInstalled(sqlite3*);
-int doltliteBtreeBeginCommandTxn(Btree*);
+int doltliteBtreeBeginCommandTxn(Btree*, int bWait);
 int doltliteBtreeEndCommandTxn(Btree*, int bFailed, int bPublished);
 int doltliteCreateCommandFunc(
   sqlite3 *db,
