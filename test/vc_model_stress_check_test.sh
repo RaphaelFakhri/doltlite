@@ -97,8 +97,12 @@ for soft_branch in main b1; do
     $'X\t7\tmain\t3000\t9000\treset_hard_1\tm_victim' > "$d/log.0"
   printf 'X\t6\t%s\t4000\t4500\treset_soft_1\tm_top\n' "$soft_branch" > "$d/log.1"
   want=0
-  if [ "$soft_branch" = b1 ]; then want=1; fi
-  check "soft_reset_while_waiting_${soft_branch}" "$want" "$d" 2
+  name=soft_reset_while_waiting_excused
+  if [ "$soft_branch" = b1 ]; then
+    want=1
+    name=other_branch_reset_cannot_excuse_lost_write
+  fi
+  check "$name" "$want" "$d" 2
   if [ "$soft_branch" = main ]; then
     printf 'I\t100000013\tmain\t10000\t10100\n' >> "$d/log.0"
     check write_after_resets_lost 1 "$d" 2
