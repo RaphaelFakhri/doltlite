@@ -224,6 +224,76 @@ int doltliteRestoreTxnState(sqlite3 *db, DoltliteTxnState *p){
   return rcFirst;
 }
 
+/* Inside a command's write transaction, an SQL transaction the command's
+** own code opens is a savepoint of the command: rolling it back restores
+** the session as it stood when that transaction began and leaves the
+** command's transaction, and its lock, in place. The staged view of the
+** published refs is part of that state. */
+typedef struct DoltliteNestedTxn DoltliteNestedTxn;
+struct DoltliteNestedTxn {
+  DoltliteTxnState state;
+  u8 bPublishDeferred;
+  ProllyHash deferredRefsHash;
+};
+
+/* Saving flushes the catalog, whose own statements begin here again and can
+** fail and roll back; this stands in for the snapshot meanwhile, and a
+** rollback that consumes it leaves the half-saved state unusable. */
+static u8 nestedTxnCapturing;
+#define NESTED_TXN_CAPTURING ((void*)&nestedTxnCapturing)
+
+void doltliteNestedTxnCapture(sqlite3 *db){
+  DoltliteNestedTxn *p;
+  ChunkStore *cs;
+  int rc;
+  if( db->pVcNestedTxn ) return;
+  cs = doltliteGetChunkStore(db);
+  if( !cs ) return;
+  p = sqlite3_malloc(sizeof(*p));
+  if( !p ) return;
+  db->pVcNestedTxn = NESTED_TXN_CAPTURING;
+  p->bPublishDeferred = cs->bPublishDeferred;
+  p->deferredRefsHash = cs->deferredRefsHash;
+  rc = doltliteSaveTxnState(db, &p->state);
+  if( db->pVcNestedTxn!=NESTED_TXN_CAPTURING ){
+    if( rc==SQLITE_OK ) doltliteTxnStateClear(&p->state);
+    sqlite3_free(p);
+    return;
+  }
+  if( rc!=SQLITE_OK ){
+    db->pVcNestedTxn = 0;
+    sqlite3_free(p);
+    return;
+  }
+  db->pVcNestedTxn = p;
+}
+
+void doltliteNestedTxnDrop(sqlite3 *db){
+  DoltliteNestedTxn *p = (DoltliteNestedTxn*)db->pVcNestedTxn;
+  if( !p || p==NESTED_TXN_CAPTURING ) return;
+  db->pVcNestedTxn = 0;
+  doltliteTxnStateClear(&p->state);
+  sqlite3_free(p);
+}
+
+/* SQLITE_NOTFOUND when no nested transaction was captured. */
+int doltliteNestedTxnRestore(sqlite3 *db){
+  DoltliteNestedTxn *p = (DoltliteNestedTxn*)db->pVcNestedTxn;
+  ChunkStore *cs = doltliteGetChunkStore(db);
+  int rc;
+  if( !p ) return SQLITE_NOTFOUND;
+  db->pVcNestedTxn = 0;
+  if( p==NESTED_TXN_CAPTURING ) return SQLITE_NOTFOUND;
+  rc = doltliteRestoreTxnState(db, &p->state);
+  if( cs ){
+    cs->bPublishDeferred = p->bPublishDeferred;
+    cs->deferredRefsHash = p->deferredRefsHash;
+  }
+  doltliteTxnStateClear(&p->state);
+  sqlite3_free(p);
+  return rc;
+}
+
 int doltliteRestoreTxnStateOnFailure(
   sqlite3 *db,
   DoltliteTxnState *pSaved,

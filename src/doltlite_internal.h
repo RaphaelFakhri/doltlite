@@ -44,6 +44,7 @@ void doltliteAuthShieldLeave(DoltliteAuthShield *p);
 void doltliteVcCommandInstalled(sqlite3*);
 int doltliteBtreeBeginCommandTxn(Btree*, int bWait);
 int doltliteBtreeEndCommandTxn(Btree*, int bFailed, int bPublished);
+void doltliteCommandKeepEffects(sqlite3*);
 int doltliteCreateCommandFunc(
   sqlite3 *db,
   const char *zName,
