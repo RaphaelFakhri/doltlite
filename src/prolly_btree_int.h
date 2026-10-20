@@ -328,6 +328,10 @@ struct Btree {
   u8 bCommandWritesRows;
   u32 nBranchInstall;
   u32 nCommandBranchInstall;
+  /* The branch a command started on, kept when it first switches so a
+  ** failed command can return to it. */
+  u8 bCommandBranchSaved;
+  char *zCommandBranch;
   u8 bPreserveDeferFks;
   ProllyHash preserveDeferFkCatalog;
   Pgno mxPageCount;

@@ -1256,13 +1256,21 @@ int prollyBtreeCommitPhaseTwo(Btree *p, int bCleanup){
   }
   return commitPhaseTwoWrite(p, pBt);
 }
+static void commandForgetBranch(Btree *p){
+  sqlite3_free(p->zCommandBranch);
+  p->zCommandBranch = 0;
+  p->bCommandBranchSaved = 0;
+}
+
 /* Open the write transaction a VC command runs in. Its statements commit
 ** into it and its publishes stage, so the command reads one snapshot under
-** one lock and publishes once, when doltliteBtreeEndCommandTxn ends it. The
-** attempt does not wait: a command that turns out to change nothing must
-** not block on a peer's transaction, so a held lock leaves the command to
-** take it if it writes. */
-int doltliteBtreeBeginCommandTxn(Btree *p){
+** one lock and publishes once, when doltliteBtreeEndCommandTxn ends it.
+** Waiting for the lock happens here, before the command reads anything: a
+** command that waited later would hold a read lock the lock holder's
+** publish waits on. A command that may change nothing does not wait at
+** all, so it cannot block on a peer's transaction; if the lock is held it
+** takes it only when it writes. */
+int doltliteBtreeBeginCommandTxn(Btree *p, int bWait){
   BusyHandler saved;
   int rc;
   if( !p || p->pOps!=&prollyBtreeOps || p->bCommandTxn
@@ -1270,7 +1278,7 @@ int doltliteBtreeBeginCommandTxn(Btree *p){
     return SQLITE_DONE;
   }
   saved = p->db->busyHandler;
-  p->db->busyHandler.xBusyHandler = 0;
+  if( !bWait ) p->db->busyHandler.xBusyHandler = 0;
   rc = sqlite3BtreeBeginTrans(p, 1, 0);
   p->db->busyHandler = saved;
   if( rc!=SQLITE_OK ){
@@ -1284,6 +1292,7 @@ int doltliteBtreeBeginCommandTxn(Btree *p){
   p->bCommandTxn = 1;
   p->bCommandWritesRows = 0;
   p->nCommandBranchInstall = p->nBranchInstall;
+  commandForgetBranch(p);
   p->pBt->store.bDeferPublish = 1;
   p->pBt->store.bPublishDeferred = 0;
   return SQLITE_OK;
@@ -1301,6 +1310,15 @@ static int commandPublishStaged(BtShared *pBt){
 ** the snapshot it started from. */
 static void commandDiscard(Btree *p, BtShared *pBt){
   chunkStoreRollback(&pBt->store);
+  if( p->bCommandBranchSaved ){
+    sqlite3_free(p->zBranch);
+    p->zBranch = p->zCommandBranch;
+    p->zCommandBranch = 0;
+    p->bCommandBranchSaved = 0;
+    p->nBranchInstall++;
+    chunkStoreFollowWorkingSetBasis(&pBt->store,
+                                    p->zBranch ? p->zBranch : "main");
+  }
   if( p->inTrans==TRANS_WRITE ){
     btreeDiscardAllSavepoints(p);
     p->inTrans = TRANS_NONE;
@@ -1316,15 +1334,24 @@ static void commandDiscard(Btree *p, BtShared *pBt){
 
 /* What the command staged is what it means to publish, and nothing is
 ** durable before then: a failed command is discarded and has taken no
-** effect. A command that left the session invalidated or on another branch
-** has no session working set to write back. Only a command that writes rows
+** effect. A command that left the session invalidated, or on a branch that
+** no longer exists, has no session working set to write back. Only a command that writes rows
 ** is an SQL transaction to the hooks; one that only moves refs fires
 ** neither. */
+static int commandEnd(Btree *p, int bFailed, int bPublished);
+
 int doltliteBtreeEndCommandTxn(Btree *p, int bFailed, int bPublished){
+  int rc = commandEnd(p, bFailed, bPublished);
+  if( p ) commandForgetBranch(p);
+  return rc;
+}
+
+static int commandEnd(Btree *p, int bFailed, int bPublished){
   BtShared *pBt;
   sqlite3 *db;
   int bHooks;
   int bStaged;
+  int bSwitched;
   int rc;
   (void)bPublished;
   if( !p || !p->bCommandTxn ) return SQLITE_OK;
@@ -1351,8 +1378,8 @@ int doltliteBtreeEndCommandTxn(Btree *p, int bFailed, int bPublished){
     if( rc!=SQLITE_OK ) commandDiscard(p, pBt);
     return rc;
   }
+  bSwitched = p->nCommandBranchInstall!=p->nBranchInstall;
   if( p->bForceCatalogReload
-   || p->nCommandBranchInstall!=p->nBranchInstall
    || (!prollyHashIsEmpty(&p->headCommit) && !p->isDetached
        && pBt->store.refs.nBranches>0
        && chunkStoreFindBranch(&pBt->store,
@@ -1367,7 +1394,10 @@ int doltliteBtreeEndCommandTxn(Btree *p, int bFailed, int bPublished){
     if( db->xRollbackCallback ) db->xRollbackCallback(db->pRollbackArg);
     return SQLITE_CONSTRAINT_COMMITHOOK;
   }
-  if( !p->bCommandWritesRows ){
+  /* A command that switched branches (checkout, rebase) leaves the session
+  ** on the branch it switched to, with whatever its statements wrote there;
+  ** commit that onto the new branch. */
+  if( !p->bCommandWritesRows && !bSwitched ){
     rc = bStaged ? commandPublishStaged(pBt) : SQLITE_OK;
     if( rc!=SQLITE_OK ){
       commandDiscard(p, pBt);
