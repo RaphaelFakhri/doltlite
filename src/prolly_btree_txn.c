@@ -1258,15 +1258,28 @@ int prollyBtreeCommitPhaseTwo(Btree *p, int bCleanup){
 }
 /* Open the write transaction a VC command runs in. Its statements commit
 ** into it, so the command reads one snapshot under one lock and publishes
-** once, when doltliteBtreeEndCommandTxn ends it. */
+** once, when doltliteBtreeEndCommandTxn ends it. The attempt does not wait:
+** a command that turns out to change nothing must not block on a peer's
+** transaction, so a held lock leaves the command to take it if it writes. */
 int doltliteBtreeBeginCommandTxn(Btree *p){
+  BusyHandler saved;
   int rc;
   if( !p || p->pOps!=&prollyBtreeOps || p->bCommandTxn
-   || p->inTrans==TRANS_WRITE ){
+   || p->inTrans==TRANS_WRITE || !p->db ){
     return SQLITE_DONE;
   }
+  saved = p->db->busyHandler;
+  p->db->busyHandler.xBusyHandler = 0;
   rc = sqlite3BtreeBeginTrans(p, 1, 0);
-  if( rc!=SQLITE_OK ) return rc;
+  p->db->busyHandler = saved;
+  if( rc!=SQLITE_OK ){
+    /* A refresh that failed partway may have spent the change signal. */
+    if( (rc&0xff)!=SQLITE_BUSY && (rc&0xff)!=SQLITE_READONLY ){
+      p->iLoadedWorkingStateVersion = p->pBt->iWorkingStateVersion - 1;
+      p->bForceCatalogReload = 1;
+    }
+    return rc;
+  }
   p->bCommandTxn = 1;
   p->bCommandWritesRows = 0;
   p->nCommandBranchInstall = p->nBranchInstall;
@@ -1328,7 +1341,17 @@ int doltliteBtreeEndCommandTxn(Btree *p, int bFailed, int bPublished){
     return SQLITE_CONSTRAINT_COMMITHOOK;
   }
   rc = sqlite3BtreeCommit(p);
-  if( rc!=SQLITE_OK ) (void)sqlite3BtreeRollback(p, SQLITE_OK, 0);
+  if( rc!=SQLITE_OK ){
+    (void)sqlite3BtreeRollback(p, SQLITE_OK, 0);
+    /* The command's own publish is durable; failing now would report an
+    ** effect that already happened as an error. Reload what landed. */
+    if( bPublished ){
+      p->iLoadedWorkingStateVersion = pBt->iWorkingStateVersion - 1;
+      p->bForceCatalogReload = 1;
+      resetConnectionSchema(p);
+      rc = SQLITE_OK;
+    }
+  }
   return rc;
 }
 

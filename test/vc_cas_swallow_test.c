@@ -419,8 +419,9 @@ static void peerCommitDuringInstall(void *pArg){
   }
 }
 
-/* Merge install must not hold the graph lock across ALTER/ANALYZE: a peer
-** commit in that window succeeds, and the merge then returns BUSY. */
+/* The merge holds its write transaction across ALTER/ANALYZE: a peer
+** commit in that window is refused, the merge lands, and the peer's commit
+** lands on top of it once retried. */
 static void test_merge_install_unlock_window(void){
   char zPath[256];
   sqlite3 *db1, *db2 = 0;
@@ -441,9 +442,12 @@ static void test_merge_install_unlock_window(void){
   doltliteTestSetMergeInstallHook(peerCommitDuringInstall, &peer);
   rc = execQuiet(db1, "SELECT dolt_merge('--no-ff','feat')", &zErr);
   doltliteTestSetMergeInstallHook(0, 0);
-  check("lock: peer commit not blocked", peer.rc==SQLITE_OK);
-  check("lock: merge yields BUSY, not a clobber",
-        rc!=SQLITE_OK && zErr && strstr(zErr, "another connection")!=0);
+  check("lock: peer commit refused", (peer.rc&0xff)==SQLITE_BUSY);
+  check("lock: merge lands", rc==SQLITE_OK);
+  sqlite3_busy_timeout(db2, 5000);
+  check("lock: peer commit after", exec(db2,
+    "INSERT INTO t(id,v) VALUES(99,'peer'); SELECT dolt_commit('-Am','peer')")
+    ==SQLITE_OK);
   zHead = queryText(db2, "SELECT dolt_hashof('HEAD')");
   zPeer = queryText(db2, "SELECT commit_hash FROM dolt_log WHERE message='peer'");
   check("lock: HEAD is the peer commit",
@@ -460,9 +464,9 @@ static void peerWriteDuringInstall(void *pArg){
   p->rc = sqlite3_exec(p->db, "INSERT INTO t(id,v) VALUES(99,'peer')", 0, 0, 0);
 }
 
-/* A peer's uncommitted write in the install window makes the merge's reindex
-** fail. The merge must then reload the branch, not restore its pre-merge
-** session, or the session's next write erases the peer's row. */
+/* A peer's write in the install window is refused while the merge holds
+** its transaction; once the merge lands the peer's write does too, and the
+** merging session's next write must not erase it. */
 static void test_merge_install_peer_write_kept(void){
   char zPath[256];
   sqlite3 *db1, *db2 = 0;
@@ -494,9 +498,11 @@ static void test_merge_install_peer_write_kept(void){
   doltliteTestSetMergeInstallHook(peerWriteDuringInstall, &peer);
   rc = execQuiet(db1, "SELECT dolt_merge('--no-ff','feat')", &zErr);
   doltliteTestSetMergeInstallHook(0, 0);
-  check("peerws: peer write acknowledged", peer.rc==SQLITE_OK);
-  check("peerws: merge yields BUSY",
-        rc!=SQLITE_OK && zErr && strstr(zErr, "another connection")!=0);
+  check("peerws: peer write refused", (peer.rc&0xff)==SQLITE_BUSY);
+  check("peerws: merge lands", rc==SQLITE_OK);
+  sqlite3_busy_timeout(db2, 5000);
+  check("peerws: peer write acknowledged", exec(db2,
+    "INSERT INTO t(id,v) VALUES(99,'peer')")==SQLITE_OK);
   check("peerws: follow-up write", exec(db1,
     "INSERT INTO t(id,v) VALUES(50,'after')")==SQLITE_OK);
   check("peerws: peer row kept",
@@ -570,11 +576,18 @@ static void test_failed_merge_restore_after_peer_refresh(void){
       doltliteTestSetMergeInstallHook(refreshPeerDuringInstall, &probe);
       rc = execQuiet(db, "SELECT dolt_merge('--no-ff','feat')", &zErr);
       doltliteTestSetMergeInstallHook(0, 0);
-      check("restore refresh: peer acknowledged", probe.peerRc==SQLITE_OK);
-      check("restore refresh: nested read adopted peer",
-            probe.readRc==SQLITE_OK && probe.nPeer==1 && probe.refsMoved);
-      check("restore refresh: busy", rc==SQLITE_BUSY);
-      check("restore refresh: release peer", exec(peer, "ROLLBACK")==SQLITE_OK);
+      /* The merge holds its transaction through install: the peer is
+      ** refused there, the nested read sees only the merge's own snapshot,
+      ** and the peer's write lands after the merge. */
+      check("restore refresh: peer refused", (probe.peerRc&0xff)==SQLITE_BUSY);
+      check("restore refresh: nested read kept snapshot",
+            probe.readRc==SQLITE_OK && probe.nPeer==0 && !probe.refsMoved);
+      check("restore refresh: merge lands", rc==SQLITE_OK);
+      sqlite3_busy_timeout(peer, 5000);
+      check("restore refresh: peer acknowledged",
+            exec(peer, "INSERT INTO t VALUES(99,'peer')")==SQLITE_OK
+            && (!commitPeer
+                || exec(peer, "SELECT dolt_commit('-am','peer')")==SQLITE_OK));
       if( action==0 ){
         check("restore refresh: next read sees peer",
               queryInt(db, "SELECT count(*) FROM t WHERE id=99", &n)==SQLITE_OK
@@ -595,7 +608,7 @@ static void test_failed_merge_restore_after_peer_refresh(void){
       zRows = queryText(db,
           "SELECT group_concat(id) FROM (SELECT id FROM t ORDER BY id)");
       check("restore refresh: acknowledged rows kept",
-            zRows && strcmp(zRows, "1,3,4,99")==0);
+            zRows && strcmp(zRows, "1,2,3,4,99")==0);
       zIntegrity = queryText(db, "PRAGMA integrity_check");
       check("restore refresh: integrity", zIntegrity && strcmp(zIntegrity, "ok")==0);
       if( commitPeer ){

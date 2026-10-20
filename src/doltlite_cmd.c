@@ -107,7 +107,15 @@ static void doltliteRunCommand(
   ** refusal. */
   if( bScoped && !pOuter && db->autoCommit && !db->pSavepoint
    && doltliteGetChunkStore(db) && !doltliteIsDetached(db) ){
-    bScope = doltliteBtreeBeginCommandTxn(pMain)==SQLITE_OK;
+    int rc = doltliteBtreeBeginCommandTxn(pMain);
+    bScope = rc==SQLITE_OK;
+    /* A refresh that failed partway leaves no snapshot to run on. */
+    if( rc!=SQLITE_OK && rc!=SQLITE_DONE
+     && (rc&0xff)!=SQLITE_BUSY && (rc&0xff)!=SQLITE_READONLY ){
+      sqlite3_result_error_code(ctx, rc);
+      db->pVcCommand = pOuter;
+      return;
+    }
   }
   doltliteInvokeShieldedFunc(ctx, argc, argv, pOuter==0);
   if( bScope ){
