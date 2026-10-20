@@ -90,13 +90,15 @@ For a DoltLite-format main database, the concurrency contract is:
 - **`dolt_clean` and `dolt_reset` do not wait to start.** Either may change
   nothing, and such a call must not block on a peer. If a peer holds the lock
   when one begins, it does not wait for it: a call that changes nothing
-  completes without blocking, and one that does write waits for the lock
-  under the busy handler and re-checks HEAD and the working set before it
-  publishes. A peer commit in between yields `SQLITE_BUSY` instead of a lost
-  update. `dolt_gc` and the remote commands always work this way: `dolt_gc`
-  needs the lock free, and the remote commands must not hold the local lock
-  during a transfer. Pull also uses operation-specific locked branch
-  expectations.
+  completes without blocking, and one that does write starts over as a
+  write transaction that waits for the lock under the busy handler, like
+  any other command. A command whose wait times out reports `SQLITE_BUSY`.
+- **`dolt_gc` and the remote commands run outside a command transaction.**
+  `dolt_gc` needs the lock free, and the remote commands must not hold the
+  local lock during a transfer. They take the lock to publish and re-check
+  HEAD and the working set before they do, so a peer commit in between
+  yields `SQLITE_BUSY` instead of a lost update. Pull also uses
+  operation-specific locked branch expectations.
 - **A working set is never replaced unread.** Publishing a branch's working
   set is refused with `SQLITE_BUSY_SNAPSHOT` unless the working set it
   replaces is the one this connection last read or wrote. A peer's write
