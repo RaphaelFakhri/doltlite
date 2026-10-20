@@ -943,7 +943,7 @@ static int checkoutTablesInTxn(
   int bDropIfAbsent
 ){
   ChunkStore *cs = doltliteGetChunkStore(db);
-  ProllyHash workingHash, headCatHash, stagedHash, cleanWs;
+  ProllyHash workingHash, headCatHash, stagedHash;
   ProllyHash sourceCatHash;
   ProllyHash newWorkingHash;
   CheckoutSchemaInfo *aSchema = 0;
@@ -966,7 +966,6 @@ static int checkoutTablesInTxn(
   /* The dispatcher's refresh consumed the store-changed signal. */
   if( rc==SQLITE_BUSY_SNAPSHOT ) doltliteInvalidateSessionWorkingState(db);
   if( rc!=SQLITE_OK ) return rc;
-  doltliteGetSessionWorkingSetBasis(db, &cleanWs);
 
   if( zSourceRef ){
     ProllyHash sourceCommit;
@@ -1245,7 +1244,7 @@ static int checkoutTablesInTxn(
           rc = doltliteStageNamedTables(db, context, cs, &newWorkingHash,
                                         nNames, argv+iFirstName, 0, bDropIfAbsent);
         }
-        if( rc==SQLITE_OK ) rc = doltlitePersistWorkingSetConfirmed(db, &cleanWs);
+        if( rc==SQLITE_OK ) rc = doltlitePersistWorkingSet(db);
         if( rc!=SQLITE_OK ){
           rc = doltliteRestoreTxnStateOnFailure(db, &savedState, rc);
         }else{

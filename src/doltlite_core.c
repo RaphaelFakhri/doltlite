@@ -144,7 +144,6 @@ int doltliteSaveTxnState(sqlite3 *db, DoltliteTxnState *p){
   doltliteGetSessionConstraintViolationsCatalog(
       db, &p->sessionConstraintViolationsCatalog);
   chunkStorePeekWorkingSetBasis(cs, p->zSessionBranch, &p->wsBasis);
-  p->nWsForeignAdopt = cs->nWsForeignAdopt;
 
   rc = doltliteFlushCatalogToHash(db, &p->sessionCatalogHash);
   if( rc!=SQLITE_OK ){
@@ -1130,68 +1129,6 @@ int doltliteConfirmWorkingSet(
   }
   if( rc!=SQLITE_OK ) doltliteInvalidateSessionWorkingState(db);
   return rc;
-}
-
-/* Persist a working set computed from pExpected; in autocommit, refuse with
-** SQLITE_BUSY rather than erase a peer write that landed since. */
-int doltlitePersistWorkingSetConfirmed(
-  sqlite3 *db,
-  const ProllyHash *pExpected
-){
-  ChunkStore *cs = doltliteGetChunkStore(db);
-  ProllyHash head;
-  int rc;
-  if( !cs || !db->autoCommit ) return doltlitePersistWorkingSet(db);
-  doltliteGetSessionHead(db, &head);
-  rc = doltliteRefreshAndConfirmHead(db, cs, &head);
-  if( rc!=SQLITE_OK ) return rc;
-  rc = doltliteConfirmWorkingSet(db, cs, pExpected);
-  if( rc==SQLITE_OK ) rc = doltlitePersistWorkingSet(db);
-  chunkStoreUnlock(cs);
-  return rc;
-}
-
-/* Take the graph lock to write back a restored pre-command working set.
-** *pbPeerWrote is set, and the lock not held, when a peer published a working
-** set since the state was saved: that write is on disk and the restore would
-** erase it, so the session reloads it instead. *pbLocked says whether the
-** caller must unlock. */
-int doltliteLockForRestore(
-  sqlite3 *db,
-  const ProllyHash *pHead,
-  const ProllyHash *pWsBasis,
-  u32 nWsForeignAdopt,
-  int *pbLocked,
-  int *pbPeerWrote
-){
-  ChunkStore *cs = doltliteGetChunkStore(db);
-  int rc;
-  *pbLocked = 0;
-  *pbPeerWrote = 0;
-  if( !cs || !db->autoCommit || !chunkStoreHasPeers(cs) ) return SQLITE_OK;
-  rc = doltliteRefreshAndConfirmHead(db, cs, pHead);
-  if( rc==SQLITE_BUSY ){
-    *pbPeerWrote = 1;
-    return SQLITE_OK;
-  }
-  if( rc!=SQLITE_OK ) return rc;
-  rc = doltliteBranchWorkingSetUnmoved(
-      cs, doltliteGetSessionBranch(db), pWsBasis);
-  if( rc==SQLITE_OK && cs->nWsForeignAdopt!=nWsForeignAdopt ){
-    rc = SQLITE_BUSY;
-  }
-  if( rc==SQLITE_BUSY ){
-    chunkStoreUnlock(cs);
-    doltliteInvalidateSessionWorkingState(db);
-    *pbPeerWrote = 1;
-    return SQLITE_OK;
-  }
-  if( rc!=SQLITE_OK ){
-    chunkStoreUnlock(cs);
-    return rc;
-  }
-  *pbLocked = 1;
-  return SQLITE_OK;
 }
 
 static int doltliteCompareAndAdvanceBranchImpl(
