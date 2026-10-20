@@ -65,6 +65,19 @@ jobs:
       shell: msys2 {0}
       run: tar -xzf checked-build-windows.tar.gz
 
+    - name: Compile release amalgamation with MSVC
+      if: matrix.platform == 'windows'
+      shell: pwsh
+      run: |
+        $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        $installation = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+        if (!$installation) { throw "MSVC installation not found" }
+        $devCmd = Join-Path $installation 'Common7\Tools\VsDevCmd.bat'
+        $command = "call `"$devCmd`" -arch=x64 && cl /nologo /std:c11 /c /O1 /DDOLTLITE_PROLLY=1 /DSQLITE_THREADSAFE=1 /Dstrncasecmp=_strnicmp build\sqlite3.c /Fobuild\sqlite3-msvc.obj"
+        & $env:COMSPEC /d /s /c $command
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      timeout-minutes: 5
+
     - name: Suite completion guard self-test
       if: matrix.platform != 'windows'
       run: bash test/run_guarded_suite_test.sh
