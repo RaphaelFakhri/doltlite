@@ -80,6 +80,44 @@ for swapped in 0 1; do
   done
 done
 
+for soft_branch in main b1; do
+  d=$(newdir "soft_reset_while_waiting_${soft_branch}")
+  if [ "$soft_branch" = main ]; then
+    "$DOLTLITE" "$d/db.db" "INSERT INTO w VALUES(100000012,'acked'); SELECT dolt_commit('-Am','m_victim');" >/dev/null
+  fi
+  "$DOLTLITE" "$d/db.db" "SELECT dolt_commit('--allow-empty','-m','m_top');" >/dev/null
+  if [ "$soft_branch" = main ]; then
+    "$DOLTLITE" "$d/db.db" "SELECT dolt_reset('--soft','HEAD~1'); SELECT dolt_reset('--hard','HEAD~1');" >/dev/null
+  fi
+  printf '%s\n' \
+    $'I\t100000012\tmain\t1000\t1100' \
+    $'C\tm_victim\tmain\t2000\t2100\t1' \
+    $'C\tm_top\tmain\t2500\t2600\t1' \
+    $'S\t3000\t6000\tc0\tBEGIN IMMEDIATE' \
+    $'X\t7\tmain\t3000\t9000\treset_hard_1\tm_victim' > "$d/log.0"
+  printf 'X\t6\t%s\t4000\t4500\treset_soft_1\tm_top\n' "$soft_branch" > "$d/log.1"
+  want=0
+  name=soft_reset_while_waiting_excused
+  if [ "$soft_branch" = b1 ]; then
+    want=1
+    name=other_branch_reset_cannot_excuse_lost_write
+  fi
+  check "$name" "$want" "$d" 2
+  if [ "$soft_branch" = main ]; then
+    printf 'I\t100000013\tmain\t10000\t10100\n' >> "$d/log.0"
+    check write_after_resets_lost 1 "$d" 2
+  fi
+done
+
+d=$(newdir commit_during_lock_wait)
+"$DOLTLITE" "$d/db.db" "SELECT dolt_commit('--allow-empty','-m','m_protected');" >/dev/null
+printf '%s\n' \
+  $'I\t100000012\tmain\t1000\t1100' \
+  $'C\tm_protected\tmain\t4000\t4500\t1' \
+  $'S\t3000\t6000\tc0\tBEGIN IMMEDIATE' \
+  $'X\t7\tmain\t3000\t9000\treset_hard_1\tm_other' > "$d/log.0"
+check commit_during_lock_wait_protects_row 1 "$d"
+
 if [ "$fails" -ne 0 ]; then
   echo "vc_model_stress_check: $fails failed"
   exit 1
