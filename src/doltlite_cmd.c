@@ -968,21 +968,9 @@ static int cmdFinishPlainAfterReport(
   return SQLITE_OK;
 }
 
-static int cmdPersistRestored(
-  sqlite3 *db,
-  const ProllyHash *pCatalog,
-  const ProllyHash *pHead,
-  const ProllyHash *pWsBasis,
-  u32 nWsForeignAdopt
-){
-  int bLocked, bPeerWrote;
-  int rc = doltliteLockForRestore(db, pHead, pWsBasis, nWsForeignAdopt,
-                                  &bLocked, &bPeerWrote);
-  if( rc==SQLITE_OK && !bPeerWrote ){
-    rc = doltlitePersistWorkingSetWithHash(db, pCatalog);
-    if( rc==SQLITE_OK ) doltliteAdoptRollbackBaseline(db, pCatalog);
-  }
-  if( bLocked ) chunkStoreUnlock(doltliteGetChunkStore(db));
+static int cmdPersistRestored(sqlite3 *db, const ProllyHash *pCatalog){
+  int rc = doltlitePersistWorkingSetWithHash(db, pCatalog);
+  if( rc==SQLITE_OK ) doltliteAdoptRollbackBaseline(db, pCatalog);
   return rc;
 }
 
@@ -993,8 +981,6 @@ static int cmdRollbackAutocommitConflict(
 ){
   int rc;
   int hadTopLevelSavepoint = db->pSavepoint!=0 && db->nSavepoint==0;
-  ProllyHash wsBasis = pSaved->wsBasis;
-  u32 nWsForeignAdopt = pSaved->nWsForeignAdopt;
   sqlite3RollbackAll(db, SQLITE_OK);
   rc = doltliteRestoreTxnState(db, pSaved);
   /* Restore merge markers even if the catalog restore failed; pSaved is
@@ -1010,8 +996,7 @@ static int cmdRollbackAutocommitConflict(
     if( rc==SQLITE_OK ) rc = rc2;
   }
   if( rc==SQLITE_OK ){
-    rc = cmdPersistRestored(db, &pSaved->sessionCatalogHash,
-                            &pSaved->sessionHead, &wsBasis, nWsForeignAdopt);
+    rc = cmdPersistRestored(db, &pSaved->sessionCatalogHash);
   }
   doltliteTxnStateClear(pSaved);
   if( rc==SQLITE_OK && hadTopLevelSavepoint ){
@@ -1032,24 +1017,9 @@ static int cmdRollbackAutocommitToSaved(
   sqlite3 *db,
   DoltliteTxnState *pSaved
 ){
-  int bLocked = 0, bPeerWrote = 0;
-  int rc = doltliteLockForRestore(db, &pSaved->sessionHead, &pSaved->wsBasis,
-                                  pSaved->nWsForeignAdopt,
-                                  &bLocked, &bPeerWrote);
-  /* A peer's write is kept by restoring in memory only; the saved refs also
-  ** drop the local working-set ref a later refresh would otherwise keep over
-  ** the peer's. */
-  if( rc==SQLITE_OK && bPeerWrote ){
-    rc = doltliteRestoreTxnState(db, pSaved);
-    doltliteInvalidateSessionWorkingState(db);
-    doltliteTxnStateClear(pSaved);
-    return rc;
-  }
   /* One durable write: persisting the catalog before the merge and
   ** violation state are restored would leave them paired on a crash. */
-  if( rc==SQLITE_OK ){
-    rc = doltliteApplyHardReset(db, &pSaved->sessionCatalogHash);
-  }
+  int rc = doltliteApplyHardReset(db, &pSaved->sessionCatalogHash);
   if( rc==SQLITE_OK ){
     rc = doltliteSetSessionBranch(db, pSaved->zSessionBranch);
   }
@@ -1070,7 +1040,6 @@ static int cmdRollbackAutocommitToSaved(
   if( rc==SQLITE_OK ){
     rc = doltlitePersistWorkingSet(db);
   }
-  if( bLocked ) chunkStoreUnlock(doltliteGetChunkStore(db));
   doltliteTxnStateClear(pSaved);
   return rc;
 }

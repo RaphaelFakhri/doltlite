@@ -817,7 +817,7 @@ static void doltliteResetFunc(
       sqlite3_result_error_code(context, rc);
       goto reset_cleanup;
     }
-    rc = changed ? doltlitePersistWorkingSetConfirmed(db, &wsBasis) : SQLITE_OK;
+    rc = changed ? doltlitePersistWorkingSet(db) : SQLITE_OK;
     if( rc!=SQLITE_OK ){
       sqlite3_result_error_code(context, rc);
       goto reset_cleanup;

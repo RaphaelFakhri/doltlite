@@ -117,8 +117,6 @@ static int cherryPickRestoreAndPersist(
 ){
   ProllyHash restoredCat = pSaved->sessionCatalogHash;
   ProllyHash savedHead = pSaved->sessionHead;
-  ProllyHash wsBasis = pSaved->wsBasis;
-  u32 nWsForeignAdopt = pSaved->nWsForeignAdopt;
   ProllyHash diskHead;
   ProllyHash sessionHead;
   ChunkStore *cs = doltliteGetChunkStore(db);
@@ -148,13 +146,7 @@ static int cherryPickRestoreAndPersist(
   ** write, and persisting the pre-op catalog over it would erase it. */
   if( db->autoCommit && restoreRc==opRc && opRc!=SQLITE_BUSY
    && !prollyHashIsEmpty(&restoredCat) ){
-    int bLocked, bPeerWrote;
-    persistRc = doltliteLockForRestore(db, &savedHead, &wsBasis,
-                                       nWsForeignAdopt, &bLocked, &bPeerWrote);
-    if( persistRc==SQLITE_OK && !bPeerWrote ){
-      persistRc = doltlitePersistWorkingSetWithHash(db, &restoredCat);
-    }
-    if( bLocked ) chunkStoreUnlock(cs);
+    persistRc = doltlitePersistWorkingSetWithHash(db, &restoredCat);
     if( persistRc!=SQLITE_OK && persistRc!=SQLITE_NOMEM ) restoreRc = persistRc;
   }
   return restoreRc;
@@ -717,16 +709,6 @@ static void doltliteCherryPickFunc(
     return;
   }
   doltliteCmdArgsClear(&args);
-
-  /* An autocommit session opened before a peer commit still names the old
-  ** tip. Refresh it before treating that as a dirty working tree. Inside a
-  ** transaction the caller's snapshot stands. */
-  rc = doltliteSyncSessionToBranchTip(db);
-  if( rc!=SQLITE_OK ){
-    (void)doltliteVcSealSavepointError(db);
-    sqlite3_result_error_code(context, rc);
-    return;
-  }
 
   rc = doltliteHasUncommittedChanges(db, &dirty);
   if( rc!=SQLITE_OK ){

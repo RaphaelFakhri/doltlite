@@ -274,7 +274,6 @@ struct DoltliteTxnState {
   ProllyHash sessionConstraintViolationsCatalog;
   ProllyHash sessionCatalogHash;
   ProllyHash wsBasis;
-  u32 nWsForeignAdopt;
   u8 sessionIsMerging;
 };
 
@@ -1294,18 +1293,6 @@ int doltliteConfirmWorkingSet(
   sqlite3 *db,
   ChunkStore *cs,
   const ProllyHash *pExpectedWorkingSet
-);
-int doltlitePersistWorkingSetConfirmed(
-  sqlite3 *db,
-  const ProllyHash *pExpected
-);
-int doltliteLockForRestore(
-  sqlite3 *db,
-  const ProllyHash *pHead,
-  const ProllyHash *pWsBasis,
-  u32 nWsForeignAdopt,
-  int *pbLocked,
-  int *pbPeerWrote
 );
 int doltliteCompareAndAdvanceBranchCurrentCatalog(
   sqlite3 *db,

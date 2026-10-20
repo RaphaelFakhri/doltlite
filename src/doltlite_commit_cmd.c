@@ -922,17 +922,6 @@ static void doltliteCommitFuncImpl(
   skipEmpty = opts.skipEmpty;
   force = opts.force;
 
-  rc = doltliteRefreshAutocommitWorkingState(db);
-  if( rc==SQLITE_OK ) rc = doltliteSyncSessionToBranchTip(db);
-  if( rc!=SQLITE_OK ){
-    if( rc==SQLITE_BUSY ){
-      sqlite3_result_error(context,
-          "cannot commit: database is busy. Please retry your transaction.", -1);
-    }
-    sqlite3_result_error_code(context, rc);
-    return;
-  }
-
   if( cs->refs.nBranches>0
    && chunkStoreFindBranch(cs, doltliteGetSessionBranch(db), 0)==SQLITE_NOTFOUND ){
     doltliteCmdResultWriteTxnError(context, db, SQLITE_BUSY);
