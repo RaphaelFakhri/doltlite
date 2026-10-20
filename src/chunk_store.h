@@ -266,6 +266,12 @@ struct ChunkStore {
   u8 bWsReplacing;
   ProllyHash wsReplaced;
   ProllyHash wsReplacedBasis;
+  /* A VC command's write transaction holds the lock. Its publishes stage
+  ** until the command ends and writes them as one root; until then the
+  ** staged refs are what a read of the published refs must see. */
+  u8 bDeferPublish;
+  u8 bPublishDeferred;
+  ProllyHash deferredRefsHash;
   u8 bWsKnown;
   CsWsBranch wsKnownBranch;
   ProllyHash wsKnown;

@@ -122,6 +122,7 @@ static void doltliteRunCommand(
     int rc = doltliteBtreeEndCommandTxn(pMain, ctx->isError!=0,
                                         ctx->pVdbe->vcInstalled);
     if( rc!=SQLITE_OK && !ctx->isError ){
+      sqlite3_result_error(ctx, sqlite3ErrStr(rc), -1);
       sqlite3_result_error_code(ctx, rc);
     }
   }

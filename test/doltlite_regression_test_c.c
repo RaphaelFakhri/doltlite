@@ -6748,9 +6748,10 @@ static void run_cherry_pick_seal_fail_keeps_advanced_tip(void){
   const char *res;
   ProllyHash sessionHead;
   ProllyHash diskTip;
+  ProllyHash tipBefore;
   int found = 0;
 
-  printf("=== Cherry-pick Seal Failure Keeps Advanced Tip ===\n\n");
+  printf("=== Cherry-pick Seal Failure Leaves Tip and Session Together ===\n\n");
   make_dbpath(dbpath, sizeof(dbpath), "test_cherry_pick_seal_fail_keeps_advanced_tip");
   removeDbFiles(dbpath);
 
@@ -6765,19 +6766,27 @@ static void run_cherry_pick_seal_fail_keeps_advanced_tip(void){
     "SELECT dolt_commit('-A', '-m', 'feat');"
     "SELECT dolt_checkout('main');")==SQLITE_OK);
 
+  cs = doltliteGetChunkStore(db);
+  check("cherry_pick_seal_fail_has_store", cs!=0);
+  memset(&tipBefore, 0, sizeof(tipBefore));
+  if( cs ) chunkStoreFindBranch(cs, "main", &tipBefore);
+
+  /* The command publishes once, at its end; a step that fails before then
+  ** leaves no trace, so the error it reports is the whole outcome. */
   doltliteTestFailNextVcSeal();
   res = queryScalarText(db, "SELECT dolt_cherry_pick('feature')");
   check("cherry_pick_seal_fail_reports_error", strstr(res, "ERROR:")!=0);
 
-  cs = doltliteGetChunkStore(db);
-  check("cherry_pick_seal_fail_has_store", cs!=0);
   doltliteGetSessionHead(db, &sessionHead);
   check("cherry_pick_seal_fail_read_disk_tip",
         cs && chunkStoreFindBranch(cs, "main", &diskTip)==SQLITE_OK);
   found = cs && !prollyHashIsEmpty(&diskTip);
-  check("cherry_pick_seal_fail_disk_tip_advanced", found);
+  check("cherry_pick_seal_fail_disk_tip_unchanged",
+        found && prollyHashCompare(&diskTip, &tipBefore)==0);
   check("cherry_pick_seal_fail_session_matches_disk",
         found && prollyHashCompare(&sessionHead, &diskTip)==0);
+  check("cherry_pick_seal_fail_rows_unchanged",
+        strcmp(queryScalarText(db, "SELECT group_concat(id) FROM t"), "1")==0);
 
   sqlite3_close(db);
   removeDbFiles(dbpath);
@@ -18636,7 +18645,7 @@ static const RegressionCase aCases[] = {
   { "rebase_paused_continue_busy_replay", "Rebase Paused Continue Rides Out Busy Replay Test", run_rebase_paused_continue_rides_out_busy_replay },
   { "cherry_pick_conflict_ours_commits_single_parent", "Cherry-pick Conflict Ours Commits Single Parent Test", run_cherry_pick_conflict_ours_commits_single_parent },
   { "revert_conflict_is_not_a_merge", "Revert Conflict Is Not A Merge Test", run_revert_conflict_is_not_a_merge },
-  { "cherry_pick_seal_fail_keeps_advanced_tip", "Cherry-pick Seal Failure Keeps Advanced Tip Test", run_cherry_pick_seal_fail_keeps_advanced_tip },
+  { "cherry_pick_seal_fail_keeps_advanced_tip", "Cherry-pick Seal Failure Leaves Tip and Session Together Test", run_cherry_pick_seal_fail_keeps_advanced_tip },
   { "failed_cherry_pick_reopen_preserves_conflict_state", "Failed Cherry-pick Reopen Preserves Conflict State Test", run_failed_cherry_pick_reopen_preserves_conflict_state },
   { "branches_metadata_corruption", "Branches Metadata Corruption Test", run_branches_metadata_corruption },
   { "gc_rewrite_failure", "GC Rewrite Failure Test", run_gc_rewrite_failure },
