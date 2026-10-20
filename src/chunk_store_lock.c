@@ -625,6 +625,16 @@ int chunkStoreLockAndRefreshChanged(ChunkStore *cs, int *pChanged){
   }
   if( cs->lockDepth > 0 ){
     cs->lockDepth++;
+    if( cs->nOuterLockHold && cs->lockDepth==1+cs->nOuterLockHold ){
+      rc = csNoteMovedUnderLock(cs);
+      if( rc==SQLITE_OK ) rc = chunkStoreRefreshIfChanged(cs, &changed);
+      if( rc!=SQLITE_OK ){
+        cs->lockDepth--;
+        if( cs->pLockMutex ) sqlite3_mutex_leave(cs->pLockMutex);
+        return rc;
+      }
+      if( pChanged ) *pChanged = changed;
+    }
     if( cs->pLockMutex ) sqlite3_mutex_leave(cs->pLockMutex);
     return SQLITE_OK;
   }
@@ -656,6 +666,10 @@ int chunkStoreLockAndRefreshChanged(ChunkStore *cs, int *pChanged){
     return rc;
   }
   cs->lockDepth = 1;
+  if( cs->bLockHoldOnly ){
+    if( cs->pLockMutex ) sqlite3_mutex_leave(cs->pLockMutex);
+    return SQLITE_OK;
+  }
   rc = csNoteMovedUnderLock(cs);
   if( rc==SQLITE_OK ) rc = chunkStoreRefreshIfChanged(cs, &changed);
   if( rc!=SQLITE_OK ){
@@ -1079,7 +1093,7 @@ int chunkStoreForceRefresh(ChunkStore *cs){
   ** store while the catalog stays ours. GC never latches this. */
   if( cs->movedReadOnly ) return SQLITE_READONLY;
   /* Only the outermost lock holder reloads; inner holders keep the outer view. */
-  if( cs->lockDepth != 1 ) return SQLITE_OK;
+  if( cs->lockDepth != 1 + cs->nOuterLockHold ) return SQLITE_OK;
   /* Skip a no-op WAL replay when the tail root still matches. Uncommitted
   ** appends fall through so reload still reports SQLITE_BUSY_SNAPSHOT. */
   if( cs->staging.nRecentUncommitted==0 && csDiskStateMatchesMemory(cs) ){
@@ -1099,7 +1113,7 @@ int chunkStoreAdoptDiskState(ChunkStore *cs){
   if( cs->isMemory || cs->isBuffer ) return SQLITE_OK;
   if( cs->movedReadOnly ) return SQLITE_READONLY;
   /* Only the outermost lock holder reloads. */
-  if( cs->lockDepth != 1 ) return SQLITE_OK;
+  if( cs->lockDepth != 1 + cs->nOuterLockHold ) return SQLITE_OK;
   if( cs->staging.nRecentUncommitted>0 ) return SQLITE_BUSY_SNAPSHOT;
   /* Same sealed tail and no local ref edit: nothing to adopt. */
   if( csDiskStateMatchesMemory(cs)

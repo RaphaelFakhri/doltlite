@@ -276,6 +276,10 @@ struct ChunkStore {
   ** means it does. */
   u8 bLockProbe;
   u8 bLockProbeHit;
+  /* A command joined to an explicit transaction holds the lock around
+  ** its steps; the outermost step still reloads as it would alone. */
+  u8 nOuterLockHold;
+  u8 bLockHoldOnly;
   u8 bWsKnown;
   CsWsBranch wsKnownBranch;
   ProllyHash wsKnown;

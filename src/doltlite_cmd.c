@@ -106,6 +106,7 @@ static void doltliteRunCommand(
   ChunkStore *cs = doltliteGetChunkStore(db);
   int bScope = 0;
   int bProbe = 0;
+  int bJoined = 0;
   int rcBegin = SQLITE_OK;
   db->pVcCommand = ctx->pVdbe;
   /* In autocommit the command is its own write transaction. Inside BEGIN
@@ -123,6 +124,23 @@ static void doltliteRunCommand(
           && eScope==DOLTLITE_CMD_NOWAIT;
     if( rc!=SQLITE_OK && rc!=SQLITE_DONE && !bProbe && !bMissing
      && (rc&0xff)!=SQLITE_READONLY ){
+      rcBegin = rc;
+    }
+  }else if( eScope!=DOLTLITE_CMD_UNSCOPED && !pOuter && cs
+         && !doltliteIsDetached(db) ){
+    int rc = doltliteBtreeBeginJoinedCommand(pMain);
+    if( rc==SQLITE_OK ){
+      cs->bLockHoldOnly = 1;
+      rc = doltliteLockAndRefreshBusy(db, cs);
+      cs->bLockHoldOnly = 0;
+      if( rc==SQLITE_OK ){
+        cs->nOuterLockHold = 1;
+      }else{
+        doltliteBtreeEndJoinedCommand(pMain);
+      }
+    }
+    bJoined = rc==SQLITE_OK;
+    if( rc!=SQLITE_OK && rc!=SQLITE_DONE && (rc&0xff)!=SQLITE_READONLY ){
       rcBegin = rc;
     }
   }
@@ -159,6 +177,11 @@ static void doltliteRunCommand(
       sqlite3_result_error(ctx, sqlite3ErrStr(rc), -1);
       sqlite3_result_error_code(ctx, rc);
     }
+  }
+  if( bJoined ){
+    doltliteBtreeEndJoinedCommand(pMain);
+    cs->nOuterLockHold = 0;
+    chunkStoreUnlock(cs);
   }
   if( !ctx->isError ){
     doltliteVcCommandInstalled(db);

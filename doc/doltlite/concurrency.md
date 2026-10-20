@@ -86,7 +86,9 @@ For a DoltLite-format main database, the concurrency contract is:
   the abort. A peer that tries gets `SQLITE_BUSY`, or waits up to its busy
   timeout, and succeeds once the command is done. A long merge therefore
   blocks other writers for its whole run, as a long write transaction does
-  in SQLite. Inside `BEGIN`, a command joins the caller's transaction.
+  in SQLite. Inside `BEGIN` or a `SAVEPOINT`, a command joins the caller's
+  transaction and holds the graph lock while it runs, so no peer writes
+  between its steps.
 - **`dolt_clean` and `dolt_reset` do not wait to start.** Either may change
   nothing, and such a call must not block on a peer. If a peer holds the lock
   when one begins, it does not wait for it: a call that changes nothing
