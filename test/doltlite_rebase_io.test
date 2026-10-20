@@ -43,6 +43,9 @@ rebaseio filter xWrite
 rebaseio script rebase_io
 set armed 0
 
+# A rebase publishes once, when it finishes. A disk that fills before then
+# leaves nothing behind: no working branch, no half-applied history, and no
+# rebase to abort, so the same rebase succeeds once space is back.
 foreach {reopen limit} {0 2048 1 2048 0 4096 1 4096} {
   forcedelete test.db
   file copy -force rebase-io-base.db test.db
@@ -55,9 +58,8 @@ foreach {reopen limit} {0 2048 1 2048 0 4096 1 4096} {
   do_test full.$limit.$reopen.error {
     set caught [catch {db eval {SELECT dolt_rebase('main')}} message]
     list $caught [sqlite3_errcode db] \
-         [string match {*cleanup failed*dolt_rebase('--abort')*} $message] \
-         [string match {*branch restored*} $message]
-  } {1 SQLITE_FULL 1 0}
+         [string match {*cleanup failed*} $message]
+  } {1 SQLITE_FULL 0}
   set armed 0
   rebaseio full
   if {$reopen} {
@@ -68,23 +70,12 @@ foreach {reopen limit} {0 2048 1 2048 0 4096 1 4096} {
   do_test full.$limit.$reopen.unchanged {
     list [expr {[db one {SELECT dolt_hashof('HEAD')}] eq $head}] \
          [db eval {SELECT id,v FROM t WHERE id>300 ORDER BY id}] \
-         [db one {SELECT count(*) FROM dolt_branches WHERE name='dolt_rebase_feat'}]
-  } {1 {1001 f1 1003 f3} 1}
-  if {$limit==4096} {
-    do_execsql_test full.$limit.$reopen.partial {
-      SELECT message FROM dolt_log('dolt_rebase_feat') LIMIT 1;
-    } feat1
-  }
-  do_test full.$limit.$reopen.refuse {
-    set caught [catch {db eval {SELECT dolt_rebase('main')}} message]
-    list $caught [string match {*working branch already exists*} $message] \
-         [string match {*branch restored*} $message]
-  } {1 1 0}
-  do_execsql_test full.$limit.$reopen.abort {
-    SELECT dolt_rebase('--abort');
-    SELECT active_branch();
-    SELECT count(*) FROM dolt_branches WHERE name='dolt_rebase_feat';
-  } {{Interactive rebase aborted} feat 0}
+         [db one {SELECT count(*) FROM dolt_branches WHERE name='dolt_rebase_feat'}] \
+         [db one {SELECT active_branch()}]
+  } {1 {1001 f1 1003 f3} 0 feat}
+  do_test full.$limit.$reopen.nothing-to-abort {
+    catchsql {SELECT dolt_rebase('--abort')}
+  } {1 {no rebase in progress}}
   do_test full.$limit.$reopen.retry {
     db eval {SELECT dolt_rebase('main')}
     db eval {
@@ -110,8 +101,8 @@ foreach reopen {0 1} {
   set armed 1
   do_test ioerr.$reopen.error {
     set caught [catch {db eval {SELECT dolt_rebase('main')}} message]
-    list $caught [sqlite3_errcode db] [string match {*branch restored*} $message]
-  } {1 SQLITE_IOERR 1}
+    list $caught [sqlite3_errcode db] [string match {*cleanup failed*} $message]
+  } {1 SQLITE_IOERR 0}
   set armed 0
   if {$reopen} {
     db close

@@ -183,7 +183,7 @@ static int doltliteCommandScope(const char *zName){
   static const char *const azUnscoped[] = {
     "dolt_connect_branch", "dolt_config", "dolt_creds", "dolt_creds_new",
     "dolt_gc", "dolt_remote", "dolt_push", "dolt_fetch", "dolt_pull",
-    "dolt_clone", "dolt_rebase",
+    "dolt_clone",
   };
   static const char *const azNoWait[] = { "dolt_clean", "dolt_reset" };
   if( doltliteNameIn(zName, azUnscoped, ArraySize(azUnscoped)) ){

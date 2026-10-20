@@ -13202,17 +13202,6 @@ static void run_rebase_concurrent_peer_commit_is_preserved(void){
   removeDbFiles(dbpath);
 }
 
-static sqlite3 *gRebaseStaleDb = 0;
-
-static void rebaseAdvanceForgetPeerBranch(void){
-  ChunkStore *cs;
-  if( !gRebaseStaleDb ) return;
-  cs = doltliteGetChunkStore(gRebaseStaleDb);
-  if( !cs ) return;
-  (void)chunkStoreDeleteBranch(cs, "other");
-  memset(&cs->refs.refsHash, 0, sizeof(cs->refs.refsHash));
-}
-
 static void run_rebase_continue_keeps_peer_branch(void){
   sqlite3 *db1 = 0;
   sqlite3 *db2 = 0;
@@ -13244,11 +13233,7 @@ static void run_rebase_continue_keeps_peer_branch(void){
   check("peer_creates_other_before_continue",
         execSql(db2, "SELECT dolt_branch('other');")==SQLITE_OK);
 
-  gRebaseStaleDb = db1;
-  doltliteTestSetRebaseBeforeAdvanceHook(rebaseAdvanceForgetPeerBranch);
   res = queryScalarText(db1, "SELECT dolt_rebase('--continue')");
-  gRebaseStaleDb = 0;
-  doltliteTestSetRebaseBeforeAdvanceHook(0);
   check("rebase_continue_with_peer_branch_succeeds",
         strstr(res, "Successfully rebased")!=0);
 

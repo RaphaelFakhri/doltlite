@@ -44,6 +44,7 @@ void doltliteAuthShieldLeave(DoltliteAuthShield *p);
 void doltliteVcCommandInstalled(sqlite3*);
 int doltliteBtreeBeginCommandTxn(Btree*, int bWait);
 int doltliteBtreeEndCommandTxn(Btree*, int bFailed, int bPublished);
+void doltliteCommandKeepEffects(sqlite3*);
 int doltliteCreateCommandFunc(
   sqlite3 *db,
   const char *zName,
@@ -1939,7 +1940,6 @@ int doltliteMergeInstallStepFails(void);
 int doltliteCommitInternalTxn(sqlite3 *db);
 int doltliteMergeAutocommitTxnBegin(sqlite3 *db, int *pbBegan);
 int doltliteMergeAutocommitTxnEnd(sqlite3 *db, int bBegan, int rc);
-void doltliteTestSetRebaseBeforeAdvanceHook(void (*xHook)(void));
 
 const char *doltliteGetAuthorName(sqlite3 *db);
 int doltliteSetAuthorName(sqlite3 *db, const char *zName);

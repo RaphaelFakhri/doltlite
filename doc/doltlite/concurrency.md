@@ -76,12 +76,14 @@ For a DoltLite-format main database, the concurrency contract is:
 - **A version-control command is one write transaction.** In autocommit, a
   command that changes the database (`dolt_add`, `dolt_commit`, `dolt_merge`,
   `dolt_cherry_pick`, `dolt_revert`, `dolt_reset`, `dolt_clean`,
-  `dolt_checkout`, `dolt_branch`, `dolt_tag`, `dolt_default_branch`,
-  `dolt_conflicts_resolve`, `dolt_verify_constraints`) takes the graph lock
-  when it starts, waiting for it under the busy handler, and holds it until
-  it finishes. It reads one snapshot, no peer write lands while it runs, and
-  it publishes once, when it finishes, so a command that fails has taken no
-  effect. A peer that tries gets `SQLITE_BUSY`, or waits up to its busy
+  `dolt_checkout`, `dolt_rebase`, `dolt_branch`, `dolt_tag`,
+  `dolt_default_branch`, `dolt_conflicts_resolve`,
+  `dolt_verify_constraints`) takes the graph lock when it starts, waiting
+  for it under the busy handler, and holds it until it finishes. It reads
+  one snapshot, no peer write lands while it runs, and it publishes once,
+  when it finishes, so a command that fails has taken no effect. The
+  exception is a rebase step that fails and aborts the rebase: it publishes
+  the abort. A peer that tries gets `SQLITE_BUSY`, or waits up to its busy
   timeout, and succeeds once the command is done. A long merge therefore
   blocks other writers for its whole run, as a long write transaction does
   in SQLite. Inside `BEGIN`, a command joins the caller's transaction.
@@ -91,11 +93,10 @@ For a DoltLite-format main database, the concurrency contract is:
   completes without blocking, and one that does write waits for the lock
   under the busy handler and re-checks HEAD and the working set before it
   publishes. A peer commit in between yields `SQLITE_BUSY` instead of a lost
-  update. `dolt_rebase`, `dolt_gc`, and the remote commands always work this
-  way: rebase adopts and replays across branches with its own locked branch
-  expectations, `dolt_gc` needs the lock free, and the remote commands must
-  not hold the local lock during a transfer. Pull also uses
-  operation-specific locked branch expectations.
+  update. `dolt_gc` and the remote commands always work this way: `dolt_gc`
+  needs the lock free, and the remote commands must not hold the local lock
+  during a transfer. Pull also uses operation-specific locked branch
+  expectations.
 - **A working set is never replaced unread.** Publishing a branch's working
   set is refused with `SQLITE_BUSY_SNAPSHOT` unless the working set it
   replaces is the one this connection last read or wrote. A peer's write

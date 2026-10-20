@@ -1762,6 +1762,7 @@ struct sqlite3 {
   int nVcInterruptMask;
   int nVcInternalCommit;
   int nVcStatementRestore;
+  void *pVcNestedTxn;
 #endif
   int nVdbeExec;                /* Number of nested calls to VdbeExec() */
   int nVDestroy;                /* Number of active OP_VDestroy operations */
@@ -5539,6 +5540,9 @@ char *doltliteTakeChunkSourceError(sqlite3*,int*);
 int doltliteChunkSourceActive(sqlite3*);
 int doltliteOwnSchemaReload(sqlite3*);
 int doltliteInCommandTxn(sqlite3*);
+void doltliteNestedTxnCapture(sqlite3*);
+int doltliteNestedTxnRestore(sqlite3*);
+void doltliteNestedTxnDrop(sqlite3*);
 void doltliteFinishOwnSchemaReload(sqlite3*);
 int sqlite3BtreeIsDeferred(Btree*);
 const char *doltliteBtreeMissingWriteBranch(Btree*);

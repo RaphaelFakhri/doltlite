@@ -326,12 +326,16 @@ struct Btree {
   ** statements inside the command must not commit or unlock it. */
   u8 bCommandTxn;
   u8 bCommandWritesRows;
+  /* The command fails, but what it did is the outcome to publish. */
+  u8 bCommandKeep;
   u32 nBranchInstall;
   u32 nCommandBranchInstall;
   /* The branch a command started on, kept when it first switches so a
   ** failed command can return to it. */
   u8 bCommandBranchSaved;
   char *zCommandBranch;
+  /* A name a rollback replaced while the command's code may still hold it. */
+  char *zCommandParkedBranch;
   u8 bPreserveDeferFks;
   ProllyHash preserveDeferFkCatalog;
   Pgno mxPageCount;

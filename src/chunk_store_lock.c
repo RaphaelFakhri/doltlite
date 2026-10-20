@@ -512,6 +512,7 @@ int csReloadFromDiskPreservingLocalRefs(ChunkStore *cs){
   ProllyHash baseRefsHash;
   SavedRefsState savedRefs;
 
+  if( cs->bPublishDeferred ) return SQLITE_OK;
   /* Reload drops aRecent; refuse while uncommitted refs point at it. */
   if( cs->staging.nRecentUncommitted > 0 ){
     return SQLITE_BUSY_SNAPSHOT;
@@ -1114,6 +1115,9 @@ static int csReloadFromDisk(ChunkStore *cs){
   ChunkStoreReloadState saved;
   char *zOldFilename;
   int rc;
+  /* The command holding the lock is the only writer, so disk is its start
+  ** state; reloading would drop what it has staged to publish. */
+  if( cs->bPublishDeferred ) return SQLITE_OK;
   rc = csScrubFailedRoot(cs);
   if( rc!=SQLITE_OK ) return rc;
   if( cs->staging.nRecentUncommitted > 0 ){

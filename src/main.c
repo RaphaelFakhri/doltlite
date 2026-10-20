@@ -1580,7 +1580,12 @@ void sqlite3RollbackAll(sqlite3 *db, int tripCode){
   db->flags &= ~(u64)(SQLITE_DeferFKs|SQLITE_CorruptRdOnly);
 
   /* If one has been configured, invoke the rollback-hook callback */
+#ifdef DOLTLITE_PROLLY
+  if( db->xRollbackCallback && (inTrans || !db->autoCommit)
+   && !doltliteInCommandTxn(db) ){
+#else
   if( db->xRollbackCallback && (inTrans || !db->autoCommit) ){
+#endif
     db->xRollbackCallback(db->pRollbackArg);
   }
 }

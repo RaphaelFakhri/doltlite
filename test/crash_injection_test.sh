@@ -646,7 +646,7 @@ S13_AFTER=$("$DOLTLITE" "$DB13/feat" "SELECT commit_hash FROM dolt_log LIMIT 1;"
 S13_COUNT=$("$DOLTLITE" "$DB13/feat" "SELECT count(*) FROM t;" 2>/dev/null)
 S13_WORK=$("$DOLTLITE" "$DB13/feat" \
   "SELECT count(*) FROM dolt_branches WHERE name='dolt_rebase_feat';" 2>/dev/null)
-if [ "$S13_RC" = "99" ] && [ "$S13_AFTER" = "$S13_HEAD" ] && [ "$S13_COUNT" = "2" ] && [ "$S13_WORK" = "1" ]; then
+if [ "$S13_RC" = "99" ] && [ "$S13_AFTER" = "$S13_HEAD" ] && [ "$S13_COUNT" = "2" ] && [ "$S13_WORK" = "0" ]; then
   pass_name "s13_rebase_finalize_keeps_old_tip"
 else
   fail_name "s13_rebase_finalize_keeps_old_tip"

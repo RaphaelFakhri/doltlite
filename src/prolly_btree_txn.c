@@ -688,6 +688,9 @@ int prollyBtreeBeginTrans(Btree *p, int wrFlag, int *pSchemaVersion){
   }
 
   if( p->inTrans==TRANS_WRITE ){
+    if( p->bCommandTxn && p->db && !p->db->autoCommit ){
+      doltliteNestedTxnCapture(p->db);
+    }
     return SQLITE_OK;
   }
   if( p->inTrans==TRANS_READ && !wrFlag ){
@@ -1247,7 +1250,10 @@ int prollyBtreeCommitPhaseTwo(Btree *p, int bCleanup){
 
   /* Nested commit from catalog-serialize SELECT finalize: no-op. */
   if( pBt->inCatalogSerialize ) return SQLITE_OK;
-  if( p->bCommandTxn && p->inTrans==TRANS_WRITE ) return SQLITE_OK;
+  if( p->bCommandTxn && p->inTrans==TRANS_WRITE ){
+    if( p->db ) doltliteNestedTxnDrop(p->db);
+    return SQLITE_OK;
+  }
 
   if( p->inTrans!=TRANS_WRITE ){
     commitPhaseTwoEndWriteTxn(p);
@@ -1259,6 +1265,8 @@ int prollyBtreeCommitPhaseTwo(Btree *p, int bCleanup){
 static void commandForgetBranch(Btree *p){
   sqlite3_free(p->zCommandBranch);
   p->zCommandBranch = 0;
+  sqlite3_free(p->zCommandParkedBranch);
+  p->zCommandParkedBranch = 0;
   p->bCommandBranchSaved = 0;
 }
 
@@ -1291,6 +1299,7 @@ int doltliteBtreeBeginCommandTxn(Btree *p, int bWait){
   }
   p->bCommandTxn = 1;
   p->bCommandWritesRows = 0;
+  p->bCommandKeep = 0;
   p->nCommandBranchInstall = p->nBranchInstall;
   commandForgetBranch(p);
   p->pBt->store.bDeferPublish = 1;
@@ -1341,7 +1350,9 @@ static void commandDiscard(Btree *p, BtShared *pBt){
 static int commandEnd(Btree *p, int bFailed, int bPublished);
 
 int doltliteBtreeEndCommandTxn(Btree *p, int bFailed, int bPublished){
-  int rc = commandEnd(p, bFailed, bPublished);
+  int rc;
+  if( p && p->db ) doltliteNestedTxnDrop(p->db);
+  rc = commandEnd(p, bFailed, bPublished);
   if( p ) commandForgetBranch(p);
   return rc;
 }
@@ -1364,7 +1375,7 @@ static int commandEnd(Btree *p, int bFailed, int bPublished){
   pBt->store.bPublishDeferred = 0;
   db = p->db;
   bHooks = p->bCommandWritesRows && db;
-  if( bFailed ){
+  if( bFailed && !p->bCommandKeep ){
     /* A command that already rolled its transaction back fired the hook. */
     int bOpen = p->inTrans==TRANS_WRITE;
     commandDiscard(p, pBt);
@@ -1418,6 +1429,14 @@ static int commandEnd(Btree *p, int bFailed, int bPublished){
   rc = sqlite3BtreeCommit(p);
   if( rc!=SQLITE_OK ) commandDiscard(p, pBt);
   return rc;
+}
+
+/* A command that reports failure but whose recovery is itself the outcome,
+** such as a rebase it had to abort, publishes what it did instead of being
+** discarded. */
+void doltliteCommandKeepEffects(sqlite3 *db){
+  Btree *p = (db && db->nDb>0) ? db->aDb[0].pBt : 0;
+  if( p && p->pOps==&prollyBtreeOps && p->bCommandTxn ) p->bCommandKeep = 1;
 }
 
 int doltliteInCommandTxn(sqlite3 *db){
@@ -1577,6 +1596,50 @@ static void rollbackResetSchema(Btree *p, int bImmediate){
   }
 }
 
+/* A rollback inside a command's transaction undoes the nested SQL
+** transaction the command's code opened, or, with none, everything the
+** command did so far; the command's transaction and lock stay. */
+static int commandRollback(Btree *p, BtShared *pBt, int tripCode){
+  BtCursor *pC;
+  int rc;
+  for(pC=pBt->pCursor; pC; pC=pC->pNext){
+    if( pC->pBtree!=p ) continue;
+    if( pC->eState!=CURSOR_FAULT ){
+      pC->eState = CURSOR_FAULT;
+      pC->skipNext = tripCode ? tripCode : SQLITE_ABORT;
+    }
+    pC->pMutMap = 0;
+    pC->mmActive = 0;
+    pC->mmPhysActive = 0;
+    pC->deferredTreeSeek = 0;
+    pC->mmIdx = -1;
+    pC->mmPhysIdx = -1;
+    prollyCursorReleaseAll(&pC->pCur);
+  }
+  rc = p->db ? doltliteNestedTxnRestore(p->db) : SQLITE_NOTFOUND;
+  if( rc==SQLITE_NOTFOUND ){
+    ProllyHash loadedCatHash;
+    chunkStoreRollback(&pBt->store);
+    pBt->store.bPublishDeferred = 0;
+    if( p->bCommandBranchSaved ){
+      sqlite3_free(p->zCommandParkedBranch);
+      p->zCommandParkedBranch = p->zBranch;
+      p->zBranch = p->zCommandBranch;
+      p->zCommandBranch = 0;
+      p->bCommandBranchSaved = 0;
+      p->nBranchInstall++;
+      chunkStoreFollowWorkingSetBasis(&pBt->store,
+                                      p->zBranch ? p->zBranch : "main");
+    }
+    memset(&loadedCatHash, 0, sizeof(loadedCatHash));
+    p->bForceCatalogReload = 1;
+    rc = btreeReloadBranchWorkingStateInto(p, 1, &loadedCatHash);
+    if( rc==SQLITE_OK ) btreeStoreCommittedFromCurrent(p, &loadedCatHash);
+  }
+  resetConnectionSchema(p);
+  return rc;
+}
+
 int prollyBtreeRollback(Btree *p, int tripCode, int writeOnly){
   BtShared *pBt = p->pBt;
   int rc = SQLITE_OK;
@@ -1588,6 +1651,9 @@ int prollyBtreeRollback(Btree *p, int tripCode, int writeOnly){
       && p->db->mallocFailed;
 
   if( pBt->inCatalogSerialize ) return SQLITE_OK;
+  if( p->bCommandTxn && p->inTrans==TRANS_WRITE ){
+    return commandRollback(p, pBt, tripCode);
+  }
 
   if( p->inTrans==TRANS_WRITE ){
     /* A commit that aborted before publishing already released the lock;
