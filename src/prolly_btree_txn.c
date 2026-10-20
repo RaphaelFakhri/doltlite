@@ -1257,10 +1257,11 @@ int prollyBtreeCommitPhaseTwo(Btree *p, int bCleanup){
   return commitPhaseTwoWrite(p, pBt);
 }
 /* Open the write transaction a VC command runs in. Its statements commit
-** into it, so the command reads one snapshot under one lock and publishes
-** once, when doltliteBtreeEndCommandTxn ends it. The attempt does not wait:
-** a command that turns out to change nothing must not block on a peer's
-** transaction, so a held lock leaves the command to take it if it writes. */
+** into it and its publishes stage, so the command reads one snapshot under
+** one lock and publishes once, when doltliteBtreeEndCommandTxn ends it. The
+** attempt does not wait: a command that turns out to change nothing must
+** not block on a peer's transaction, so a held lock leaves the command to
+** take it if it writes. */
 int doltliteBtreeBeginCommandTxn(Btree *p){
   BusyHandler saved;
   int rc;
@@ -1283,30 +1284,72 @@ int doltliteBtreeBeginCommandTxn(Btree *p){
   p->bCommandTxn = 1;
   p->bCommandWritesRows = 0;
   p->nCommandBranchInstall = p->nBranchInstall;
+  p->pBt->store.bDeferPublish = 1;
+  p->pBt->store.bPublishDeferred = 0;
   return SQLITE_OK;
 }
 
-/* A command that left the session invalidated or on another branch
-** published what it meant to itself; the session it leaves behind is not
-** a working set to write back. A failed command that published nothing
-** rolls back to the snapshot it started from. */
+static int commandPublishStaged(BtShared *pBt){
+  int rc = chunkStoreCommitWithBusyHandler(
+      &pBt->store, prollyInvokeBusyHandler, pBt);
+  if( rc==SQLITE_OK ) csDropTxnSequences(&pBt->store);
+  return rc;
+}
+
+/* Drop what the command staged and reload the session from disk. The
+** command began under the lock with the session equal to disk, so disk is
+** the snapshot it started from. */
+static void commandDiscard(Btree *p, BtShared *pBt){
+  chunkStoreRollback(&pBt->store);
+  if( p->inTrans==TRANS_WRITE ){
+    btreeDiscardAllSavepoints(p);
+    p->inTrans = TRANS_NONE;
+    p->inTransaction = TRANS_NONE;
+    btreeReleaseTxnGraphLock(pBt);
+    pBt->store.snapshotPinned = 0;
+  }
+  p->iLoadedWorkingStateVersion = pBt->iWorkingStateVersion - 1;
+  p->bForceCatalogReload = 1;
+  resetConnectionSchema(p);
+  (void)btreeRefreshSharedWorkingState(p);
+}
+
+/* What the command staged is what it means to publish, and nothing is
+** durable before then: a failed command is discarded and has taken no
+** effect. A command that left the session invalidated or on another branch
+** has no session working set to write back. Only a command that writes rows
+** is an SQL transaction to the hooks; one that only moves refs fires
+** neither. */
 int doltliteBtreeEndCommandTxn(Btree *p, int bFailed, int bPublished){
   BtShared *pBt;
   sqlite3 *db;
   int bHooks;
+  int bStaged;
   int rc;
+  (void)bPublished;
   if( !p || !p->bCommandTxn ) return SQLITE_OK;
   p->bCommandTxn = 0;
-  if( p->inTrans!=TRANS_WRITE ) return SQLITE_OK;
   pBt = p->pBt;
-  if( bPublished && !bFailed && !p->bCommandWritesRows
-   && pBt->store.staging.nPending==0
-   && prollyHashCompare(&pBt->store.refs.refsHash,
-                        &pBt->store.refs.committedRefsHash)==0 ){
-    btreeDiscardAllSavepoints(p);
-    commitPhaseTwoEndWriteTxn(p);
-    commitPhaseTwoReleaseGraph(pBt);
+  pBt->store.bDeferPublish = 0;
+  bStaged = pBt->store.bPublishDeferred;
+  /* Past this point reads of the published refs must see disk again; a
+  ** staged view left set would outlive the chunks it names. */
+  pBt->store.bPublishDeferred = 0;
+  db = p->db;
+  bHooks = p->bCommandWritesRows && db;
+  if( bFailed ){
+    /* A command that already rolled its transaction back fired the hook. */
+    int bOpen = p->inTrans==TRANS_WRITE;
+    commandDiscard(p, pBt);
+    if( bHooks && bOpen && db->xRollbackCallback ){
+      db->xRollbackCallback(db->pRollbackArg);
+    }
     return SQLITE_OK;
+  }
+  if( p->inTrans!=TRANS_WRITE ){
+    rc = bStaged ? commandPublishStaged(pBt) : SQLITE_OK;
+    if( rc!=SQLITE_OK ) commandDiscard(p, pBt);
+    return rc;
   }
   if( p->bForceCatalogReload
    || p->nCommandBranchInstall!=p->nBranchInstall
@@ -1315,43 +1358,35 @@ int doltliteBtreeEndCommandTxn(Btree *p, int bFailed, int bPublished){
        && chunkStoreFindBranch(&pBt->store,
                                p->zBranch ? p->zBranch : "main", 0)
           ==SQLITE_NOTFOUND) ){
-    chunkStoreRollback(&pBt->store);
-    btreeDiscardAllSavepoints(p);
-    p->inTrans = TRANS_NONE;
-    p->inTransaction = TRANS_NONE;
-    btreeReleaseTxnGraphLock(pBt);
-    pBt->store.snapshotPinned = 0;
-    p->iLoadedWorkingStateVersion = pBt->iWorkingStateVersion - 1;
-    p->bForceCatalogReload = 1;
-    resetConnectionSchema(p);
-    return SQLITE_OK;
-  }
-  db = p->db;
-  /* Only a command that writes rows is an SQL transaction to the hooks; one
-  ** that only moves refs fires neither. */
-  bHooks = p->bCommandWritesRows && db;
-  if( bFailed && !bPublished ){
-    rc = sqlite3BtreeRollback(p, SQLITE_OK, 0);
-    if( bHooks && db->xRollbackCallback ) db->xRollbackCallback(db->pRollbackArg);
+    rc = bStaged ? commandPublishStaged(pBt) : SQLITE_OK;
+    commandDiscard(p, pBt);
     return rc;
   }
   if( bHooks && db->xCommitCallback && db->xCommitCallback(db->pCommitArg) ){
-    (void)sqlite3BtreeRollback(p, SQLITE_OK, 0);
+    commandDiscard(p, pBt);
     if( db->xRollbackCallback ) db->xRollbackCallback(db->pRollbackArg);
     return SQLITE_CONSTRAINT_COMMITHOOK;
   }
-  rc = sqlite3BtreeCommit(p);
-  if( rc!=SQLITE_OK ){
-    (void)sqlite3BtreeRollback(p, SQLITE_OK, 0);
-    /* The command's own publish is durable; failing now would report an
-    ** effect that already happened as an error. Reload what landed. */
-    if( bPublished ){
-      p->iLoadedWorkingStateVersion = pBt->iWorkingStateVersion - 1;
-      p->bForceCatalogReload = 1;
-      resetConnectionSchema(p);
-      rc = SQLITE_OK;
+  if( !p->bCommandWritesRows ){
+    rc = bStaged ? commandPublishStaged(pBt) : SQLITE_OK;
+    if( rc!=SQLITE_OK ){
+      commandDiscard(p, pBt);
+      return rc;
+    }
+    if( pBt->store.staging.nPending==0
+     && prollyHashCompare(&pBt->store.refs.refsHash,
+                          &pBt->store.refs.committedRefsHash)==0 ){
+      btreeDiscardAllSavepoints(p);
+      commitPhaseTwoEndWriteTxn(p);
+      commitPhaseTwoReleaseGraph(pBt);
+      return SQLITE_OK;
     }
   }
+  /* A rollback here would write back the in-transaction baseline, which
+  ** names chunks the command only staged; discarding drops them, so the
+  ** failed commit is only discarded. */
+  rc = sqlite3BtreeCommit(p);
+  if( rc!=SQLITE_OK ) commandDiscard(p, pBt);
   return rc;
 }
 

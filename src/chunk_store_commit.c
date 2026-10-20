@@ -142,6 +142,7 @@ static int csRestoreCommittedRefsStateInner(ChunkStore *cs){
 static int csRestoreCommittedRefsState(ChunkStore *cs){
   int rc;
   cs->bWsReplacing = 0;
+  cs->bPublishDeferred = 0;
   rc = csRestoreCommittedRefsStateInner(cs);
   chunkStoreReadoptWorkingSetBasis(cs);
   return rc;
@@ -167,6 +168,7 @@ static int csCommitToMemory(ChunkStore *cs){
   }
   csMarkRefsCommitted(cs);
   cs->bWsReplacing = 0;
+  cs->bPublishDeferred = 0;
   return SQLITE_OK;
 }
 
@@ -650,6 +652,7 @@ static int csCommitToFile(
   csCommitPublishStaging(cs, useRecent, aCommittedPending, aMerged, nMerged);
   chunkStoreNoteSelfPublishedWorkingSet(cs);
   cs->bWsReplacing = 0;
+  cs->bPublishDeferred = 0;
   if( aCommittedPending!=aSmallCommittedPending ){
     sqlite3_free(aCommittedPending);
   }
@@ -707,6 +710,16 @@ int chunkStoreWriteRefused(ChunkStore *cs){
       || (cs->xWriteGate && cs->xWriteGate(cs->pWriteGateArg));
 }
 
+static int csDeferCommit(ChunkStore *cs){
+  int rc = csCheckWorkingSetReplace(cs);
+  if( rc!=SQLITE_OK ) return rc;
+  chunkStoreNoteSelfPublishedWorkingSet(cs);
+  cs->bWsReplacing = 0;
+  cs->bPublishDeferred = 1;
+  cs->deferredRefsHash = cs->refs.refsHash;
+  return SQLITE_OK;
+}
+
 static int csCommitWithBusyHandler(
   ChunkStore *cs,
   int (*xBusy)(void*),
@@ -727,6 +740,7 @@ static int csCommitWithBusyHandler(
   }
   if( cs->corruptMidStream ) return SQLITE_CORRUPT;
   if( chunkStoreWriteRefused(cs) ) return SQLITE_READONLY;
+  if( cs->bDeferPublish ) return csDeferCommit(cs);
   if( cs->isMemory ) return csCommitToMemory(cs);
   if( !cs->isBuffer && cs->lockDepth<=0 && cs->file.zFilename ){
     ProllyHash baseRefsHash;
@@ -770,6 +784,7 @@ static int csCommitWithBusyHandler(
    && !cs->bRefsStale
    && prollyHashCompare(&cs->refs.refsHash,
                         &cs->refs.committedRefsHash)==0 ){
+    cs->bPublishDeferred = 0;
     rc = SQLITE_OK;
   }else{
     rc = csCommitToFile(cs, xBusy, pBusyArg, retryBusy);
@@ -785,7 +800,7 @@ int chunkStoreCommitWithBusyHandler(
   void *pBusyArg
 ){
   int rc = csCommitWithBusyHandler(cs, xBusy, pBusyArg, 0);
-  chunkStoreClearStoredHits(cs);
+  if( !cs->bDeferPublish ) chunkStoreClearStoredHits(cs);
   return rc;
 }
 
@@ -797,7 +812,7 @@ int chunkStoreCommitRetryable(
   int rc;
   PROLLY_ASSERT_STORE_GRAPH_LOCKED(cs);
   rc = csCommitWithBusyHandler(cs, xBusy, pBusyArg, 1);
-  if( rc!=SQLITE_BUSY ) chunkStoreClearStoredHits(cs);
+  if( rc!=SQLITE_BUSY && !cs->bDeferPublish ) chunkStoreClearStoredHits(cs);
   return rc;
 }
 
@@ -805,7 +820,7 @@ int chunkStoreCommit(ChunkStore *cs){
   int rc = chunkStoreCommitWithBusyHandler(cs, cs->xDefaultBusy,
                                            cs->pDefaultBusyArg);
   /* Settled either way: a failed commit restored the committed refs. */
-  csDropTxnSequences(cs);
+  if( !cs->bDeferPublish ) csDropTxnSequences(cs);
   return rc;
 }
 

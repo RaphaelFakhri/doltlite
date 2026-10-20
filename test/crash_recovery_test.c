@@ -2063,15 +2063,19 @@ static void test_33_cv_rollback_atomic_sync(void){
         gDuraCrashBefore = before;
         rc = execSql(db, "SELECT dolt_merge('feat')");
         gDuraCrashAt = 0;
-        _exit(rc==SQLITE_OK ? 12 : 0);
+        if( rc==SQLITE_OK ) _exit(12);
+        _exit(gDuraSyncCount==0 ? 20 : 0);
       }
       check("test_33: child waited", waitpid(pid, &status, 0)==pid);
       crashed = WIFEXITED(status) && WEXITSTATUS(status)==99;
       snprintf(desc, sizeof(desc), "%s: crashed or rolled back", label);
-      check(desc, crashed || (WIFEXITED(status) && WEXITSTATUS(status)==0));
+      check(desc, crashed || (WIFEXITED(status)
+            && (WEXITSTATUS(status)==0 || WEXITSTATUS(status)==20)));
+      /* The merge either syncs (and a crash there must recover) or, refused
+      ** before it publishes anything, never touches the file. */
       if( at==1 ){
-        snprintf(desc, sizeof(desc), "%s: sync crash exercised", label);
-        check(desc, crashed);
+        snprintf(desc, sizeof(desc), "%s: sync crash exercised or nothing written", label);
+        check(desc, crashed || (WIFEXITED(status) && WEXITSTATUS(status)==20));
       }
       check("test_33: recovery open", sqlite3_open(dbpath, &db)==SQLITE_OK);
       execSql(db, "SELECT dolt_checkout('feat'); SELECT dolt_checkout('main')");

@@ -78,8 +78,9 @@ For a DoltLite-format main database, the concurrency contract is:
   `dolt_cherry_pick`, `dolt_revert`, `dolt_reset`, `dolt_clean`,
   `dolt_branch`, `dolt_tag`, `dolt_default_branch`,
   `dolt_conflicts_resolve`, `dolt_verify_constraints`) takes the graph lock
-  when it starts and holds it until it finishes. It reads one snapshot, and
-  no peer write lands while it runs. A peer that tries gets `SQLITE_BUSY`, or
+  when it starts and holds it until it finishes. It reads one snapshot, no
+  peer write lands while it runs, and it publishes once, when it finishes, so
+  a command that fails has taken no effect. A peer that tries gets `SQLITE_BUSY`, or
   waits up to its busy timeout, and succeeds once the command is done. A
   long merge therefore blocks other writers for its whole run, as a long
   write transaction does in SQLite. Inside `BEGIN`, a command joins the

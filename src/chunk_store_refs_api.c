@@ -88,6 +88,10 @@ int csReadDiskRefsHash(ChunkStore *cs, ProllyHash *pOut){
   u8 aRoot[1 + CHUNK_MANIFEST_SIZE];
   int hashState;
 
+  if( cs->bPublishDeferred ){
+    *pOut = cs->deferredRefsHash;
+    return 1;
+  }
   memset(pOut, 0, sizeof(*pOut));
   if( cs->file.pFile==0 ) return 0;
   /* Tail from the file, not WAL bookkeeping: a peer may have appended. */
@@ -112,6 +116,34 @@ int csReadDiskRefsHash(ChunkStore *cs, ProllyHash *pOut){
   return 1;
 }
 
+static int csReadDeferredBranch(
+  ChunkStore *cs,
+  const char *zName,
+  ProllyHash *pTip,
+  ProllyHash *pWorkingSet,
+  int *pFound
+){
+  ChunkStore view;
+  u8 *data = 0;
+  int nData = 0;
+  int rc = chunkStoreGet(cs, &cs->deferredRefsHash, &data, &nData);
+  if( rc!=SQLITE_OK ) return rc;
+  memset(&view, 0, sizeof(view));
+  rc = csDeserializeRefsIntoTemp(&view, data, nData);
+  sqlite3_free(data);
+  if( rc==SQLITE_OK ){
+    if( pTip && chunkStoreFindBranch(&view, zName, pTip)==SQLITE_OK ){
+      *pFound = 1;
+    }
+    if( pWorkingSet
+     && chunkStoreGetBranchWorkingSet(&view, zName, pWorkingSet)==SQLITE_OK ){
+      *pFound = 1;
+    }
+  }
+  csFreeRefsState(&view);
+  return rc;
+}
+
 /* Read zName's disk tip without touching this handle. Skip the throwaway
 ** open when the tail root already matches. Caller holds the store lock. */
 int chunkStoreReadDiskBranchTip(ChunkStore *cs, const char *zName,
@@ -120,6 +152,9 @@ int chunkStoreReadDiskBranchTip(ChunkStore *cs, const char *zName,
   int rc;
 
   *pFound = 0;
+  if( cs->bPublishDeferred ){
+    return csReadDeferredBranch(cs, zName, pTip, 0, pFound);
+  }
   if( cs->isMemory || cs->isBuffer || !cs->file.zFilename ){
     if( chunkStoreFindBranch(cs, zName, pTip)==SQLITE_OK ) *pFound = 1;
     return SQLITE_OK;
@@ -147,6 +182,9 @@ int chunkStoreReadDiskBranchWorkingSet(ChunkStore *cs, const char *zName,
 
   *pFound = 0;
   memset(pWorkingSet, 0, sizeof(*pWorkingSet));
+  if( cs->bPublishDeferred ){
+    return csReadDeferredBranch(cs, zName, 0, pWorkingSet, pFound);
+  }
   if( cs->isMemory || cs->isBuffer || !cs->file.zFilename ){
     if( chunkStoreGetBranchWorkingSet(cs, zName, pWorkingSet)==SQLITE_OK ){
       *pFound = 1;
