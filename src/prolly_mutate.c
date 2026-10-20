@@ -113,70 +113,32 @@ static int mergeLeaf(
 ){
   int rc = SQLITE_OK;
   int j;
-  const u8 *pLastKey = 0;
-  int nLastKey = 0;
+  ProllyMutMapEntry *pEd = prollyMutMapIterValid(pIter)
+                        ? prollyMutMapIterEntry(pIter) : 0;
 
-  if( pLeaf->nItems>0 ){
-    prollyNodeKey(pLeaf, pLeaf->nItems - 1, &pLastKey, &nLastKey);
-  }
-
+  assert( pLeaf->nValuePrefix==0 );
   for( j = 0; j < pLeaf->nItems; ){
-    int haveEdit = prollyMutMapIterValid(pIter);
-    ProllyMutMapEntry *pEd = haveEdit ? prollyMutMapIterEntry(pIter) : 0;
+    u32 off = PROLLY_GET_U32((const u8*)&pLeaf->aKeyOff[j]);
+    const u8 *pCurKey = pLeaf->pKeyData + off;
+    int nCurKey = (int)(PROLLY_GET_U32((const u8*)&pLeaf->aKeyOff[j+1])-off);
+    int cmp = pEd ? prollyKeyCmp(pCurKey, nCurKey, pEd->pKey, pEd->nKey) : -1;
 
-    const u8 *pCurKey; int nCurKey;
-    int cmp;
-
-    prollyNodeKey(pLeaf, j, &pCurKey, &nCurKey);
-
-    if( !haveEdit ){
-
-      const u8 *pVal; int nVal;
-      prollyNodeValue(pLeaf, j, &pVal, &nVal);
+    if( cmp<0 ){
+      const u8 *pVal;
+      int nVal, nAvail;
+      prollyNodeValueSpanInline(pLeaf, j, &pVal, &nVal, &nAvail);
       rc = prollyChunkerAdd(pCh, pCurKey, nCurKey, pVal, nVal);
       if( rc!=SQLITE_OK ) return rc;
       j++;
-      continue;
-    }
-
-    {
-      int pastLeaf = prollyKeyCmp(pEd->pKey, pEd->nKey, pLastKey, nLastKey);
-      if( pastLeaf > 0 ){
-
-        const u8 *pVal; int nVal;
-        prollyNodeValue(pLeaf, j, &pVal, &nVal);
-        rc = prollyChunkerAdd(pCh, pCurKey, nCurKey, pVal, nVal);
-        if( rc!=SQLITE_OK ) return rc;
-        j++;
-        continue;
-      }
-    }
-
-    cmp = prollyKeyCmp(pCurKey, nCurKey, pEd->pKey, pEd->nKey);
-    if( cmp < 0 ){
-
-      const u8 *pVal; int nVal;
-      prollyNodeValue(pLeaf, j, &pVal, &nVal);
-      rc = prollyChunkerAdd(pCh, pCurKey, nCurKey, pVal, nVal);
-      if( rc!=SQLITE_OK ) return rc;
-      j++;
-    }else if( cmp == 0 ){
-
-      if( pEd->op==PROLLY_EDIT_INSERT ){
-        rc = prollyChunkerAddZeroTail(pCh, pEd->pKey, pEd->nKey,
-                                      pEd->pVal, pEd->nVal, pEd->nZeroTail);
-        if( rc!=SQLITE_OK ) return rc;
-      }
-      j++;
-      prollyMutMapIterNext(pIter);
     }else{
-
       if( pEd->op==PROLLY_EDIT_INSERT ){
         rc = prollyChunkerAddZeroTail(pCh, pEd->pKey, pEd->nKey,
                                       pEd->pVal, pEd->nVal, pEd->nZeroTail);
         if( rc!=SQLITE_OK ) return rc;
       }
+      if( cmp==0 ) j++;
       prollyMutMapIterNext(pIter);
+      pEd = prollyMutMapIterValid(pIter) ? prollyMutMapIterEntry(pIter) : 0;
     }
   }
 
