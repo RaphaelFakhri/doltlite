@@ -1109,16 +1109,20 @@ static void test_gc_vs_put_deduped_against_garbage(void){
   for( i=0; i<500 && access(ready, F_OK)!=0; i++ ) sqlite3_sleep(20);
   check("gc_dedup_reached_pause", access(ready, F_OK)==0);
   check("gc_dedup_gc_open", sqlite3_open(path, &db)==SQLITE_OK);
-  sqlite3_busy_timeout(db, 10000);
-  check("gc_dedup_gc", execSql(db, "SELECT dolt_gc()")==SQLITE_OK);
+  sqlite3_busy_timeout(db, 200);
+  check("gc_dedup_gc_refused",
+        (execSql(db, "SELECT dolt_gc()")&0xff)==SQLITE_BUSY);
   remove(pause);
   waitpid(pid, &status, 0);
-  check("gc_dedup_commit_busy", WIFEXITED(status) && WEXITSTATUS(status)==10);
+  check("gc_dedup_commit_ok", WIFEXITED(status) && WEXITSTATUS(status)==0);
+  sqlite3_busy_timeout(db, 10000);
+  check("gc_dedup_gc", execSql(db, "SELECT dolt_gc()")==SQLITE_OK);
   check("gc_dedup_log_readable",
         countRowsDiag(db, "SELECT count(*) FROM dolt_log")>0);
   check("gc_dedup_integrity",
         strcmp(queryScalarText(db, "PRAGMA integrity_check"), "ok")==0);
-  check("gc_dedup_retry", strcmp(queryScalarText(db, zCommit), orphan)==0);
+  check("gc_dedup_head_is_orphan",
+        strcmp(queryScalarText(db, "SELECT dolt_hashof('HEAD')"), orphan)==0);
   check("gc_dedup_retry_log",
         countRowsDiag(db, "SELECT count(*) FROM dolt_log")>0);
   check("gc_dedup_gc_after", execSql(db, "SELECT dolt_gc()")==SQLITE_OK);
@@ -1143,9 +1147,9 @@ static int mpAwaitPause(const char *ready){
   return access(ready, F_OK)==0;
 }
 
-/* A commit refused after a peer moved the working set restores the session
-** to a catalog the peer's gc swept. The refusal is still BUSY, and the
-** leftovers of the refused commit do not fail this connection's next gc. */
+/* A peer that writes and collects while a commit is paused mid-command is
+** refused rather than sweeping the catalog the commit is about to publish.
+** The commit lands, then the peer's write and gc do, and both survive. */
 static void test_gc_sweeps_refused_commit_catalog(void){
   char path[256];
   char pause[256];
@@ -1169,28 +1173,34 @@ static void test_gc_sweeps_refused_commit_catalog(void){
     if( execSql(db, "INSERT INTO t VALUES(100,'mine')")!=SQLITE_OK ) _exit(2);
     rc = execSql(db, "SELECT dolt_commit('-Am','mine')");
     unsetenv("DOLTLITE_PAUSE_BEFORE_BRANCH_ADVANCE");
-    if( rc!=SQLITE_BUSY ) _exit(10);
-    if( execSql(db, "SELECT dolt_gc()")!=SQLITE_OK ) _exit(11);
-    if( countRowsDiag(db, "SELECT count(*) FROM t")!=7 ) _exit(12);
-    if( execSql(db, "SELECT dolt_commit('-Am','retry')")!=SQLITE_OK ) _exit(13);
+    if( rc!=SQLITE_OK ) _exit(10);
     sqlite3_close(db);
     _exit(0);
   }
   if( pid<0 ){ perror("fork"); _exit(1); }
   check("gc_refused_reached_pause", mpAwaitPause(ready));
   check("gc_refused_peer_open", sqlite3_open(path, &db)==SQLITE_OK);
+  sqlite3_busy_timeout(db, 200);
+  check("gc_refused_peer_insert_refused",
+        (execSql(db, "INSERT INTO t VALUES(200,'peer')")&0xff)==SQLITE_BUSY);
+  check("gc_refused_peer_gc_refused",
+        (execSql(db, "SELECT dolt_gc()")&0xff)==SQLITE_BUSY);
+  remove(pause);
+  waitpid(pid, &status, 0);
+  if( !WIFEXITED(status) || WEXITSTATUS(status)!=0 ){
+    fprintf(stderr, "  paused-commit child exit %d\n",
+            WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+  }
+  check("gc_refused_commit_lands",
+        WIFEXITED(status) && WEXITSTATUS(status)==0);
   sqlite3_busy_timeout(db, 10000);
   check("gc_refused_peer_insert",
         execSql(db, "INSERT INTO t VALUES(200,'peer')")==SQLITE_OK);
   check("gc_refused_peer_gc", execSql(db, "SELECT dolt_gc()")==SQLITE_OK);
-  remove(pause);
-  waitpid(pid, &status, 0);
-  if( !WIFEXITED(status) || WEXITSTATUS(status)!=0 ){
-    fprintf(stderr, "  refused-commit child exit %d\n",
-            WIFEXITED(status) ? WEXITSTATUS(status) : -1);
-  }
-  check("gc_refused_commit_busy_then_recovers",
-        WIFEXITED(status) && WEXITSTATUS(status)==0);
+  check("gc_refused_rows_kept",
+        countRowsDiag(db, "SELECT count(*) FROM t WHERE id IN (100,200)")==2);
+  check("gc_refused_commit_kept",
+        countRowsDiag(db, "SELECT count(*) FROM dolt_at_t('HEAD') WHERE id=100")==1);
   check("gc_refused_integrity",
         strcmp(queryScalarText(db, "PRAGMA integrity_check"), "ok")==0);
   sqlite3_close(db);
@@ -1300,9 +1310,10 @@ static void test_own_gc_sees_peer_write(void){
   remove(path);
 }
 
-/* A command reads its source commit before the head-confirm lock. A peer that
-** deletes the source branch and runs gc in that window sweeps the commit; the
-** command must refuse instead of publishing a ref to it. */
+/* A command reads its source commit inside its write transaction. A peer
+** that tries to delete the source branch and run gc while the command runs
+** is refused, so the commit cannot be swept from under it; both succeed
+** once the command lands, and the store stays intact. */
 static void gc_sweeps_vc_source_case(const char *zName, const char *zCmd,
                                      int bDiverge){
   char path[256];
@@ -1348,15 +1359,20 @@ static void gc_sweeps_vc_source_case(const char *zName, const char *zCmd,
   snprintf(label, sizeof(label), "gc_src_%s_reached_pause", zName);
   check(label, mpAwaitPause(ready));
   sqlite3_open(path, &db);
+  sqlite3_busy_timeout(db, 200);
+  snprintf(label, sizeof(label), "gc_src_%s_peer_delete_refused", zName);
+  check(label, (execSql(db, "SELECT dolt_branch('-D','feat')")&0xff)==SQLITE_BUSY);
+  snprintf(label, sizeof(label), "gc_src_%s_peer_gc_refused", zName);
+  check(label, (execSql(db, "SELECT dolt_gc()")&0xff)==SQLITE_BUSY);
+  remove(pause);
+  waitpid(pid, &status, 0);
+  snprintf(label, sizeof(label), "gc_src_%s_lands", zName);
+  check(label, WIFEXITED(status) && WEXITSTATUS(status)==0);
   sqlite3_busy_timeout(db, 10000);
   snprintf(label, sizeof(label), "gc_src_%s_peer_delete", zName);
   check(label, execSql(db, "SELECT dolt_branch('-D','feat')")==SQLITE_OK);
   snprintf(label, sizeof(label), "gc_src_%s_peer_gc", zName);
   check(label, execSql(db, "SELECT dolt_gc()")==SQLITE_OK);
-  remove(pause);
-  waitpid(pid, &status, 0);
-  snprintf(label, sizeof(label), "gc_src_%s_busy", zName);
-  check(label, WIFEXITED(status) && WEXITSTATUS(status)==10);
   sqlite3_close(db);
   sqlite3_open(path, &db);
   snprintf(label, sizeof(label), "gc_src_%s_integrity", zName);

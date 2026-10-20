@@ -140,7 +140,9 @@ static int csRestoreCommittedRefsStateInner(ChunkStore *cs){
 }
 
 static int csRestoreCommittedRefsState(ChunkStore *cs){
-  int rc = csRestoreCommittedRefsStateInner(cs);
+  int rc;
+  cs->bWsReplacing = 0;
+  rc = csRestoreCommittedRefsStateInner(cs);
   chunkStoreReadoptWorkingSetBasis(cs);
   return rc;
 }
@@ -164,6 +166,7 @@ static int csCommitToMemory(ChunkStore *cs){
     sqlite3EndBenignMalloc();
   }
   csMarkRefsCommitted(cs);
+  cs->bWsReplacing = 0;
   return SQLITE_OK;
 }
 
@@ -429,6 +432,8 @@ static int csCommitToFile(
     return rc;
   }
 
+  rc = csCheckWorkingSetReplace(cs);
+  if( rc!=SQLITE_OK ) goto commit_done;
   rc = csVerifyStoredHits(cs);
   if( rc!=SQLITE_OK ) goto commit_done;
 
@@ -644,6 +649,7 @@ static int csCommitToFile(
 
   csCommitPublishStaging(cs, useRecent, aCommittedPending, aMerged, nMerged);
   chunkStoreNoteSelfPublishedWorkingSet(cs);
+  cs->bWsReplacing = 0;
   if( aCommittedPending!=aSmallCommittedPending ){
     sqlite3_free(aCommittedPending);
   }

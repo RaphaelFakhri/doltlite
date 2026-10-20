@@ -1285,7 +1285,9 @@ static void test_write_after_lost_commit_race(void){
 }
 
 /* Holds dolt_commit after it has hashed its working catalog and before it
-** publishes that catalog. A peer insert in the gap must survive. */
+** publishes that catalog. The command is one write transaction, so a peer
+** insert in the gap is refused rather than computed around, and the same
+** insert lands once the commit is done. */
 static void test_commit_keeps_peer_insert_during_publish(void){
   char path[256];
   char pause[256];
@@ -1295,7 +1297,7 @@ static void test_commit_keeps_peer_insert_during_publish(void){
   int i;
   pid_t pid;
 
-  printf("--- Test 6e: dolt_commit does not drop an insert that landed before publish ---\n");
+  printf("--- Test 6e: a peer insert during dolt_commit waits for it and survives ---\n");
   snprintf(path, sizeof(path), DOLTLITE_TEST_TMPDIR "/mp_commit_gap_%d.db", (int)getpid());
   snprintf(pause, sizeof(pause), DOLTLITE_TEST_TMPDIR "/mp_commit_gap_%d.pause", (int)getpid());
   snprintf(ready, sizeof(ready), "%s.ready", pause);
@@ -1320,7 +1322,6 @@ static void test_commit_keeps_peer_insert_during_publish(void){
     if( execSql(db, "INSERT INTO t VALUES(10, 'snap')")!=SQLITE_OK ) _exit(2);
     rc = execSql(db, "SELECT dolt_commit('-Am','snap')");
     sqlite3_close(db);
-    if( rc==SQLITE_BUSY ) _exit(10);
     if( rc==SQLITE_OK ) _exit(0);
     _exit(3);
   }
@@ -1328,17 +1329,24 @@ static void test_commit_keeps_peer_insert_during_publish(void){
   for( i=0; i<500 && access(ready, F_OK)!=0; i++ ) sqlite3_sleep(20);
   check("mp_commit_gap_reached_pause", access(ready, F_OK)==0);
   check("mp_commit_gap_open", sqlite3_open(path, &db)==SQLITE_OK);
+  sqlite3_busy_timeout(db, 200);
+  check("mp_commit_gap_peer_insert_busy",
+        execSql(db, "INSERT INTO t VALUES(11, 'peer')")==SQLITE_BUSY);
+  remove(pause);
+  waitpid(pid, &status, 0);
+  check("mp_commit_gap_commit_ok",
+        WIFEXITED(status) && WEXITSTATUS(status)==0);
   sqlite3_busy_timeout(db, 10000);
   check("mp_commit_gap_peer_insert",
         execSql(db, "INSERT INTO t VALUES(11, 'peer')")==SQLITE_OK);
-  remove(pause);
-  waitpid(pid, &status, 0);
-  check("mp_commit_gap_commit_busy",
-        WIFEXITED(status) && WEXITSTATUS(status)==10);
   check("mp_commit_gap_peer_kept",
         strcmp(queryScalarText(db,
           "SELECT group_concat(id) FROM (SELECT id FROM t ORDER BY id)"),
           "1,10,11")==0);
+  check("mp_commit_gap_committed",
+        strcmp(queryScalarText(db,
+          "SELECT group_concat(id) FROM (SELECT id FROM dolt_at_t('HEAD') ORDER BY id)"),
+          "1,10")==0);
   check("mp_commit_gap_retry",
         strlen(queryScalarText(db, "SELECT dolt_commit('-Am','retry')"))==40);
   check("mp_commit_gap_head",
@@ -1351,9 +1359,9 @@ static void test_commit_keeps_peer_insert_during_publish(void){
   remove(ready);
 }
 
-/* A peer commit in the same gap moves HEAD, so the paused commit loses the
-** race. The writes that connection acknowledges next must publish, and must
-** not erase the insert the peer made after its commit. */
+/* A peer that tries to commit while dolt_commit holds the lock is refused,
+** then commits once it is free. Neither side's acknowledged writes, nor the
+** ones the first connection makes afterwards, may be lost. */
 static void test_commit_lost_race_keeps_later_writes(void){
   char path[256];
   char pause[256];
@@ -1363,7 +1371,7 @@ static void test_commit_lost_race_keeps_later_writes(void){
   int rc;
   pid_t pid;
 
-  printf("--- Test 6f: writes after a lost commit race keep the peer's insert ---\n");
+  printf("--- Test 6f: a peer commit during dolt_commit waits and keeps every write ---\n");
   snprintf(path, sizeof(path), DOLTLITE_TEST_TMPDIR "/mp_commit_lost_%d.db", (int)getpid());
   snprintf(pause, sizeof(pause), DOLTLITE_TEST_TMPDIR "/mp_commit_lost_%d.pause", (int)getpid());
   snprintf(ready, sizeof(ready), "%s.ready", pause);
@@ -1387,16 +1395,15 @@ static void test_commit_lost_race_keeps_later_writes(void){
     for( i=0; i<500 && access(ready, F_OK)!=0; i++ ) sqlite3_sleep(20);
     if( access(ready, F_OK)!=0 ){ remove(pause); _exit(1); }
     if( sqlite3_open(path, &peer)!=SQLITE_OK ){ remove(pause); _exit(2); }
-    sqlite3_busy_timeout(peer, 10000);
-    ok = execSql(peer, "UPDATE t SET v='peer' WHERE id=1; "
-                       "SELECT dolt_commit('-am','peer')")==SQLITE_OK
-      && execSql(peer, "INSERT INTO t VALUES(11, 'peer')")==SQLITE_OK
-      && execSql(peer, "BEGIN IMMEDIATE")==SQLITE_OK;
-    /* Hold the lock past the committer's busy timeout, so its branch
-    ** advance fails on the lock instead of the HEAD check. */
+    sqlite3_busy_timeout(peer, 200);
+    ok = execSql(peer, "UPDATE t SET v='peer' WHERE id=1")==SQLITE_BUSY;
     remove(pause);
-    sqlite3_sleep(800);
-    if( ok ) ok = execSql(peer, "COMMIT")==SQLITE_OK;
+    sqlite3_busy_timeout(peer, 10000);
+    if( ok ){
+      ok = execSql(peer, "UPDATE t SET v='peer' WHERE id=1; "
+                         "SELECT dolt_commit('-am','peer')")==SQLITE_OK
+        && execSql(peer, "INSERT INTO t VALUES(11, 'peer')")==SQLITE_OK;
+    }
     sqlite3_close(peer);
     _exit(ok ? 0 : 3);
   }
@@ -1406,11 +1413,11 @@ static void test_commit_lost_race_keeps_later_writes(void){
   unsetenv("DOLTLITE_PAUSE_BEFORE_BRANCH_ADVANCE");
   waitpid(pid, &status, 0);
   check("mp_commit_lost_peer_acked", WIFEXITED(status) && WEXITSTATUS(status)==0);
-  check("mp_commit_lost_commit_busy", rc==SQLITE_BUSY);
+  check("mp_commit_lost_commit_ok", rc==SQLITE_OK);
   check("mp_commit_lost_sees_peer",
         strcmp(queryScalarText(db,
-          "SELECT group_concat(id) FROM (SELECT id FROM t ORDER BY id)"),
-          "1,10,11")==0);
+          "SELECT group_concat(id||v) FROM (SELECT id, v FROM t ORDER BY id)"),
+          "1peer,10mine,11peer")==0);
   check("mp_commit_lost_follow_up",
         execSql(db, "INSERT INTO t VALUES(12, 'after')")==SQLITE_OK);
   sqlite3_close(db);
@@ -1419,6 +1426,10 @@ static void test_commit_lost_race_keeps_later_writes(void){
         strcmp(queryScalarText(db,
           "SELECT group_concat(id) FROM (SELECT id FROM t ORDER BY id)"),
           "1,10,11,12")==0);
+  check("mp_commit_lost_history",
+        strcmp(queryScalarText(db,
+          "SELECT group_concat(message, '|') FROM (SELECT message FROM dolt_log LIMIT 2)"),
+          "peer|mine")==0);
   sqlite3_close(db);
   remove(path);
   remove(pause);

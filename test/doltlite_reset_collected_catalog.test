@@ -52,6 +52,7 @@ foreach layout {rowid clustered} {
     } {
       set wins 0
       set refusals 0
+      set peerRefusals 0
       for {set at 1} {$at<=400} {incr at} {
         forcedelete test.db
         file copy -force reset-collect-base.db test.db
@@ -82,13 +83,34 @@ foreach layout {rowid clustered} {
           } [list $peerHead {100 peer}]
           do_test $prefix.retry {catchsql $sql} {0 0}
         }
+        # The reset holds its transaction to the end, so the peer that tried
+        # to write and collect inside it is refused, and succeeds afterwards.
+        if {$fired && $peerResult} {
+          incr peerRefusals
+          do_test $prefix.reset-ok {lindex $result 0} 0
+          do_test $prefix.peer-after {
+            peer timeout 5000
+            catch {
+              peer eval {UPDATE w SET v='peer' WHERE id=100}
+              if {$::advance eq "amend"} {
+                peer eval {SELECT dolt_commit('-a','--amend','-m','peer')}
+              }
+              peer eval {SELECT dolt_gc()}
+            }
+          } 0
+          # A reset to HEAD~1 removed row 100 with the commit that held it.
+          do_test $prefix.peer-after-kept {
+            peer eval {SELECT id,v FROM w WHERE id=100}
+          } [expr {$target eq "head" ? {100 peer} : {}}]
+        }
         do_execsql_test $prefix.integrity {PRAGMA integrity_check} {ok}
         peer close
         db close
         if {!$fired} {break}
       }
       do_test reset-collected-$layout-$advance-$target.exhausted {
-        expr {$at<=400 && $wins>0 && ($advance eq "write" || $refusals>0)}
+        expr {$at<=400 && ($peerRefusals>0
+              || ($wins>0 && ($advance eq "write" || $refusals>0)))}
       } 1
     }
   }

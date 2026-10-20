@@ -3,8 +3,8 @@
 DoltLite supports multiple connections and processes on one database file, but
 it is not a free-for-all multi-writer server. Coordination is explicit: a
 **graph lock** sidecar serializes durable writers, write transactions pin a
-chunk-store snapshot, and multi-step version-control ops re-check HEAD under
-the lock before advancing a branch tip.
+chunk-store snapshot, and a version-control command that changes the
+database runs as one write transaction.
 
 For a DoltLite-format main database, the concurrency contract is:
 
@@ -73,10 +73,33 @@ For a DoltLite-format main database, the concurrency contract is:
   conflict outcome. The loser's stale tip must not clobber the winner's
   commit. Sequential multiproc commits both land; forked SQL transaction
   writers leave consistent table and index state.
-- **VC ops re-confirm HEAD under the lock.** Merge, cherry-pick, and revert use
-  locked compare-and-advance; pull and rebase use operation-specific locked
-  branch expectations. A peer commit between planning and ref update yields
-  `SQLITE_BUSY` instead of a lost update.
+- **A version-control command is one write transaction.** In autocommit, a
+  command that changes the database (`dolt_add`, `dolt_commit`, `dolt_merge`,
+  `dolt_cherry_pick`, `dolt_revert`, `dolt_reset`, `dolt_clean`,
+  `dolt_branch`, `dolt_tag`, `dolt_default_branch`,
+  `dolt_conflicts_resolve`, `dolt_verify_constraints`) takes the graph lock
+  when it starts and holds it until it finishes. It reads one snapshot, and
+  no peer write lands while it runs. A peer that tries gets `SQLITE_BUSY`, or
+  waits up to its busy timeout, and succeeds once the command is done. A
+  long merge therefore blocks other writers for its whole run, as a long
+  write transaction does in SQLite. Inside `BEGIN`, a command joins the
+  caller's transaction.
+- **Commands that find the lock held do not wait to start.** If a peer holds
+  the lock when such a command begins, the command does not wait for it. A
+  command that turns out to change nothing completes without blocking on the
+  peer; one that does write waits for the lock under the busy handler, and
+  re-checks HEAD and the working set before it publishes. A peer commit in
+  between yields `SQLITE_BUSY` instead of a lost update. `dolt_checkout`,
+  `dolt_rebase`, `dolt_gc`, and the remote commands always work this way:
+  `dolt_checkout` and `dolt_rebase` switch branches mid-command, `dolt_gc`
+  needs the lock free, and the remote commands must not hold the local lock
+  during a transfer. Pull and rebase use operation-specific locked branch
+  expectations.
+- **A working set is never replaced unread.** Publishing a branch's working
+  set is refused with `SQLITE_BUSY_SNAPSHOT` unless the working set it
+  replaces is the one this connection last read or wrote. A peer's write
+  that this connection has not seen is never overwritten. The check runs at
+  publish time, under the lock, for every caller.
 - **Remote ref installs are serialized.** HTTP pushes refresh the remote refs
   under the graph lock before validating and installing either conditional or
   plain ref updates. A stale push is rejected instead of replacing a peer's

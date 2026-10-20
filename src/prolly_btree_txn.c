@@ -690,8 +690,6 @@ int prollyBtreeBeginTrans(Btree *p, int wrFlag, int *pSchemaVersion){
   if( p->inTrans==TRANS_WRITE ){
     return SQLITE_OK;
   }
-  pBt->bCommitAbortedUnlocked = 0;
-
   if( p->inTrans==TRANS_READ && !wrFlag ){
     /* Another statement still reading keeps this snapshot, as in stock WAL:
     ** a refresh under it would let a write computed from its rows pass the
@@ -842,6 +840,7 @@ int prollyBtreeBeginTrans(Btree *p, int wrFlag, int *pSchemaVersion){
       }
     }
     PROLLY_ASSERT_GRAPH_LOCKED(pBt);
+    pBt->bOwnsGraphLock = 1;
   } else {
     if( p->inTrans==TRANS_NONE ){
       p->inTrans = TRANS_READ;
@@ -883,6 +882,7 @@ int prollyBtreeCommitPhaseOne(Btree *p, const char *zSuperJrnl){
   (void)zSuperJrnl;
   if( !p || p->inTrans!=TRANS_WRITE ) return SQLITE_OK;
   if( p->pBt && p->pBt->inCatalogSerialize ) return SQLITE_OK;
+  if( p->bCommandTxn ) return SQLITE_OK;
   if( p->db->nVdbeExec>1 ) return SQLITE_OK;
   if( !prollyHashIsEmpty(&p->vc.conflictsCatalogHash) ){
     sqlite3ErrorWithMsg(p->db, SQLITE_CONSTRAINT,
@@ -896,8 +896,15 @@ int sqlite3BtreeCommitPhaseOne(Btree *p, const char *zSuperJrnl){
   return p->pOps->xCommitPhaseOne(p, zSuperJrnl);
 }
 
+static void btreeReleaseTxnGraphLock(BtShared *pBt){
+  if( pBt->bOwnsGraphLock ){
+    pBt->bOwnsGraphLock = 0;
+    chunkStoreUnlock(&pBt->store);
+  }
+}
+
 static void commitPhaseTwoReleaseGraph(BtShared *pBt){
-  chunkStoreUnlock(&pBt->store);
+  btreeReleaseTxnGraphLock(pBt);
   pBt->store.snapshotPinned = 0;
 }
 
@@ -919,7 +926,6 @@ static void commitPhaseTwoAbort(
   if( commitRc==SQLITE_BUSY ) return;
   chunkStoreRollback(&pBt->store);
   commitPhaseTwoReleaseGraph(pBt);
-  pBt->bCommitAbortedUnlocked = 1;
 }
 
 static int commitPhaseTwoStageCatalog(
@@ -1241,6 +1247,7 @@ int prollyBtreeCommitPhaseTwo(Btree *p, int bCleanup){
 
   /* Nested commit from catalog-serialize SELECT finalize: no-op. */
   if( pBt->inCatalogSerialize ) return SQLITE_OK;
+  if( p->bCommandTxn && p->inTrans==TRANS_WRITE ) return SQLITE_OK;
 
   if( p->inTrans!=TRANS_WRITE ){
     commitPhaseTwoEndWriteTxn(p);
@@ -1249,6 +1256,111 @@ int prollyBtreeCommitPhaseTwo(Btree *p, int bCleanup){
   }
   return commitPhaseTwoWrite(p, pBt);
 }
+/* Open the write transaction a VC command runs in. Its statements commit
+** into it, so the command reads one snapshot under one lock and publishes
+** once, when doltliteBtreeEndCommandTxn ends it. The attempt does not wait:
+** a command that turns out to change nothing must not block on a peer's
+** transaction, so a held lock leaves the command to take it if it writes. */
+int doltliteBtreeBeginCommandTxn(Btree *p){
+  BusyHandler saved;
+  int rc;
+  if( !p || p->pOps!=&prollyBtreeOps || p->bCommandTxn
+   || p->inTrans==TRANS_WRITE || !p->db ){
+    return SQLITE_DONE;
+  }
+  saved = p->db->busyHandler;
+  p->db->busyHandler.xBusyHandler = 0;
+  rc = sqlite3BtreeBeginTrans(p, 1, 0);
+  p->db->busyHandler = saved;
+  if( rc!=SQLITE_OK ){
+    /* A refresh that failed partway may have spent the change signal. */
+    if( (rc&0xff)!=SQLITE_BUSY && (rc&0xff)!=SQLITE_READONLY ){
+      p->iLoadedWorkingStateVersion = p->pBt->iWorkingStateVersion - 1;
+      p->bForceCatalogReload = 1;
+    }
+    return rc;
+  }
+  p->bCommandTxn = 1;
+  p->bCommandWritesRows = 0;
+  p->nCommandBranchInstall = p->nBranchInstall;
+  return SQLITE_OK;
+}
+
+/* A command that left the session invalidated or on another branch
+** published what it meant to itself; the session it leaves behind is not
+** a working set to write back. A failed command that published nothing
+** rolls back to the snapshot it started from. */
+int doltliteBtreeEndCommandTxn(Btree *p, int bFailed, int bPublished){
+  BtShared *pBt;
+  sqlite3 *db;
+  int bHooks;
+  int rc;
+  if( !p || !p->bCommandTxn ) return SQLITE_OK;
+  p->bCommandTxn = 0;
+  if( p->inTrans!=TRANS_WRITE ) return SQLITE_OK;
+  pBt = p->pBt;
+  if( bPublished && !bFailed && !p->bCommandWritesRows
+   && pBt->store.staging.nPending==0
+   && prollyHashCompare(&pBt->store.refs.refsHash,
+                        &pBt->store.refs.committedRefsHash)==0 ){
+    btreeDiscardAllSavepoints(p);
+    commitPhaseTwoEndWriteTxn(p);
+    commitPhaseTwoReleaseGraph(pBt);
+    return SQLITE_OK;
+  }
+  if( p->bForceCatalogReload
+   || p->nCommandBranchInstall!=p->nBranchInstall
+   || (!prollyHashIsEmpty(&p->headCommit) && !p->isDetached
+       && pBt->store.refs.nBranches>0
+       && chunkStoreFindBranch(&pBt->store,
+                               p->zBranch ? p->zBranch : "main", 0)
+          ==SQLITE_NOTFOUND) ){
+    chunkStoreRollback(&pBt->store);
+    btreeDiscardAllSavepoints(p);
+    p->inTrans = TRANS_NONE;
+    p->inTransaction = TRANS_NONE;
+    btreeReleaseTxnGraphLock(pBt);
+    pBt->store.snapshotPinned = 0;
+    p->iLoadedWorkingStateVersion = pBt->iWorkingStateVersion - 1;
+    p->bForceCatalogReload = 1;
+    resetConnectionSchema(p);
+    return SQLITE_OK;
+  }
+  db = p->db;
+  /* Only a command that writes rows is an SQL transaction to the hooks; one
+  ** that only moves refs fires neither. */
+  bHooks = p->bCommandWritesRows && db;
+  if( bFailed && !bPublished ){
+    rc = sqlite3BtreeRollback(p, SQLITE_OK, 0);
+    if( bHooks && db->xRollbackCallback ) db->xRollbackCallback(db->pRollbackArg);
+    return rc;
+  }
+  if( bHooks && db->xCommitCallback && db->xCommitCallback(db->pCommitArg) ){
+    (void)sqlite3BtreeRollback(p, SQLITE_OK, 0);
+    if( db->xRollbackCallback ) db->xRollbackCallback(db->pRollbackArg);
+    return SQLITE_CONSTRAINT_COMMITHOOK;
+  }
+  rc = sqlite3BtreeCommit(p);
+  if( rc!=SQLITE_OK ){
+    (void)sqlite3BtreeRollback(p, SQLITE_OK, 0);
+    /* The command's own publish is durable; failing now would report an
+    ** effect that already happened as an error. Reload what landed. */
+    if( bPublished ){
+      p->iLoadedWorkingStateVersion = pBt->iWorkingStateVersion - 1;
+      p->bForceCatalogReload = 1;
+      resetConnectionSchema(p);
+      rc = SQLITE_OK;
+    }
+  }
+  return rc;
+}
+
+int doltliteInCommandTxn(sqlite3 *db){
+  Btree *p = (db && db->nDb>0) ? db->aDb[0].pBt : 0;
+  return p && p->pOps==&prollyBtreeOps && p->bCommandTxn
+      && p->inTrans==TRANS_WRITE;
+}
+
 int sqlite3BtreeCommitPhaseTwo(Btree *p, int bCleanup){
   if( !p ) return SQLITE_OK;
   return p->pOps->xCommitPhaseTwo(p, bCleanup);
@@ -1381,7 +1493,7 @@ static void rollbackAbandonWriteTxn(Btree *p, BtShared *pBt){
   p->inTrans = TRANS_NONE;
   p->inTransaction = TRANS_NONE;
   btreeDiscardAllSavepoints(p);
-  chunkStoreUnlock(&pBt->store);
+  btreeReleaseTxnGraphLock(pBt);
   pBt->store.snapshotPinned = 0;
 }
 
@@ -1415,8 +1527,7 @@ int prollyBtreeRollback(Btree *p, int tripCode, int writeOnly){
   if( p->inTrans==TRANS_WRITE ){
     /* A commit that aborted before publishing already released the lock;
     ** the rollback SQLite answers it with still has to undo the txn. */
-    if( !pBt->bCommitAbortedUnlocked ) PROLLY_ASSERT_GRAPH_LOCKED(pBt);
-    pBt->bCommitAbortedUnlocked = 0;
+    if( pBt->bOwnsGraphLock ) PROLLY_ASSERT_GRAPH_LOCKED(pBt);
     {
       BtCursor *pC;
       if( tripCode==SQLITE_OK || writeOnly ){
@@ -1471,7 +1582,7 @@ int prollyBtreeRollback(Btree *p, int tripCode, int writeOnly){
       p->inTransaction = TRANS_NONE;
       btreeDiscardAllSavepoints(p);
       chunkStoreRollback(&pBt->store);
-      chunkStoreUnlock(&pBt->store);
+      btreeReleaseTxnGraphLock(pBt);
       pBt->store.snapshotPinned = 0;
       return rc;
     }
@@ -1516,7 +1627,7 @@ int prollyBtreeRollback(Btree *p, int tripCode, int writeOnly){
                                    &p->vc.constraintViolationsHash);
       if( rc!=SQLITE_OK ){
         sqlite3_free(catData);
-        chunkStoreUnlock(&pBt->store);
+        btreeReleaseTxnGraphLock(pBt);
         pBt->store.snapshotPinned = 0;
         return rc;
       }
@@ -1559,7 +1670,7 @@ int prollyBtreeRollback(Btree *p, int tripCode, int writeOnly){
 
   commitPhaseTwoEndWriteTxn(p);
 
-  chunkStoreUnlock(&pBt->store);
+  btreeReleaseTxnGraphLock(pBt);
   pBt->store.snapshotPinned = p->inTrans==TRANS_READ;
 
   return rc==SQLITE_OK ? cursorRc : rc;

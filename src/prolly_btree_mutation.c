@@ -2020,6 +2020,7 @@ int doltliteEnsureWriteTxnAndSavepoints(sqlite3 *db){
 
   if( !db || db->nDb<=0 || !db->aDb[0].pBt ) return SQLITE_ERROR;
   pBtree = db->aDb[0].pBt;
+  if( pBtree->bCommandTxn ) pBtree->bCommandWritesRows = 1;
   /* Explicit txn: take a read first so a stale snapshot refuses the upgrade.
   ** Autocommit: begin the write directly (the read would stick BUSY forever). */
   if( pBtree->inTrans==TRANS_NONE && !db->autoCommit ){

@@ -3022,6 +3022,12 @@ int doltliteClone(
     csDetachSavedRefsState(pLocal, &savedRefs);
     refsDetached = 1;
     rc = chunkStoreInstallRefsBlob(pLocal, refsData, nRefsData);
+    /* A clone replaces the empty target outright; the working sets it
+    ** installs are the ones the session goes on to overwrite. */
+    if( rc==SQLITE_OK ){
+      pLocal->bWsReplacing = 0;
+      chunkStoreReadoptWorkingSetBasis(pLocal);
+    }
   }
   sqlite3_free(refsData);
   refsData = 0;

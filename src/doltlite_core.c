@@ -1487,6 +1487,9 @@ int doltliteVcSealEnclosingTxn(sqlite3 *db){
     failNextVcSeal = 0;
     return SQLITE_ERROR;
   }
+  if( db->autoCommit && !db->pSavepoint && doltliteInCommandTxn(db) ){
+    return SQLITE_OK;
+  }
   if( !db->autoCommit
    || sqlite3_txn_state(db, "main")!=SQLITE_TXN_NONE
    || db->pSavepoint ){

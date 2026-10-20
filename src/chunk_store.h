@@ -260,6 +260,12 @@ struct ChunkStore {
   ** one it knew to be durable (adopted or published itself); a command that
   ** saw it bump picked up a peer's write mid-flight. Comparing against the
   ** basis instead would count a rolled-back local write as foreign. */
+  /* The session branch's working set as it stood, and the basis it was
+  ** computed from, when this batch first replaced it. Publishing over a
+  ** working set the session never read would erase a peer's write. */
+  u8 bWsReplacing;
+  ProllyHash wsReplaced;
+  ProllyHash wsReplacedBasis;
   u8 bWsKnown;
   CsWsBranch wsKnownBranch;
   ProllyHash wsKnown;
@@ -387,6 +393,7 @@ void chunkStoreFollowWorkingSetBasis(ChunkStore *cs, const char *zBranch);
 void chunkStoreFreeWsBranches(ChunkStore *cs);
 void chunkStoreReadoptWorkingSetBasis(ChunkStore *cs);
 int chunkStoreWorkingSetMovedFromBasis(ChunkStore *cs, const char *zBranch);
+int csCheckWorkingSetReplace(ChunkStore *cs);
 void chunkStoreGetWorkingSetBasis(ChunkStore *cs, const char *zBranch,
                                   ProllyHash *pHash);
 void chunkStorePeekWorkingSetBasis(ChunkStore *cs, const char *zBranch,
