@@ -1445,6 +1445,82 @@ static void test_append_history(void){
   }
 }
 
+static void test_mixed_merge_history(void){
+  int intKey, earlyEdits;
+  for(intKey=0; intKey<2; intKey++){
+    for(earlyEdits=0; earlyEdits<2; earlyEdits++){
+      ChunkStore cs;
+      ProllyCache cache;
+      ProllyChunker ch;
+      ProllyMutMap edits;
+      ProllyMutator mut;
+      ProllyHash root = {{0}}, want = {{0}};
+      u8 key[17], val[96];
+      u8 flags = PROLLY_NODE_SUBTREE_COUNTS
+               | (intKey ? PROLLY_NODE_INTKEY : PROLLY_NODE_BLOBKEY);
+      int nKey = intKey ? 8 : (int)sizeof(key);
+      int phase, i, rc;
+      char zTest[100];
+
+      memset(&cs, 0, sizeof(cs));
+      rc = chunkStoreOpen(&cs, sqlite3_vfs_find(0), ":memory:",
+                          SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
+                          | SQLITE_OPEN_MAIN_DB);
+      check("mixed merge: open", rc==SQLITE_OK);
+      if( rc!=SQLITE_OK ) continue;
+      rc = prollyCacheInit(&cache, earlyEdits ? 4096 : 1024*1024);
+      check("mixed merge: cache", rc==SQLITE_OK);
+      if( rc!=SQLITE_OK ){
+        chunkStoreClose(&cs);
+        continue;
+      }
+      rc = prollyMutMapInit(&edits, (u8)intKey);
+      for(phase=0; phase<3 && rc==SQLITE_OK; phase++){
+        prollyChunkerInit(&ch, &cs, flags);
+        for(i=0; i<=4099 && rc==SQLITE_OK; i++){
+          int k = phase==1 ? 4099-i : i;
+          int present = k>0 && k<=4096 && k%2==0;
+          int inRange = !earlyEdits || k<2048;
+          int deleted = inRange && k%10==0;
+          int inserted = inRange && !present && (k%5==1 || k==4099);
+          int changed = inRange && present && k%7==0;
+          int nVal = changed && phase ? 17+k%64 : 32;
+          memset(key, 'k', sizeof(key));
+          encodeIntKey(k, key+nKey-8);
+          key[nKey-8] ^= 0x80;
+          memset(val, changed && phase ? 'u' : 'v', sizeof(val));
+          if( phase==1 ){
+            if( deleted ){
+              rc = prollyMutMapDelete(&edits, key, nKey, k);
+            }else if( inserted || changed ){
+              rc = prollyMutMapInsert(&edits, key, nKey, k, val, nVal);
+            }
+          }else if( phase==0 ? present : (!deleted && (present || inserted)) ){
+            rc = prollyChunkerAdd(&ch, key, nKey, val, nVal);
+          }
+        }
+        if( phase!=1 && rc==SQLITE_OK ) rc = prollyChunkerFinish(&ch);
+        if( phase==0 ) prollyChunkerGetRoot(&ch, &root);
+        if( phase==2 ) prollyChunkerGetRoot(&ch, &want);
+        prollyChunkerFree(&ch);
+      }
+      memset(&mut, 0, sizeof(mut));
+      mut.pStore = &cs;
+      mut.pCache = &cache;
+      mut.oldRoot = root;
+      mut.pEdits = &edits;
+      mut.flags = flags;
+      if( rc==SQLITE_OK ) rc = prollyMutateFlush(&mut);
+      sqlite3_snprintf(sizeof(zTest), zTest,
+                      "mixed merge: intkey=%d early-edits=%d", intKey, earlyEdits);
+      check(zTest, rc==SQLITE_OK && prollyHashCompare(&mut.newRoot, &want)==0);
+      prollyMutMapFree(&edits);
+      prollyCacheFree(&cache);
+      chunkStoreClose(&cs);
+    }
+  }
+}
+
 int main(void){
   sqlite3_initialize();
   printf("Prolly chunker boundary golden tests\n");
@@ -1453,6 +1529,7 @@ int main(void){
   test_xxh32_golden();
   test_weibull_golden();
   test_chunker_root_golden();
+  test_mixed_merge_history();
   test_chunker_repeatable();
   test_canonical_root_chain();
   test_sparse_canonical_root();
