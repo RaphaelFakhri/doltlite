@@ -272,6 +272,10 @@ struct ChunkStore {
   u8 bDeferPublish;
   u8 bPublishDeferred;
   ProllyHash deferredRefsHash;
+  /* A command probing whether it changes anything: wanting the graph lock
+  ** means it does. */
+  u8 bLockProbe;
+  u8 bLockProbeHit;
   u8 bWsKnown;
   CsWsBranch wsKnownBranch;
   ProllyHash wsKnown;

@@ -103,25 +103,55 @@ static void doltliteRunCommand(
   sqlite3 *db = sqlite3_context_db_handle(ctx);
   Vdbe *pOuter = db->pVcCommand;
   Btree *pMain = db->nDb>0 ? db->aDb[0].pBt : 0;
+  ChunkStore *cs = doltliteGetChunkStore(db);
   int bScope = 0;
+  int bProbe = 0;
+  int rcBegin = SQLITE_OK;
   db->pVcCommand = ctx->pVdbe;
   /* In autocommit the command is its own write transaction. Inside BEGIN
-  ** it joins the caller's. A command that cannot begin one (read-only,
-  ** busy, a peer-deleted branch) runs as before and reports its own
-  ** refusal. */
+  ** it joins the caller's. A read-only command, or one on a peer-deleted
+  ** branch, cannot begin one and reports its own refusal. */
   if( eScope!=DOLTLITE_CMD_UNSCOPED && !pOuter && db->autoCommit
-   && !db->pSavepoint && doltliteGetChunkStore(db) && !doltliteIsDetached(db) ){
+   && !db->pSavepoint && cs && !doltliteIsDetached(db) ){
     int rc = doltliteBtreeBeginCommandTxn(pMain, eScope==DOLTLITE_CMD_SCOPED);
+    int bMissing = (rc&0xff)==SQLITE_BUSY
+                && doltliteBtreeMissingWriteBranch(pMain)!=0;
     bScope = rc==SQLITE_OK;
-    /* A refresh that failed partway leaves no snapshot to run on. */
-    if( rc!=SQLITE_OK && rc!=SQLITE_DONE
-     && (rc&0xff)!=SQLITE_BUSY && (rc&0xff)!=SQLITE_READONLY ){
-      sqlite3_result_error_code(ctx, rc);
-      db->pVcCommand = pOuter;
-      return;
+    /* A no-wait command finds out whether it changes anything without the
+    ** lock; one that does starts over in a transaction that waits. */
+    bProbe = (rc&0xff)==SQLITE_BUSY && !bMissing
+          && eScope==DOLTLITE_CMD_NOWAIT;
+    if( rc!=SQLITE_OK && rc!=SQLITE_DONE && !bProbe && !bMissing
+     && (rc&0xff)!=SQLITE_READONLY ){
+      rcBegin = rc;
     }
   }
-  doltliteInvokeShieldedFunc(ctx, argc, argv, pOuter==0);
+  if( bProbe ){
+    BusyHandler saved = db->busyHandler;
+    db->busyHandler.xBusyHandler = 0;
+    cs->bLockProbe = 1;
+    cs->bLockProbeHit = 0;
+    doltliteInvokeShieldedFunc(ctx, argc, argv, 1);
+    cs->bLockProbe = 0;
+    db->busyHandler = saved;
+    if( cs->bLockProbeHit || (ctx->isError&0xff)==SQLITE_BUSY ){
+      sqlite3_result_null(ctx);
+      ctx->isError = 0;
+      doltliteInvalidateSessionWorkingState(db);
+      rcBegin = doltliteBtreeBeginCommandTxn(pMain, 1);
+      bScope = rcBegin==SQLITE_OK;
+      bProbe = 0;
+    }
+  }
+  if( rcBegin!=SQLITE_OK ){
+    sqlite3_result_error(ctx, (rcBegin&0xff)==SQLITE_BUSY
+        ? "database is busy: another connection holds the write lock"
+        : sqlite3ErrStr(rcBegin), -1);
+    sqlite3_result_error_code(ctx, rcBegin);
+    db->pVcCommand = pOuter;
+    return;
+  }
+  if( !bProbe ) doltliteInvokeShieldedFunc(ctx, argc, argv, pOuter==0);
   if( bScope ){
     int rc = doltliteBtreeEndCommandTxn(pMain, ctx->isError!=0,
                                         ctx->pVdbe->vcInstalled);

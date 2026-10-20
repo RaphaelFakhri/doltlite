@@ -616,6 +616,10 @@ int chunkStoreLockAndRefreshChanged(ChunkStore *cs, int *pChanged){
   int rc;
   if( pChanged ) *pChanged = 0;
   if( cs->isMemory || cs->isBuffer ) return SQLITE_OK;
+  if( cs->bLockProbe && cs->lockDepth==0 ){
+    cs->bLockProbeHit = 1;
+    return SQLITE_BUSY;
+  }
   if( cs->pLockMutex && sqlite3_mutex_try(cs->pLockMutex)!=SQLITE_OK ){
     return SQLITE_BUSY;
   }
