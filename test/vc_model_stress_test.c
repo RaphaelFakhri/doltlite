@@ -371,6 +371,7 @@ static int runOp(Conn *c, const char *zOp, const char *zSql, int wantVictim){
   }
   rc = ex(c, "begin_victim", "BEGIN IMMEDIATE");
   if( rc ) return rc;
+  gVictimS = nowNs();
   readVictim(c);
   rc = ex(c, zOp, zSql);
   {
@@ -899,6 +900,7 @@ static void loadLogs(void){
   nFatal = 0; nKnownParked = 0;
   for(w=0; w<nProc; w++){
     char path[700], line[2048];
+    long long victimLockS = 0, victimLockE = 0;
     FILE *f;
     snprintf(path, sizeof(path), "%s/log.%d", zDir, w);
     f = fopen(path, "r");
@@ -915,10 +917,19 @@ static void loadLogs(void){
         GROW(aUnk, nUnk, capUnk); aUnk[nUnk++] = atoll(t[1]);
       }else if( !strcmp(t[0],"D") ){
         GROW(aDel, nDel, capDel); aDel[nDel++] = atoll(t[1]);
+      }else if( !strcmp(t[0],"S") && nt>=5
+             && !strcmp(t[4],"BEGIN IMMEDIATE") ){
+        victimLockS = atoll(t[1]);
+        victimLockE = atoll(t[2]);
       }else if( !strcmp(t[0],"X") && nt>=6 ){
         GROW(aX, nX, capX);
         aX[nX].flags = atoi(t[1]); snprintf(aX[nX].br, 48, "%s", t[2]);
         aX[nX].S = atoll(t[3]); aX[nX].E = atoll(t[4]);
+        /* The victim was read after the lock wait, not at its start. */
+        if( (aX[nX].flags & FM) && aX[nX].S<=victimLockS
+         && victimLockE<=aX[nX].E && victimLockE>aX[nX].S ){
+          aX[nX].S = victimLockE;
+        }
         snprintf(aX[nX].op, 24, "%s", t[5]);
         snprintf(aX[nX].victim, 64, "%s", nt>6 ? t[6] : "*");
         snprintf(aX[nX].newmsg, 64, "%s", nt>7 ? t[7] : ""); nX++;
