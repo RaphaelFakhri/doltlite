@@ -109,6 +109,15 @@ for soft_branch in main b1; do
   fi
 done
 
+d=$(newdir commit_during_lock_wait)
+"$DOLTLITE" "$d/db.db" "SELECT dolt_commit('--allow-empty','-m','m_protected');" >/dev/null
+printf '%s\n' \
+  $'I\t100000012\tmain\t1000\t1100' \
+  $'C\tm_protected\tmain\t4000\t4500\t1' \
+  $'S\t3000\t6000\tc0\tBEGIN IMMEDIATE' \
+  $'X\t7\tmain\t3000\t9000\treset_hard_1\tm_other' > "$d/log.0"
+check commit_during_lock_wait_protects_row 1 "$d"
+
 if [ "$fails" -ne 0 ]; then
   echo "vc_model_stress_check: $fails failed"
   exit 1
