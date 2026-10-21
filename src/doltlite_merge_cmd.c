@@ -1004,10 +1004,6 @@ static int mergeFastForward(
     }
     if( rc==SQLITE_OK ){
       rc = doltliteRefreshAndConfirmHead(db, cs, pOurHead);
-      if( rc==SQLITE_OK && db->autoCommit ){
-        rc = doltliteConfirmWorkingSet(db, cs, &cleanWorkingSet);
-        if( rc!=SQLITE_OK ) chunkStoreUnlock(cs);
-      }
     }
     if( rc==SQLITE_OK ){
       int persistRc = db->autoCommit
@@ -1513,10 +1509,6 @@ static int mergeRefLeaveUncommitted(
   }
 
   rc = doltliteRefreshAndConfirmHead(db, cs, pOurHead);
-  if( rc==SQLITE_OK && db->autoCommit ){
-    rc = doltliteConfirmWorkingSet(db, cs, pCleanWorkingSet);
-    if( rc!=SQLITE_OK ) chunkStoreUnlock(cs);
-  }
   if( rc==SQLITE_BUSY ){
     doltliteCmdResultPeerBranchBusy(context, "merge");
     doltliteRestoreTxnStateOnFailure(db, pSaved, rc);
@@ -1587,7 +1579,6 @@ int doltliteMergeRef(
   int bHaveSaved = 0;
   int bPeerBusy = 0;
   int bRestoreOnFail = 0;
-  int bPersistRestore = 0;
   int isMerging = !squash;
   const char *zFail = 0;
   char *zOwnedErr = 0;
@@ -1598,7 +1589,6 @@ int doltliteMergeRef(
   char **azRebuildVtabs = 0;
   int nRebuildVtabs = 0;
   int nViolations = 0;
-  int bAutocommitLike = doltliteVcTxnMode(db)==DOLTLITE_VC_TXN_AUTOCOMMIT_LIKE;
   ProllyHash cleanWorkingSet;
 
   memset(&ourCommit, 0, sizeof(ourCommit));
@@ -1755,16 +1745,6 @@ int doltliteMergeRef(
     goto merge_fail;
   }
   if( rc!=SQLITE_OK ) goto merge_fail;
-  if( bAutocommitLike ){
-    /* Nested SQL since the dirty check can drop the write lock, letting a
-    ** peer write the working set this merge would replace. */
-    rc = doltliteConfirmWorkingSet(db, cs, &cleanWorkingSet);
-    if( rc!=SQLITE_OK ){
-      chunkStoreUnlock(cs);
-      bPeerBusy = rc==SQLITE_BUSY;
-      goto merge_fail;
-    }
-  }
   chunkStoreUnlock(cs);
 
   rc = doltliteSwitchCatalog(db, &mergedCatHash);
@@ -1801,7 +1781,6 @@ int doltliteMergeRef(
       db, &ancCatHash, &nViolations, &zOwnedErr);
   if( rc!=SQLITE_OK ){
     bRestoreOnFail = 1;
-    bPersistRestore = db->autoCommit;
     goto merge_fail;
   }
   if( nViolations > 0 ){
@@ -1894,22 +1873,6 @@ merge_fail:
   if( bHaveSaved ){
     if( bRestoreOnFail ){
       int restoreRc = doltliteRestoreTxnState(db, &savedState);
-      /* The saved state predates a peer write that landed in the lock gap;
-      ** keeping it would let the next write publish over the peer. */
-      if( restoreRc==SQLITE_OK && bAutocommitLike && !bPersistRestore
-       && doltliteConfirmWorkingSet(db, cs, &cleanWorkingSet)==SQLITE_BUSY ){
-        bPeerBusy = 1;
-      }
-      if( restoreRc==SQLITE_OK && bPersistRestore ){
-        restoreRc = doltliteRefreshAndConfirmHead(
-            db, cs, &savedState.sessionHead);
-        if( restoreRc==SQLITE_BUSY ) bPeerBusy = 1;
-        if( restoreRc==SQLITE_OK ){
-          restoreRc = doltlitePersistWorkingSetWithHash(
-              db, &savedState.sessionCatalogHash);
-          chunkStoreUnlock(cs);
-        }
-      }
       doltliteTxnStateClear(&savedState);
       if( restoreRc!=SQLITE_OK ) rc = restoreRc;
     }else{
