@@ -3337,21 +3337,22 @@ static void doltliteRebaseInteractiveContinue(
   ** delete, and return-branch restore. The working branch keeps the claim's
   ** fields until it is deleted, so a crash before then is still abortable. */
   rc = doltlitePersistWorkingSet(db);
-  if( rc!=SQLITE_OK ) goto abort_err;
+  if( rc==SQLITE_OK && sqlite3FaultSim(965) ) rc = SQLITE_IOERR;
+  if( rc!=SQLITE_OK ) goto finish_err;
 
   /* curCat is the flushed catalog just persisted; do not re-serialize the
   ** discarded branch while schema is transitional. */
   rc = doltliteCheckoutBranchForRebaseWithOldCatalog(
       db, zOrigBranch, &curCat);
-  if( rc!=SQLITE_OK ) goto abort_err;
+  if( rc!=SQLITE_OK ) goto finish_err;
   rc = doltliteMutateRefs(db, rebaseDeleteWorkingBranchRefs, zWorking);
-  if( rc!=SQLITE_OK ) goto abort_err;
+  if( rc!=SQLITE_OK ) goto finish_err;
   rc = rebaseRestoreReturnBranchWorkingState(db, zReturnBranch);
-  if( rc!=SQLITE_OK ) goto abort_err;
+  if( rc!=SQLITE_OK ) goto finish_err;
   rc = doltlitePersistWorkingSet(db);
-  if( rc!=SQLITE_OK ) goto abort_err;
+  if( rc!=SQLITE_OK ) goto finish_err;
   rc = doltliteVcSealBranchStyleTxn(db);
-  if( rc!=SQLITE_OK ) goto abort_err;
+  if( rc!=SQLITE_OK ) goto finish_err;
 
   rebaseFreePlan(aPlan, nPlan);
   sqlite3_free(zReplayErr);
@@ -3415,6 +3416,21 @@ abort_err_cas:
         "rebase aborted due to changes in the source branch", SQLITE_NOMEM);
     }
   }
+  return;
+
+/* The original branch already names the rebased commits, so the abort
+** cleanup would delete the working branch while reporting a restore that
+** did not happen. Leave it: a command transaction discards the whole
+** --continue, and otherwise the working branch keeps the claim to abort. */
+finish_err:
+  sqlite3_free(zPrevBranch);
+  rebaseFreePlan(aPlan, nPlan);
+  sqlite3_free(zOrigBranch);
+  sqlite3_free(zReturnBranch);
+  sqlite3_free(zWorking);
+  sqlite3_free(zReplayErr);
+  doltliteVcResultErrorCode(context, db,
+    "rebase failed while finishing; the rebase is still in progress", rc);
   return;
 
 abort_err:

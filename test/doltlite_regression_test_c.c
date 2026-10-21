@@ -12970,6 +12970,69 @@ static void run_rebase_recovery_failure_is_reported(void){
   removeDbFiles(dbpath);
 }
 
+static void run_rebase_finish_failure_keeps_rebase(void){
+  sqlite3 *db = 0;
+  char dbpath[256];
+  const char *res;
+
+  printf("=== Rebase Finish Failure Keeps Rebase Test ===\n\n");
+  make_dbpath(dbpath, sizeof(dbpath), "test_rebase_finish_failure_keeps_rebase");
+  removeDbFiles(dbpath);
+
+  check("open_db_for_rebase_finish_failure", open_db(dbpath, &db)==SQLITE_OK);
+  check("setup_repo_for_rebase_finish_failure", execSql(db,
+    "CREATE TABLE t(id INTEGER PRIMARY KEY, v INT);"
+    "INSERT INTO t VALUES (1, 1);"
+    "SELECT dolt_commit('-A', '-m', 'init');"
+    "SELECT dolt_checkout('-b', 'feat');"
+    "INSERT INTO t VALUES (2, 2);"
+    "SELECT dolt_commit('-A', '-m', 'f1');"
+    "SELECT dolt_checkout('main');"
+    "INSERT INTO t VALUES (3, 3);"
+    "SELECT dolt_commit('-A', '-m', 'm1');"
+    "SELECT dolt_checkout('feat');")==SQLITE_OK);
+  check("start_interactive_rebase_for_finish_failure",
+        strstr(queryScalarText(db, "SELECT dolt_rebase('-i', 'main')"),
+               "interactive rebase started")!=0);
+
+  gRegressionFaultCode = 965;
+  gRegressionFaultHits = 0;
+  sqlite3_test_control(SQLITE_TESTCTRL_FAULT_INSTALL, regressionFaultCallback);
+  res = queryScalarText(db, "SELECT dolt_rebase('--continue')");
+  sqlite3_test_control(SQLITE_TESTCTRL_FAULT_INSTALL, 0);
+  gRegressionFaultCode = 0;
+
+  check("rebase_finish_failure_was_injected", gRegressionFaultHits==1);
+  check("rebase_finish_failure_is_returned", strstr(res, "ERROR:")!=0);
+  check("rebase_finish_failure_claims_no_restore",
+        strstr(res, "branch restored to pre-rebase state")==0);
+  check("rebase_finish_failure_keeps_working_branch",
+        strcmp(queryScalarText(db,
+          "SELECT count(*) FROM dolt_branches WHERE name='dolt_rebase_feat'"),
+          "1")==0);
+  check("rebase_finish_failure_keeps_feat_tip",
+        strcmp(queryScalarText(db,
+          "SELECT message FROM dolt_log('feat') LIMIT 1"), "f1")==0);
+
+  sqlite3_close(db);
+  db = 0;
+  check("reopen_db_for_rebase_finish_failure", open_db(dbpath, &db)==SQLITE_OK);
+  check("rebase_finish_failure_checkout_working",
+        execSql(db, "SELECT dolt_checkout('dolt_rebase_feat')")==SQLITE_OK);
+  res = queryScalarText(db, "SELECT dolt_rebase('--continue')");
+  if( !strstr(res, "Successfully rebased") ) printf("retry: %s\n", res);
+  check("rebase_finish_failure_retry_succeeds",
+        strstr(res, "Successfully rebased")!=0);
+  check("rebase_finish_failure_retry_log",
+        strcmp(queryScalarText(db,
+          "SELECT group_concat(message, ',') FROM "
+          "(SELECT message FROM dolt_log('feat') LIMIT 3)"),
+          "f1,m1,init")==0);
+
+  sqlite3_close(db);
+  removeDbFiles(dbpath);
+}
+
 static void run_rebase_continue_conflict_abort_restores_durable_state(void){
   sqlite3 *db = 0;
   char dbpath[256];
@@ -18685,6 +18748,7 @@ static const RegressionCase aCases[] = {
   { "rebase_start_failure_cleans_working_branch", "Rebase Start Failure Cleans Working Branch Test", run_rebase_start_failure_cleans_working_branch },
   { "rebase_recovery_failure_is_reported", "Rebase Recovery Failure Is Reported Test", run_rebase_recovery_failure_is_reported },
   { "rebase_continue_conflict_abort_restores_durable_state", "Rebase Continue Conflict Abort Restores Durable State Test", run_rebase_continue_conflict_abort_restores_durable_state },
+  { "rebase_finish_failure_keeps_rebase", "Rebase Finish Failure Keeps Rebase Test", run_rebase_finish_failure_keeps_rebase },
   { "rebase_concurrent_peer_commit_is_preserved", "Rebase Concurrent Peer Commit Preservation Test", run_rebase_concurrent_peer_commit_is_preserved },
   { "rebase_continue_keeps_peer_branch", "Rebase Continue Keeps Peer Branch Test", run_rebase_continue_keeps_peer_branch },
   { "rebase_main_table_schema_guard", "Rebase Main Table Schema Guard Test", run_rebase_main_table_schema_guard },
