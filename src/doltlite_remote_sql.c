@@ -1541,6 +1541,224 @@ fetch_done:
   doltliteCmdArgsClear(&args);
 }
 
+/* The local half of a pull: fast-forward or merge the fetched tracking
+** commit into the session branch. It runs as a scoped command does. */
+static void doltPullIntegrate(
+  sqlite3_context *ctx,
+  const char *zRemoteName,
+  const char *zRemoteBranch,
+  int bFfOnly,
+  int bNoFf,
+  int bSquash,
+  DoltliteTxnState *pSavedState
+){
+  sqlite3 *db = sqlite3_context_db_handle(ctx);
+  ChunkStore *cs = doltliteGetChunkStore(db);
+  const char *zLocalBranch;
+  ProllyHash trackingCommit, localCommit;
+  ProllyHash cleanWorkingSet, ignoredCat;
+  int dirty = 0;
+  int rc;
+
+  memset(&ignoredCat, 0, sizeof(ignoredCat));
+  rc = chunkStoreFindTracking(
+      cs, zRemoteName, zRemoteBranch, &trackingCommit);
+  if( rc!=SQLITE_OK || prollyHashIsEmpty(&trackingCommit) ){
+    remoteSqlRestoreAndReport(ctx, db, cs, pSavedState, SQLITE_ERROR,
+                              "tracking branch not found after fetch");
+    return;
+  }
+
+  zLocalBranch = doltliteGetSessionBranch(db);
+  if( !zLocalBranch ){
+    remoteSqlRestoreAndReport(ctx, db, cs, pSavedState, SQLITE_ERROR,
+                              "cannot pull in detached head");
+    return;
+  }
+  rc = chunkStoreFindBranch(cs, zLocalBranch, &localCommit);
+  if( rc!=SQLITE_OK ){
+    remoteSqlRestoreAndReport(ctx, db, cs, pSavedState, rc,
+                              "current branch not found after fetch");
+    return;
+  }
+
+  if( prollyHashCompare(&localCommit, &trackingCommit)==0 ){
+    /* Nothing new to merge. A dirty working set is still refused.
+    ** A branch that is ahead of the remote is not this case: that pull
+    ** returns 0 and keeps the uncommitted edits. An ignored untracked
+    ** table is not a change. */
+    char *zErr = 0;
+    rc = doltliteSeparateIgnoredChanges(db, &dirty, &ignoredCat, &zErr);
+    if( rc!=SQLITE_OK ){
+      remoteSqlRestoreAndReport(ctx, db, cs, pSavedState, rc, zErr);
+      sqlite3_free(zErr);
+      return;
+    }
+    sqlite3_free(zErr);
+    if( dirty ){
+      remoteSqlRestoreAndReport(ctx, db, cs, pSavedState, SQLITE_ERROR,
+                                "cannot merge with uncommitted changes");
+      return;
+    }
+    doltliteNoteSessionMissedDiskTip(db);
+    remoteSqlClearAndSucceed(ctx, pSavedState);
+    return;
+  }
+
+  {
+    ProllyHash ancestor;
+    rc = doltliteFindAncestor(db, &trackingCommit, &localCommit, &ancestor);
+    if( rc!=SQLITE_OK ){
+      remoteSqlRestoreAndReport(ctx, db, cs, pSavedState, rc, 0);
+      return;
+    }
+    if( prollyHashCompare(&ancestor, &trackingCommit)==0 ){
+      doltliteNoteSessionMissedDiskTip(db);
+      remoteSqlClearAndSucceed(ctx, pSavedState);
+      return;
+    }
+    if( prollyHashCompare(&ancestor, &localCommit)!=0 && bFfOnly ){
+      remoteSqlRestoreAndReport(ctx, db, cs, pSavedState, SQLITE_ERROR,
+                                "fatal: Not possible to fast-forward, aborting");
+      return;
+    }
+    if( prollyHashCompare(&ancestor, &localCommit)!=0 || bNoFf || bSquash ){
+      char zTrackingHash[PROLLY_HASH_SIZE*2+1];
+      char *zMergeMsg;
+      if( strcmp(zRemoteName, "origin")==0
+       && chunkStoreOriginSourceEnabled(cs) ){
+        remoteSqlRestoreAndReport(
+          ctx, db, cs, pSavedState, SQLITE_ERROR,
+          "cannot merge a non-fast-forward pull in a lazy store; "
+          "materialize the store first");
+        return;
+      }
+      /* A fast-forward refuses a dirty working set below. Merge would
+      ** keep unconflicted local edits and commit them, so refuse here
+      ** too, including --no-ff and --squash. An ignored table is not
+      ** one of those edits; merge puts it back. */
+      {
+        char *zErr = 0;
+        rc = doltliteSeparateIgnoredChanges(db, &dirty, &ignoredCat, &zErr);
+        if( rc!=SQLITE_OK ){
+          remoteSqlRestoreAndReport(ctx, db, cs, pSavedState, rc, zErr);
+          sqlite3_free(zErr);
+          return;
+        }
+        sqlite3_free(zErr);
+      }
+      if( dirty ){
+        remoteSqlRestoreAndReport(ctx, db, cs, pSavedState, SQLITE_ERROR,
+                                  "cannot merge with uncommitted changes");
+        return;
+      }
+      /* Merge owns txn save/restore; drop pull's snapshot first. */
+      doltliteTxnStateClear(pSavedState);
+      /* Fetch already stored this commit on the tracking ref. Merging the
+      ** "<remote>/<branch>" name would prefer a local branch of that name
+      ** and leave the fetched commit out. The message names the remote
+      ** branch and the remote URL, not the tracking ref. */
+      {
+        const char *zMergeUrl = 0;
+        chunkStoreFindRemote(cs, zRemoteName, &zMergeUrl);
+        doltliteHashToHex(&trackingCommit, zTrackingHash);
+        zMergeMsg = sqlite3_mprintf("Merge branch '%s' of %s into %s",
+                                    zRemoteBranch,
+                                    zMergeUrl ? zMergeUrl : zRemoteName,
+                                    zLocalBranch);
+      }
+      if( !zMergeMsg ){
+        sqlite3_result_error_nomem(ctx);
+        return;
+      }
+      rc = doltliteMergeRef(db, ctx, zTrackingHash, zMergeMsg, 0, 0,
+                            bNoFf, 0, bSquash);
+      sqlite3_free(zMergeMsg);
+      if( rc!=SQLITE_OK ){
+        return;
+      }
+      /* Pull returns 0 on success, not the merge commit hash. */
+      doltliteNoteSessionMissedDiskTip(db);
+      sqlite3_result_int(ctx, 0);
+      return;
+    }
+  }
+
+  doltliteGetSessionWorkingSetBasis(db, &cleanWorkingSet);
+  {
+    char *zErr = 0;
+    rc = doltliteSeparateIgnoredChanges(db, &dirty, &ignoredCat, &zErr);
+    if( rc!=SQLITE_OK ){
+      remoteSqlRestoreAndReport(ctx, db, cs, pSavedState, rc, zErr);
+      sqlite3_free(zErr);
+      return;
+    }
+    sqlite3_free(zErr);
+  }
+  if( dirty ){
+    remoteSqlRestoreAndReport(ctx, db, cs, pSavedState, SQLITE_ERROR,
+                              "cannot merge with uncommitted changes");
+    return;
+  }
+
+  /* Graft ignored tables onto the pulled commit before the branch moves.
+  ** The tip and that working catalog commit together. The staged catalog
+  ** stays the commit's, so an ignored table is not staged. A failure before
+  ** that commit leaves the branch at its old tip. */
+  {
+    ProllyHash commitCat, workingCat, tip;
+    char *zErr = 0;
+    int found = 0;
+    memset(&commitCat, 0, sizeof(commitCat));
+    memset(&workingCat, 0, sizeof(workingCat));
+    rc = doltliteCommitCatalogHash(db, &trackingCommit, &commitCat);
+    if( rc==SQLITE_OK ){
+      rc = doltliteAttachIgnoredCatalog(db, &commitCat, &ignoredCat,
+                                        &workingCat, &zErr);
+    }
+    if( rc!=SQLITE_OK ){
+      remoteSqlRestoreAndReport(ctx, db, cs, pSavedState, rc,
+          zErr ? zErr : "failed to update working tree from branch");
+      sqlite3_free(zErr);
+      return;
+    }
+    sqlite3_free(zErr);
+    rc = doltliteCompareAndAdvanceBranch(
+        db, &localCommit, &cleanWorkingSet, &trackingCommit,
+        &commitCat, &workingCat);
+    if( rc!=SQLITE_OK ){
+      int tipRc = chunkStoreReadDiskBranchTip(
+          cs, zLocalBranch, &tip, &found);
+      if( tipRc==SQLITE_OK && found
+       && prollyHashCompare(&tip, &trackingCommit)==0 ){
+        /* The tip and working catalog are already durable. Restoring the
+        ** saved session would point this connection at the old head. */
+        doltliteTxnStateClear(pSavedState);
+        remoteSqlResultError(ctx, rc,
+                             "failed to update working tree from branch");
+        return;
+      }
+      if( rc==SQLITE_BUSY ){
+        doltliteCmdResultPeerBranchBusy(ctx, "pull");
+        (void)doltliteRestoreTxnStateOnFailure(db, pSavedState, rc);
+      }else{
+        remoteSqlRestoreAndReport(ctx, db, cs, pSavedState, rc,
+                                  "failed to update working tree from branch");
+      }
+      return;
+    }
+  }
+  doltliteTxnStateClear(pSavedState);
+  rc = doltliteVcSealBranchStyleTxn(db);
+  if( rc!=SQLITE_OK ){
+    doltliteVcResultSealError(ctx, db, rc);
+    return;
+  }
+  doltliteNoteSessionMissedDiskTip(db);
+  sqlite3_result_int(ctx, 0);
+}
+
+
 static void doltPullParsed(
   sqlite3_context *ctx,
   const char *zRemoteName,
@@ -1555,17 +1773,12 @@ static void doltPullParsed(
   ChunkStore *cs = doltliteGetChunkStore(db);
   DoltliteRemote *pRemote = 0;
   const char *zUrl = 0;
-  const char *zLocalBranch;
-  ProllyHash trackingCommit, localCommit;
-  ProllyHash cleanWorkingSet, ignoredCat;
   DoltliteTxnState savedState;
   char **azKeep = 0;
   int nKeep = 0;
-  int dirty = 0;
   int rc;
 
   memset(&savedState, 0, sizeof(savedState));
-  memset(&ignoredCat, 0, sizeof(ignoredCat));
 
   rc = doltliteSaveTxnState(db, &savedState);
   if( rc!=SQLITE_OK ){
@@ -1665,201 +1878,17 @@ static void doltPullParsed(
   doltliteFreeStringArray(azKeep, nKeep);
   azKeep = 0;
 
-  rc = chunkStoreFindTracking(
-      cs, zRemoteName, zRemoteBranch, &trackingCommit);
-  if( rc!=SQLITE_OK || prollyHashIsEmpty(&trackingCommit) ){
-    remoteSqlRestoreAndReport(ctx, db, cs, &savedState, SQLITE_ERROR,
-                              "tracking branch not found after fetch");
-    return;
-  }
-
-  zLocalBranch = doltliteGetSessionBranch(db);
-  if( !zLocalBranch ){
-    remoteSqlRestoreAndReport(ctx, db, cs, &savedState, SQLITE_ERROR,
-                              "cannot pull in detached head");
-    return;
-  }
-  rc = chunkStoreFindBranch(cs, zLocalBranch, &localCommit);
-  if( rc!=SQLITE_OK ){
-    remoteSqlRestoreAndReport(ctx, db, cs, &savedState, rc,
-                              "current branch not found after fetch");
-    return;
-  }
-
-  if( prollyHashCompare(&localCommit, &trackingCommit)==0 ){
-    /* Nothing new to merge. A dirty working set is still refused.
-    ** A branch that is ahead of the remote is not this case: that pull
-    ** returns 0 and keeps the uncommitted edits. An ignored untracked
-    ** table is not a change. */
-    char *zErr = 0;
-    rc = doltliteSeparateIgnoredChanges(db, &dirty, &ignoredCat, &zErr);
-    if( rc!=SQLITE_OK ){
-      remoteSqlRestoreAndReport(ctx, db, cs, &savedState, rc, zErr);
-      sqlite3_free(zErr);
-      return;
-    }
-    sqlite3_free(zErr);
-    if( dirty ){
-      remoteSqlRestoreAndReport(ctx, db, cs, &savedState, SQLITE_ERROR,
-                                "cannot merge with uncommitted changes");
-      return;
-    }
-    doltliteNoteSessionMissedDiskTip(db);
-    remoteSqlClearAndSucceed(ctx, &savedState);
-    return;
-  }
-
   {
-    ProllyHash ancestor;
-    rc = doltliteFindAncestor(db, &trackingCommit, &localCommit, &ancestor);
+    DoltliteCmdScope scope;
+    rc = doltliteCommandScopeEnter(ctx, &scope);
     if( rc!=SQLITE_OK ){
-      remoteSqlRestoreAndReport(ctx, db, cs, &savedState, rc, 0);
+      (void)doltliteRestoreTxnStateOnFailure(db, &savedState, rc);
       return;
     }
-    if( prollyHashCompare(&ancestor, &trackingCommit)==0 ){
-      doltliteNoteSessionMissedDiskTip(db);
-      remoteSqlClearAndSucceed(ctx, &savedState);
-      return;
-    }
-    if( prollyHashCompare(&ancestor, &localCommit)!=0 && bFfOnly ){
-      remoteSqlRestoreAndReport(ctx, db, cs, &savedState, SQLITE_ERROR,
-                                "fatal: Not possible to fast-forward, aborting");
-      return;
-    }
-    if( prollyHashCompare(&ancestor, &localCommit)!=0 || bNoFf || bSquash ){
-      char zTrackingHash[PROLLY_HASH_SIZE*2+1];
-      char *zMergeMsg;
-      if( strcmp(zRemoteName, "origin")==0
-       && chunkStoreOriginSourceEnabled(cs) ){
-        remoteSqlRestoreAndReport(
-          ctx, db, cs, &savedState, SQLITE_ERROR,
-          "cannot merge a non-fast-forward pull in a lazy store; "
-          "materialize the store first");
-        return;
-      }
-      /* A fast-forward refuses a dirty working set below. Merge would
-      ** keep unconflicted local edits and commit them, so refuse here
-      ** too, including --no-ff and --squash. An ignored table is not
-      ** one of those edits; merge puts it back. */
-      {
-        char *zErr = 0;
-        rc = doltliteSeparateIgnoredChanges(db, &dirty, &ignoredCat, &zErr);
-        if( rc!=SQLITE_OK ){
-          remoteSqlRestoreAndReport(ctx, db, cs, &savedState, rc, zErr);
-          sqlite3_free(zErr);
-          return;
-        }
-        sqlite3_free(zErr);
-      }
-      if( dirty ){
-        remoteSqlRestoreAndReport(ctx, db, cs, &savedState, SQLITE_ERROR,
-                                  "cannot merge with uncommitted changes");
-        return;
-      }
-      /* Merge owns txn save/restore; drop pull's snapshot first. */
-      doltliteTxnStateClear(&savedState);
-      /* Fetch already stored this commit on the tracking ref. Merging the
-      ** "<remote>/<branch>" name would prefer a local branch of that name
-      ** and leave the fetched commit out. The message names the remote
-      ** branch and the remote URL, not the tracking ref. */
-      {
-        const char *zMergeUrl = 0;
-        chunkStoreFindRemote(cs, zRemoteName, &zMergeUrl);
-        doltliteHashToHex(&trackingCommit, zTrackingHash);
-        zMergeMsg = sqlite3_mprintf("Merge branch '%s' of %s into %s",
-                                    zRemoteBranch,
-                                    zMergeUrl ? zMergeUrl : zRemoteName,
-                                    zLocalBranch);
-      }
-      if( !zMergeMsg ){
-        sqlite3_result_error_nomem(ctx);
-        return;
-      }
-      rc = doltliteMergeRef(db, ctx, zTrackingHash, zMergeMsg, 0, 0,
-                            bNoFf, 0, bSquash);
-      sqlite3_free(zMergeMsg);
-      if( rc!=SQLITE_OK ){
-        return;
-      }
-      /* Pull returns 0 on success, not the merge commit hash. */
-      doltliteNoteSessionMissedDiskTip(db);
-      sqlite3_result_int(ctx, 0);
-      return;
-    }
+    doltPullIntegrate(ctx, zRemoteName, zRemoteBranch, bFfOnly, bNoFf,
+                      bSquash, &savedState);
+    doltliteCommandScopeLeave(ctx, &scope);
   }
-
-  doltliteGetSessionWorkingSetBasis(db, &cleanWorkingSet);
-  {
-    char *zErr = 0;
-    rc = doltliteSeparateIgnoredChanges(db, &dirty, &ignoredCat, &zErr);
-    if( rc!=SQLITE_OK ){
-      remoteSqlRestoreAndReport(ctx, db, cs, &savedState, rc, zErr);
-      sqlite3_free(zErr);
-      return;
-    }
-    sqlite3_free(zErr);
-  }
-  if( dirty ){
-    remoteSqlRestoreAndReport(ctx, db, cs, &savedState, SQLITE_ERROR,
-                              "cannot merge with uncommitted changes");
-    return;
-  }
-
-  /* Graft ignored tables onto the pulled commit before the branch moves.
-  ** The tip and that working catalog commit together. The staged catalog
-  ** stays the commit's, so an ignored table is not staged. A failure before
-  ** that commit leaves the branch at its old tip. */
-  {
-    ProllyHash commitCat, workingCat, tip;
-    char *zErr = 0;
-    int found = 0;
-    memset(&commitCat, 0, sizeof(commitCat));
-    memset(&workingCat, 0, sizeof(workingCat));
-    rc = doltliteCommitCatalogHash(db, &trackingCommit, &commitCat);
-    if( rc==SQLITE_OK ){
-      rc = doltliteAttachIgnoredCatalog(db, &commitCat, &ignoredCat,
-                                        &workingCat, &zErr);
-    }
-    if( rc!=SQLITE_OK ){
-      remoteSqlRestoreAndReport(ctx, db, cs, &savedState, rc,
-          zErr ? zErr : "failed to update working tree from branch");
-      sqlite3_free(zErr);
-      return;
-    }
-    sqlite3_free(zErr);
-    rc = doltliteCompareAndAdvanceBranch(
-        db, &localCommit, &cleanWorkingSet, &trackingCommit,
-        &commitCat, &workingCat);
-    if( rc!=SQLITE_OK ){
-      int tipRc = chunkStoreReadDiskBranchTip(
-          cs, zLocalBranch, &tip, &found);
-      if( tipRc==SQLITE_OK && found
-       && prollyHashCompare(&tip, &trackingCommit)==0 ){
-        /* The tip and working catalog are already durable. Restoring the
-        ** saved session would point this connection at the old head. */
-        doltliteTxnStateClear(&savedState);
-        remoteSqlResultError(ctx, rc,
-                             "failed to update working tree from branch");
-        return;
-      }
-      if( rc==SQLITE_BUSY ){
-        doltliteCmdResultPeerBranchBusy(ctx, "pull");
-        (void)doltliteRestoreTxnStateOnFailure(db, &savedState, rc);
-      }else{
-        remoteSqlRestoreAndReport(ctx, db, cs, &savedState, rc,
-                                  "failed to update working tree from branch");
-      }
-      return;
-    }
-  }
-  doltliteTxnStateClear(&savedState);
-  rc = doltliteVcSealBranchStyleTxn(db);
-  if( rc!=SQLITE_OK ){
-    doltliteVcResultSealError(ctx, db, rc);
-    return;
-  }
-  doltliteNoteSessionMissedDiskTip(db);
-  sqlite3_result_int(ctx, 0);
 }
 
 static void doltPullFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){

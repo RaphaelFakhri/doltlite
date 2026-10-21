@@ -94,6 +94,114 @@ void doltliteVcCommandInstalled(sqlite3 *db){
 #define DOLTLITE_CMD_SCOPED   1
 #define DOLTLITE_CMD_NOWAIT   2
 
+/* Begin the write transaction a command runs in: its own in autocommit,
+** or a hold on the graph lock while it runs in the caller's. A read-only
+** command, or one on a peer-deleted branch, cannot begin one and reports
+** its own refusal; *pbProbe says a no-wait command found the lock held. */
+static int cmdScopeBegin(
+  sqlite3 *db,
+  int eScope,
+  DoltliteCmdScope *pScope,
+  int *pbProbe
+){
+  Btree *pMain = db->nDb>0 ? db->aDb[0].pBt : 0;
+  ChunkStore *cs = doltliteGetChunkStore(db);
+  int rc;
+  memset(pScope, 0, sizeof(*pScope));
+  if( pbProbe ) *pbProbe = 0;
+  if( eScope==DOLTLITE_CMD_UNSCOPED || !cs || doltliteIsDetached(db) ){
+    return SQLITE_OK;
+  }
+  if( db->autoCommit && !db->pSavepoint ){
+    int bMissing;
+    rc = doltliteBtreeBeginCommandTxn(pMain, eScope==DOLTLITE_CMD_SCOPED);
+    bMissing = (rc&0xff)==SQLITE_BUSY
+            && doltliteBtreeMissingWriteBranch(pMain)!=0;
+    pScope->bScope = rc==SQLITE_OK;
+    /* A no-wait command finds out whether it changes anything without the
+    ** lock; one that does starts over in a transaction that waits. */
+    if( (rc&0xff)==SQLITE_BUSY && !bMissing && eScope==DOLTLITE_CMD_NOWAIT
+     && pbProbe ){
+      *pbProbe = 1;
+      return SQLITE_OK;
+    }
+    if( rc==SQLITE_DONE || bMissing || (rc&0xff)==SQLITE_READONLY ){
+      return SQLITE_OK;
+    }
+    return rc;
+  }
+  rc = doltliteBtreeBeginJoinedCommand(pMain);
+  if( rc==SQLITE_OK ){
+    cs->bLockHoldOnly = 1;
+    rc = doltliteLockAndRefreshBusy(db, cs);
+    cs->bLockHoldOnly = 0;
+    if( rc==SQLITE_OK ){
+      cs->nOuterLockHold = 1;
+    }else{
+      doltliteBtreeEndJoinedCommand(pMain);
+    }
+  }
+  pScope->bJoined = rc==SQLITE_OK;
+  pScope->bInBegin = pScope->bJoined && !doltliteSavepointIsTopLevelTxn(db);
+  if( rc==SQLITE_DONE || (rc&0xff)==SQLITE_READONLY ) return SQLITE_OK;
+  return rc;
+}
+
+static void cmdScopeResultBeginError(sqlite3_context *ctx, int rc){
+  sqlite3_result_error(ctx, (rc&0xff)==SQLITE_BUSY
+      ? "database is busy: another connection holds the write lock"
+      : sqlite3ErrStr(rc), -1);
+  sqlite3_result_error_code(ctx, rc);
+}
+
+static void cmdScopeEnd(sqlite3_context *ctx, DoltliteCmdScope *pScope){
+  sqlite3 *db = sqlite3_context_db_handle(ctx);
+  Btree *pMain = db->nDb>0 ? db->aDb[0].pBt : 0;
+  ChunkStore *cs = doltliteGetChunkStore(db);
+  if( pScope->bScope ){
+    int rc = doltliteBtreeEndCommandTxn(pMain, ctx->isError!=0,
+                                        ctx->pVdbe->vcInstalled);
+    if( rc!=SQLITE_OK && !ctx->isError ){
+      sqlite3_result_error(ctx, sqlite3ErrStr(rc), -1);
+      sqlite3_result_error_code(ctx, rc);
+    }
+  }
+  if( pScope->bJoined ){
+    doltliteBtreeEndJoinedCommand(pMain);
+    cs->nOuterLockHold = 0;
+    chunkStoreUnlock(cs);
+  }
+  /* As in Dolt, a command that commits the caller's BEGIN leaves it in a
+  ** new transaction: what follows still rolls back with ROLLBACK. */
+  if( pScope->bInBegin && db->autoCommit ){
+    int rc = sqlite3_exec(db, "BEGIN", 0, 0, 0);
+    if( rc==SQLITE_OK ) db->bVcReopenedTxn = 1;
+    if( rc!=SQLITE_OK && !ctx->isError ){
+      sqlite3_result_error(ctx, sqlite3_errmsg(db), -1);
+      sqlite3_result_error_code(ctx, rc);
+    }
+  }
+  memset(pScope, 0, sizeof(*pScope));
+}
+
+/* For a command that does part of its work, such as a network transfer,
+** without the lock: the rest runs as a scoped command would. */
+int doltliteCommandScopeEnter(sqlite3_context *ctx, DoltliteCmdScope *pScope){
+  sqlite3 *db = sqlite3_context_db_handle(ctx);
+  int rc;
+  if( db->bVcNestedCommand ){
+    memset(pScope, 0, sizeof(*pScope));
+    return SQLITE_OK;
+  }
+  rc = cmdScopeBegin(db, DOLTLITE_CMD_SCOPED, pScope, 0);
+  if( rc!=SQLITE_OK ) cmdScopeResultBeginError(ctx, rc);
+  return rc;
+}
+
+void doltliteCommandScopeLeave(sqlite3_context *ctx, DoltliteCmdScope *pScope){
+  cmdScopeEnd(ctx, pScope);
+}
+
 static void doltliteRunCommand(
   sqlite3_context *ctx,
   int argc,
@@ -104,48 +212,14 @@ static void doltliteRunCommand(
   Vdbe *pOuter = db->pVcCommand;
   Btree *pMain = db->nDb>0 ? db->aDb[0].pBt : 0;
   ChunkStore *cs = doltliteGetChunkStore(db);
-  int bScope = 0;
+  u8 bWasNested = db->bVcNestedCommand;
+  DoltliteCmdScope scope;
   int bProbe = 0;
-  int bJoined = 0;
-  int bInBegin = 0;
-  int rcBegin = SQLITE_OK;
+  int rcBegin;
   db->pVcCommand = ctx->pVdbe;
-  /* In autocommit the command is its own write transaction. Inside BEGIN
-  ** it joins the caller's. A read-only command, or one on a peer-deleted
-  ** branch, cannot begin one and reports its own refusal. */
-  if( eScope!=DOLTLITE_CMD_UNSCOPED && !pOuter && db->autoCommit
-   && !db->pSavepoint && cs && !doltliteIsDetached(db) ){
-    int rc = doltliteBtreeBeginCommandTxn(pMain, eScope==DOLTLITE_CMD_SCOPED);
-    int bMissing = (rc&0xff)==SQLITE_BUSY
-                && doltliteBtreeMissingWriteBranch(pMain)!=0;
-    bScope = rc==SQLITE_OK;
-    /* A no-wait command finds out whether it changes anything without the
-    ** lock; one that does starts over in a transaction that waits. */
-    bProbe = (rc&0xff)==SQLITE_BUSY && !bMissing
-          && eScope==DOLTLITE_CMD_NOWAIT;
-    if( rc!=SQLITE_OK && rc!=SQLITE_DONE && !bProbe && !bMissing
-     && (rc&0xff)!=SQLITE_READONLY ){
-      rcBegin = rc;
-    }
-  }else if( eScope!=DOLTLITE_CMD_UNSCOPED && !pOuter && cs
-         && !doltliteIsDetached(db) ){
-    int rc = doltliteBtreeBeginJoinedCommand(pMain);
-    if( rc==SQLITE_OK ){
-      cs->bLockHoldOnly = 1;
-      rc = doltliteLockAndRefreshBusy(db, cs);
-      cs->bLockHoldOnly = 0;
-      if( rc==SQLITE_OK ){
-        cs->nOuterLockHold = 1;
-      }else{
-        doltliteBtreeEndJoinedCommand(pMain);
-      }
-    }
-    bJoined = rc==SQLITE_OK;
-    bInBegin = bJoined && !doltliteSavepointIsTopLevelTxn(db);
-    if( rc!=SQLITE_OK && rc!=SQLITE_DONE && (rc&0xff)!=SQLITE_READONLY ){
-      rcBegin = rc;
-    }
-  }
+  db->bVcNestedCommand = pOuter!=0;
+  rcBegin = cmdScopeBegin(db, pOuter ? DOLTLITE_CMD_UNSCOPED : eScope,
+                          &scope, &bProbe);
   if( bProbe ){
     BusyHandler saved = db->busyHandler;
     db->busyHandler.xBusyHandler = 0;
@@ -159,42 +233,18 @@ static void doltliteRunCommand(
       ctx->isError = 0;
       doltliteInvalidateSessionWorkingState(db);
       rcBegin = doltliteBtreeBeginCommandTxn(pMain, 1);
-      bScope = rcBegin==SQLITE_OK;
+      scope.bScope = rcBegin==SQLITE_OK;
       bProbe = 0;
     }
   }
   if( rcBegin!=SQLITE_OK ){
-    sqlite3_result_error(ctx, (rcBegin&0xff)==SQLITE_BUSY
-        ? "database is busy: another connection holds the write lock"
-        : sqlite3ErrStr(rcBegin), -1);
-    sqlite3_result_error_code(ctx, rcBegin);
+    cmdScopeResultBeginError(ctx, rcBegin);
+    db->bVcNestedCommand = bWasNested;
     db->pVcCommand = pOuter;
     return;
   }
   if( !bProbe ) doltliteInvokeShieldedFunc(ctx, argc, argv, pOuter==0);
-  if( bScope ){
-    int rc = doltliteBtreeEndCommandTxn(pMain, ctx->isError!=0,
-                                        ctx->pVdbe->vcInstalled);
-    if( rc!=SQLITE_OK && !ctx->isError ){
-      sqlite3_result_error(ctx, sqlite3ErrStr(rc), -1);
-      sqlite3_result_error_code(ctx, rc);
-    }
-  }
-  if( bJoined ){
-    doltliteBtreeEndJoinedCommand(pMain);
-    cs->nOuterLockHold = 0;
-    chunkStoreUnlock(cs);
-  }
-  /* As in Dolt, a command that commits the caller's BEGIN leaves it in a
-  ** new transaction: what follows still rolls back with ROLLBACK. */
-  if( bInBegin && db->autoCommit ){
-    int rc = sqlite3_exec(db, "BEGIN", 0, 0, 0);
-    if( rc==SQLITE_OK ) db->bVcReopenedTxn = 1;
-    if( rc!=SQLITE_OK && !ctx->isError ){
-      sqlite3_result_error(ctx, sqlite3_errmsg(db), -1);
-      sqlite3_result_error_code(ctx, rc);
-    }
-  }
+  cmdScopeEnd(ctx, &scope);
   if( !ctx->isError ){
     doltliteVcCommandInstalled(db);
   }else if( !ctx->pVdbe->vcInstalled && AtomicLoad(&db->u1.isInterrupted) ){
@@ -206,6 +256,7 @@ static void doltliteRunCommand(
     if( ctx->isError ) chunkStoreClearStoredHits(doltliteGetChunkStore(db));
     chunkStoreClearSourceCommits(doltliteGetChunkStore(db));
   }
+  db->bVcNestedCommand = bWasNested;
   db->pVcCommand = pOuter;
 }
 

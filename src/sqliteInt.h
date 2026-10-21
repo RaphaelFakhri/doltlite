@@ -1764,6 +1764,7 @@ struct sqlite3 {
   int nVcStatementRestore;
   void *pVcNestedTxn;
   u8 bVcReopenedTxn;
+  u8 bVcNestedCommand;
 #endif
   int nVdbeExec;                /* Number of nested calls to VdbeExec() */
   int nVDestroy;                /* Number of active OP_VDestroy operations */
