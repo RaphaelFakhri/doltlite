@@ -338,7 +338,7 @@ void doltliteTestPause(const char *zEnv){
 /* After the handler agrees to retry, ride out one short graph-lock hold
 ** before asking it again. Process close re-takes the lock to append its
 ** clean-close marker, and a one-shot handler will not wait a second time. */
-static int doltliteLockAndRefreshBusy(sqlite3 *db, ChunkStore *cs){
+int doltliteLockAndRefreshBusy(sqlite3 *db, ChunkStore *cs){
   int rc;
   int i;
   int rode;

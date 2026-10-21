@@ -1307,6 +1307,27 @@ int doltliteBtreeBeginCommandTxn(Btree *p, int bWait){
   return SQLITE_OK;
 }
 
+/* A command inside an explicit transaction runs in the caller's
+** transaction, which publishes as it always has. The command holds the
+** graph lock from start to end, so no peer writes between the steps of one
+** command; the steps nest inside this lock, so only this refresh reloads. */
+int doltliteBtreeBeginJoinedCommand(Btree *p){
+  if( !p || p->pOps!=&prollyBtreeOps || p->bCommandTxn || p->bCommandJoined
+   || !p->db ){
+    return SQLITE_DONE;
+  }
+  if( p->isDetached || (p->pBt->btsFlags & BTS_READ_ONLY)
+   || (p->db->flags & SQLITE_QueryOnly)!=0 ){
+    return SQLITE_READONLY;
+  }
+  p->bCommandJoined = 1;
+  return SQLITE_OK;
+}
+
+void doltliteBtreeEndJoinedCommand(Btree *p){
+  if( p ) p->bCommandJoined = 0;
+}
+
 static int commandPublishStaged(BtShared *pBt){
   int rc = chunkStoreCommitWithBusyHandler(
       &pBt->store, prollyInvokeBusyHandler, pBt);
