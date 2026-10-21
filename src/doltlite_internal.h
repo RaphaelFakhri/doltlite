@@ -47,6 +47,14 @@ int doltliteBtreeBeginJoinedCommand(Btree*);
 int doltliteLockAndRefreshBusy(sqlite3*, ChunkStore*);
 void doltliteBtreeEndJoinedCommand(Btree*);
 int doltliteBtreeEndCommandTxn(Btree*, int bFailed, int bPublished);
+typedef struct DoltliteCmdScope DoltliteCmdScope;
+struct DoltliteCmdScope {
+  u8 bScope;
+  u8 bJoined;
+  u8 bInBegin;
+};
+int doltliteCommandScopeEnter(sqlite3_context*, DoltliteCmdScope*);
+void doltliteCommandScopeLeave(sqlite3_context*, DoltliteCmdScope*);
 void doltliteCommandKeepEffects(sqlite3*);
 int doltliteCreateCommandFunc(
   sqlite3 *db,
