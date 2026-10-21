@@ -1273,24 +1273,8 @@ int doltliteCheckoutTables(
   int bSourceHead,
   int bDropIfAbsent
 ){
-  int bBegan = 0;
-  int rc;
-  /* In autocommit each nested DROP/CREATE commits and publishes on its own,
-  ** so a later failure would leave the table emptied on disk. */
-  if( db->autoCommit ){
-    rc = sqlite3_exec(db, "BEGIN", 0, 0, 0);
-    if( rc!=SQLITE_OK ) return rc;
-    bBegan = !db->autoCommit;
-  }
-  rc = checkoutTablesInTxn(db, context, zSourceRef, argv, iFirstName, nNames,
-                           pzMissing, bSourceHead, bDropIfAbsent);
-  if( bBegan ){
-    if( rc==SQLITE_OK ) rc = sqlite3_exec(db, "COMMIT", 0, 0, 0);
-    if( rc!=SQLITE_OK && !db->autoCommit ){
-      (void)sqlite3_exec(db, "ROLLBACK", 0, 0, 0);
-    }
-  }
-  return rc;
+  return checkoutTablesInTxn(db, context, zSourceRef, argv, iFirstName, nNames,
+                             pzMissing, bSourceHead, bDropIfAbsent);
 }
 
 static void checkoutTablesResult(

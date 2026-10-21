@@ -115,14 +115,11 @@ static int cherryPickRestoreAndPersist(
   const ProllyHash *pNewHead,
   int opRc
 ){
-  ProllyHash restoredCat = pSaved->sessionCatalogHash;
   ProllyHash savedHead = pSaved->sessionHead;
   ProllyHash diskHead;
   ProllyHash sessionHead;
   ChunkStore *cs = doltliteGetChunkStore(db);
   int found = 0;
-  int restoreRc;
-  int persistRc;
 
   /* CompareAndAdvanceBranch can return an error after the new tip is already
   ** on disk with a matching working set. Restoring the pre-op working set
@@ -141,15 +138,7 @@ static int cherryPickRestoreAndPersist(
     return opRc;
   }
 
-  restoreRc = doltliteRestoreTxnStateOnFailure(db, pSaved, opRc);
-  /* BUSY means a peer moved the tip or the working set; the disk holds its
-  ** write, and persisting the pre-op catalog over it would erase it. */
-  if( db->autoCommit && restoreRc==opRc && opRc!=SQLITE_BUSY
-   && !prollyHashIsEmpty(&restoredCat) ){
-    persistRc = doltlitePersistWorkingSetWithHash(db, &restoredCat);
-    if( persistRc!=SQLITE_OK && persistRc!=SQLITE_NOMEM ) restoreRc = persistRc;
-  }
-  return restoreRc;
+  return doltliteRestoreTxnStateOnFailure(db, pSaved, opRc);
 }
 
 typedef struct ApplyConflictNames ApplyConflictNames;
