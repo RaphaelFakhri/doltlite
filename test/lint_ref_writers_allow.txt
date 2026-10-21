@@ -1,0 +1,47 @@
+# Functions allowed to write refs without doltliteMutateRefs. A callback
+# passed to doltliteMutateRefs[Expected], and a static helper only such
+# callbacks call, need no entry. A new branch, tag, or default-branch change
+# belongs in a callback; a branch-tip advance belongs in
+# doltliteCompareAndAdvanceBranch.
+
+# The two locked publishers everything else routes through.
+src/doltlite_core.c:doltliteMutateRefsExpected
+src/doltlite_core.c:doltliteAdvanceBranchWithState
+
+# First write of a fresh store.
+src/doltlite_core.c:doltliteSeedStoreIfNeeded
+
+# Working-set persistence at commit, rollback, and hard reset.
+src/prolly_btree_state.c:btreeStoreWorkingSetBlob
+src/prolly_btree_state.c:doltlitePersistWorkingSetWithHash
+src/prolly_btree_txn.c:commitPhaseTwoStageCatalog
+src/prolly_btree_txn.c:persistRolledBackSessionState
+src/prolly_btree_txn.c:prollyBtreeRollback
+src/prolly_btree_catalog.c:hardReset
+
+# Moves the session branch under the command transaction's lock.
+src/doltlite_reset.c:doltliteResetFunc
+
+# Rebase claim and release ride the working-set publish.
+src/doltlite_rebase.c:rebaseClaimActiveEnd
+src/doltlite_rebase.c:rebaseUnclaimActiveEnd
+
+# Clone installs unscoped by design.
+src/doltlite_remote.c:doltliteClone
+src/doltlite_remote.c:doltliteCloneLazy
+src/doltlite_remote.c:remotePrepareCloneRefs
+src/doltlite_remote_sql.c:doltCloneFunc
+src/doltlite_remote_sql.c:remoteSqlUndoInstalledClone
+src/doltlite_chunk_source.c:doltlite_init_lazy
+
+# Fetch, push, and the remote server write refs through the scoped
+# validator or into the remote's own store.
+src/doltlite_remote.c:installFetchedRefs
+src/doltlite_remote.c:doltliteInstallPushedRefsBlob
+src/doltlite_remote.c:doltlitePushAs
+src/doltlite_remote.c:doltlitePushTag
+src/doltlite_remotesrv.c:remoteSrvPersistRefs
+src/doltlite_remotesrv.c:doltliteRemoteSrvApplyRefsForTest
+
+# Serializes into a scratch destination store.
+src/prolly_btree.c:doltliteBtreeSerialize
