@@ -12,15 +12,18 @@ statement, with two rules that are easy to miss.
 | `dolt_branch`, `dolt_tag`, `dolt_branch('-d')` | Kept. Refs are durable the moment the call returns. |
 | `dolt_checkout -b` | Kept. The SQL transaction is committed, then a new one begun. |
 | `dolt_checkout` of an existing branch | Kept. The connection stays on the new branch. |
-| `dolt_commit`, and any merge, cherry-pick, revert, or pull that completes | Kept, and the SQL transaction is already over |
+| `dolt_commit`, and any merge, cherry-pick, revert, or rebase that completes | Kept. The SQL transaction is committed, then a new one begun, as in Dolt. |
+| `dolt_pull` that completes | Kept, and the SQL transaction is already over |
 
 A Dolt commit is durable when it returns, so a successful `dolt_commit`
-inside `BEGIN` also commits the SQL transaction. A following `ROLLBACK`
-fails with `cannot rollback - no transaction is active`, and a `SAVEPOINT`
-opened before it is gone. The same holds for an operation that creates a
-commit or fast-forwards a branch. A `dolt_commit` that finds nothing to
-commit has also already ended the transaction, as in Dolt; only option and
-author errors are raised before that point. Put `dolt_commit` last.
+inside `BEGIN` also commits the SQL transaction, and a new one carries on,
+as in Dolt. Statements after it belong to that new transaction: `ROLLBACK`
+undoes them and `COMMIT` keeps them. A `SAVEPOINT` opened before the commit
+is gone. A `BEGIN` issued in the new transaction commits it and starts
+another, as MySQL's `BEGIN` does. The same holds for an operation that
+creates a commit or fast-forwards a branch. A `dolt_commit` that finds
+nothing to commit has also already committed the transaction, as in Dolt;
+only option and author errors are raised before that point.
 
 Rows written before a `dolt_checkout` in the same transaction stay with the
 branch they were written on.

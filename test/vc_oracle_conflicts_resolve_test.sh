@@ -672,6 +672,7 @@ SELECT dolt_commit('-Am','resolved');
 SELECT CONCAT('R|committed|',id) FROM t WHERE v=30 AND z=1 ORDER BY id;
 DELETE FROM t WHERE id=2;
 SELECT CONCAT('R|retained|',id) FROM t WHERE v=30 AND z=1;
+COMMIT;
 "
   done
 done

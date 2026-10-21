@@ -2332,4 +2332,28 @@ SELECT dolt_commit('-Am', 'main2');
 SELECT dolt_merge('feature', '--author', 'no email');
 "
 
+echo "--- inside a transaction ---"
+
+# The merge commit ends the caller's transaction, and a new one carries on:
+# a row inserted after it still rolls back.
+for kind in ff three_way; do
+  if [ "$kind" = ff ]; then main_change=""; else main_change="UPDATE t SET v = 11 WHERE id = 1;
+SELECT dolt_commit('-am', 'main2');"; fi
+oracle_reopen_state "merge_${kind}_in_txn_then_rollback" "
+$SEED
+SELECT dolt_checkout('feature');
+INSERT INTO t VALUES (2, 20);
+SELECT dolt_commit('-Am', 'feat1');
+SELECT dolt_checkout('main');
+$main_change
+BEGIN;
+SELECT dolt_merge('feature');
+INSERT INTO t VALUES (3, 30);
+ROLLBACK;
+" "SELECT 'Q' || char(9) || group_concat(id, ',') FROM (SELECT id FROM t ORDER BY id);
+SELECT 'Q' || char(9) || count(*) FROM dolt_log;" \
+"SELECT concat('Q', char(9), group_concat(id ORDER BY id SEPARATOR ',')) FROM t;
+SELECT concat('Q', char(9), count(*)) FROM dolt_log;"
+done
+
 vc_oracle_finish

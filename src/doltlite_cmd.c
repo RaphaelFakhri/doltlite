@@ -107,6 +107,7 @@ static void doltliteRunCommand(
   int bScope = 0;
   int bProbe = 0;
   int bJoined = 0;
+  int bInBegin = 0;
   int rcBegin = SQLITE_OK;
   db->pVcCommand = ctx->pVdbe;
   /* In autocommit the command is its own write transaction. Inside BEGIN
@@ -140,6 +141,7 @@ static void doltliteRunCommand(
       }
     }
     bJoined = rc==SQLITE_OK;
+    bInBegin = bJoined && !doltliteSavepointIsTopLevelTxn(db);
     if( rc!=SQLITE_OK && rc!=SQLITE_DONE && (rc&0xff)!=SQLITE_READONLY ){
       rcBegin = rc;
     }
@@ -182,6 +184,16 @@ static void doltliteRunCommand(
     doltliteBtreeEndJoinedCommand(pMain);
     cs->nOuterLockHold = 0;
     chunkStoreUnlock(cs);
+  }
+  /* As in Dolt, a command that commits the caller's BEGIN leaves it in a
+  ** new transaction: what follows still rolls back with ROLLBACK. */
+  if( bInBegin && db->autoCommit ){
+    int rc = sqlite3_exec(db, "BEGIN", 0, 0, 0);
+    if( rc==SQLITE_OK ) db->bVcReopenedTxn = 1;
+    if( rc!=SQLITE_OK && !ctx->isError ){
+      sqlite3_result_error(ctx, sqlite3_errmsg(db), -1);
+      sqlite3_result_error_code(ctx, rc);
+    }
   }
   if( !ctx->isError ){
     doltliteVcCommandInstalled(db);

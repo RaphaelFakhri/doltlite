@@ -1119,4 +1119,24 @@ SELECT 'R|c|' || id || '|' || slug FROM children WHERE id='k1';" \
   "SELECT concat('R|p|', id, '|', label) FROM parents WHERE id='p1';
 SELECT concat('R|c|', id, '|', slug) FROM children WHERE id='k1';"
 
+echo "--- inside a transaction ---"
+
+# The commit ends the caller's transaction, and a new one carries on: what
+# follows it still rolls back.
+for finish in ROLLBACK COMMIT; do
+oracle_query "commit_in_txn_then_${finish}" "
+CREATE TABLE t(id INTEGER PRIMARY KEY, v INT);
+INSERT INTO t VALUES (1, 1);
+SELECT dolt_commit('-Am', 'base');
+BEGIN;
+INSERT INTO t VALUES (2, 2);
+SELECT dolt_commit('-am', 'in txn');
+INSERT INTO t VALUES (3, 3);
+$finish;
+" "SELECT 'R|' || group_concat(id, ',') FROM (SELECT id FROM t ORDER BY id);
+SELECT 'R|' || message FROM dolt_log LIMIT 1;" \
+"SELECT concat('R|', group_concat(id ORDER BY id SEPARATOR ',')) FROM t;
+SELECT concat('R|', message) FROM dolt_log ORDER BY commit_order DESC LIMIT 1;"
+done
+
 vc_oracle_finish

@@ -24,7 +24,8 @@ Deleting the row sticks; DoltLite does not resurrect the default.
 
 - Version control is SQL functions and tables: `SELECT dolt_commit(...)`,
   never `CALL`. See [dolt-differences.md](dolt-differences.md).
-- `dolt_commit` ends the enclosing SQL transaction, so call it last. A merge
+- `dolt_commit` commits the enclosing SQL transaction and begins a new one,
+  so `COMMIT` what you write after it. A merge
   that conflicts in autocommit mode is rolled back; run merges inside
   `BEGIN` to inspect and resolve. See [transactions.md](transactions.md).
 - Every revision spelling, including `HEAD~1`, `WORKING`, and `a..b`, is in
@@ -150,6 +151,6 @@ SELECT dolt_revert('HEAD');                -- new commit undoing HEAD
 - Full reference, one page per feature:
   https://github.com/dolthub/doltlite/tree/master/doc/doltlite
   Start with refs.md (revision syntax), transactions.md (what ROLLBACK
-  undoes; dolt_commit ends the SQL transaction), and dolt-differences.md
+  undoes; dolt_commit commits the SQL transaction and begins a new one), and dolt-differences.md
   if you already know Dolt.
 ````

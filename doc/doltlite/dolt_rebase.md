@@ -24,8 +24,8 @@ SELECT dolt_rebase('main');                       -- non-interactive
 | `--abort` | Discard the plan and return to the original branch |
 
 Returns `Successfully rebased and updated refs/heads/<branch>`, or `0` when
-there is nothing to replay. A completed rebase ends the enclosing SQL
-transaction like `dolt_commit`.
+there is nothing to replay. A completed rebase commits the enclosing SQL
+transaction and begins a new one, like `dolt_commit`.
 
 ## The plan table
 

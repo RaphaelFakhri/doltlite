@@ -37,9 +37,9 @@ Only command functions are direct-only; `dolt_hashof` and `dolt_version` are not
   while conflicts exist and rolls back an autocommit merge that conflicts.
   Constraint violations still persist, as in Dolt. See
   [transactions.md](transactions.md).
-- **`dolt_commit` ends the SQL transaction.** Dolt's `@@dolt_transaction_commit`
-  ties the two together optionally; in DoltLite a Dolt commit is always
-  durable when it returns.
+- **A Dolt commit is always durable when it returns.** Inside `BEGIN`,
+  `dolt_commit` commits the SQL transaction and begins a new one, as Dolt
+  does; `@@dolt_transaction_commit` has no counterpart.
 - **Refs are not transactional.** `dolt_branch` and `dolt_tag` take effect
   immediately and survive `ROLLBACK`.
 - **`dolt_docs` rows are stored, including the default.** A fresh database

@@ -92,8 +92,8 @@ second argument to a commit`.
 ## Differences from Dolt
 
 Conflicts are never committable (Dolt allows it behind
-`@@dolt_allow_commit_conflicts`). A completed merge ends the enclosing SQL
-transaction like `dolt_commit`.
+`@@dolt_allow_commit_conflicts`). A completed merge commits the enclosing
+SQL transaction and begins a new one, like `dolt_commit`.
 
 ## See also
 

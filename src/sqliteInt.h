@@ -1763,6 +1763,7 @@ struct sqlite3 {
   int nVcInternalCommit;
   int nVcStatementRestore;
   void *pVcNestedTxn;
+  u8 bVcReopenedTxn;
 #endif
   int nVdbeExec;                /* Number of nested calls to VdbeExec() */
   int nVDestroy;                /* Number of active OP_VDestroy operations */

@@ -126,7 +126,7 @@ static const char *zDocsAgentDefault =
   "- Full reference, one page per feature:\n"
   "  https://github.com/dolthub/doltlite/tree/master/doc/doltlite\n"
   "  Start with refs.md (revision syntax), transactions.md (what ROLLBACK\n"
-  "  undoes; dolt_commit ends the SQL transaction), and dolt-differences.md\n"
+  "  undoes; dolt_commit commits the SQL transaction and begins a new one), and dolt-differences.md\n"
   "  if you already know Dolt.\n";
 
 static int docsConnect(sqlite3 *db, void *pAux, int argc,

@@ -26,7 +26,8 @@ ROLLBACK;
 
 Returns the new commit hash, keeping the original message. Conflicts behave
 as in [dolt_merge.md](dolt_merge.md): rolled back in autocommit, inspectable
-inside `BEGIN`. A completed cherry-pick ends the enclosing SQL transaction.
+inside `BEGIN`. A completed cherry-pick commits the enclosing SQL
+transaction and begins a new one, like `dolt_commit`.
 
 | Error | Cause |
 |---|---|

@@ -1897,6 +1897,8 @@ def merge_and_resolve(doltlite, db_path, branches, model, rng):
     commit_branch(doltlite, db_path, source, model, 0)
     before = query_rows(doltlite, db_path, target)
     before_status = status_counts(doltlite, db_path, target)
+    before_head = query_scalar(doltlite, db_path, target,
+                               "SELECT dolt_hashof('HEAD');", "head_%s" % target)
     if rng.randrange(2) == 0:
         resolve = (
             "SELECT dolt_conflicts_resolve('--ours', 't_flex');\n"
@@ -1925,14 +1927,15 @@ def merge_and_resolve(doltlite, db_path, branches, model, rng):
             "not currently merging",
             "no such table",
             "uncommitted changes",
-            "cannot rollback - no transaction is active",
         ),
     )
     after = query_rows(doltlite, db_path, target)
     after_status = status_counts(doltlite, db_path, target)
-    if out is None:
-        # dolt_merge seals the open transaction, so ROLLBACK has nothing
-        # to undo and the branch may have moved.
+    after_head = query_scalar(doltlite, db_path, target,
+                              "SELECT dolt_hashof('HEAD');", "head_%s" % target)
+    if out is None or after_head != before_head:
+        # A merge that completed committed the open transaction, as in Dolt;
+        # ROLLBACK only undoes what followed it.
         sync_vc_result(doltlite, db_path, target, model)
     elif after != before or after_status != before_status:
         raise AssertionError(

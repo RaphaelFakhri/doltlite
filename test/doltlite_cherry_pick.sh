@@ -1005,10 +1005,10 @@ if [ "$TX_LINE" = "TX|add feat_row|2|0" ]; then
 else
   dltest_fail "cp_in_txn_seals" "  expected: TX|add feat_row|2|0\n  got:      $TX_LINE"
 fi
-if echo "$TX_OUT" | grep -q "cannot rollback - no transaction is active"; then
+if ! echo "$TX_OUT" | grep -q "cannot rollback - no transaction is active"; then
   dltest_pass
 else
-  dltest_fail "cp_in_txn_rollback_refused" "  expected the post-cherry-pick ROLLBACK to find no open transaction"
+  dltest_fail "cp_in_txn_rollback_continues" "  expected the post-cherry-pick ROLLBACK to find the transaction the cherry-pick left open, as in Dolt"
 fi
 rm -f "$DB"
 
@@ -1028,10 +1028,10 @@ if [ "$TX_LINE" = "TX|Revert \"add row 2\"|1|0" ]; then
 else
   dltest_fail "rv_in_txn_seals" "  expected: TX|Revert \"add row 2\"|1|0\n  got:      $TX_LINE"
 fi
-if echo "$TX_OUT" | grep -q "cannot rollback - no transaction is active"; then
+if ! echo "$TX_OUT" | grep -q "cannot rollback - no transaction is active"; then
   dltest_pass
 else
-  dltest_fail "rv_in_txn_rollback_refused" "  expected the post-revert ROLLBACK to find no open transaction"
+  dltest_fail "rv_in_txn_rollback_continues" "  expected the post-revert ROLLBACK to find the transaction the revert left open, as in Dolt"
 fi
 rm -f "$DB"
 

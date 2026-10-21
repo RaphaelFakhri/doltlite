@@ -43,8 +43,9 @@ Returns `0`. No arguments: `dolt_add requires table name or '-A'`.
 | `--skip-empty` | Return `0` instead of erroring when nothing is staged |
 | `-f`, `--force` | Commit despite rows in `dolt_constraint_violations` |
 
-Returns the new commit hash. Inside `BEGIN`, a successful commit also ends
-the SQL transaction; see [transactions.md](transactions.md).
+Returns the new commit hash. Inside `BEGIN`, a successful commit also
+commits the SQL transaction and begins a new one; see
+[transactions.md](transactions.md).
 
 | Error | Cause |
 |---|---|

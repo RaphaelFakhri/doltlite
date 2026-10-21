@@ -33,11 +33,13 @@ foreach {name diverged flags} {
   three-way 1 {}
 } {
   merge_txn_setup $diverged
+  # As in Dolt, the merge commit ends the caller's transaction and a new one
+  # carries on, so ROLLBACK succeeds and leaves the merge in place.
   do_test merge-txn-$name-commits {
     execsql "BEGIN; SELECT dolt_merge(${flags}'feature')"
     list [sqlite3_get_autocommit db] [catch {execsql ROLLBACK}] \
          [execsql {SELECT count(*) FROM t}]
-  } [list 1 1 [expr {$diverged+1}]]
+  } [list 0 0 [expr {$diverged+1}]]
 }
 
 foreach {name diverged flags merging} {
