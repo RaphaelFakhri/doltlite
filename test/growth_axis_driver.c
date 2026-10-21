@@ -12,8 +12,11 @@
 **      the refresh replay differs (the incremental tail replay axis).
 **   B. open latency: fresh open + first query against the same seeded
 **      histories. Replay is linear in WAL today, so linear growth is
-**      tolerated and superlinear growth fails; after dolt_gc the WAL is
-**      gone and open must not be slower than the pre-gc open.
+**      tolerated and superlinear growth fails.
+**   G. reads after gc: a store past the in-memory index limit carries
+**      unreachable history about its own size (a deleted branch's commits
+**      and a hard-reset working set). After dolt_gc removes it, open plus a
+**      full scan must not be slower than before.
 **   C. commit depth: one connection makes a long chain of single-row
 **      commits; the last window must not cost more than the first.
 **
@@ -27,7 +30,8 @@
 #include "sqlite3.h"
 
 #define RATIO_B_MAX 12.0  /* open cost vs 5x seeded history (linear ~5x) */
-#define RATIO_B_GC_MAX 1.5 /* post-gc open vs pre-gc open */
+#define RATIO_G_MAX 1.5   /* post-gc open+scan vs pre-gc open+scan */
+#define GC_ROWS 300000    /* past the 8192-chunk in-memory index limit */
 #define RATIO_C_MAX 3.0   /* late commits vs early commits */
 #define COMMIT_SUBWINDOWS 5 /* median over these, not one contiguous mean */
 #define COMMIT_MIN_MS 1.0 /* below this the axis is under timer noise */
@@ -87,6 +91,26 @@ static sqlite3 *openDb(const char *path){
   return db;
 }
 
+static void addGarbage(const char *path){
+  sqlite3 *db = openDb(path);
+  char sql[256];
+  int i;
+  x(db, "SELECT dolt_checkout('-b','junk')");
+  for(i=0; i<3; i++){
+    snprintf(sql, sizeof(sql),
+      "UPDATE t SET v=randomblob(200) WHERE id%%4=%d;"
+      "SELECT dolt_commit('-am','junk%d');", i, i);
+    x(db, sql);
+  }
+  x(db, "SELECT dolt_checkout('main')");
+  x(db, "SELECT dolt_branch('-D','junk')");
+  snprintf(sql, sizeof(sql),
+    "UPDATE t SET v=randomblob(200) WHERE id%%4=3");
+  x(db, sql);
+  x(db, "SELECT dolt_reset('--hard')");
+  sqlite3_close(db);
+}
+
 static void seedDb(const char *path, int nRows){
   sqlite3 *db = openDb(path);
   char sql[256];
@@ -143,14 +167,40 @@ static double openCost(const char *path){
   return t0;
 }
 
+static double readCost(const char *path, const char *zSql){
+  double t0 = now_ms();
+  sqlite3 *db = openDb(path);
+  sqlite3_stmt *stmt = 0;
+  if( sqlite3_prepare_v2(db, zSql, -1, &stmt, 0)!=SQLITE_OK ){
+    die("prepare", sqlite3_errmsg(db));
+  }
+  if( sqlite3_step(stmt)!=SQLITE_ROW ) die("step", sqlite3_errmsg(db));
+  sqlite3_finalize(stmt);
+  t0 = now_ms() - t0;
+  sqlite3_close(db);
+  return t0;
+}
+
+static double median3(double a, double b, double c){
+  if( (a<=b && b<=c) || (c<=b && b<=a) ) return b;
+  if( (b<=a && a<=c) || (c<=a && a<=b) ) return a;
+  return c;
+}
+
 /* Median-of-3 to keep one cold-cache or scheduler blip from gating. */
 static double openCost3(const char *path){
   double a = openCost(path);
   double b = openCost(path);
   double c = openCost(path);
-  if( (a<=b && b<=c) || (c<=b && b<=a) ) return b;
-  if( (b<=a && a<=c) || (c<=a && a<=b) ) return a;
-  return c;
+  return median3(a, b, c);
+}
+
+static double scanCost3(const char *path){
+  const char *zSql = "SELECT sum(length(v)) FROM t";
+  double a = readCost(path, zSql);
+  double b = readCost(path, zSql);
+  double c = readCost(path, zSql);
+  return median3(a, b, c);
 }
 
 static double commitWindow(sqlite3 *db, int idFrom, int n){
@@ -220,7 +270,7 @@ int main(int argc, char **argv){
   int rounds = argc>3 ? atoi(argv[3]) : 40;
   int depth = argc>4 ? atoi(argv[4]) : 1000;
   char small[512], large[512], deep[512], sql[600];
-  double aS, aL, oS, oL, oGc, cEarly, cLate;
+  double aS, aL, oS, oL, cEarly, cLate;
   int window = depth/5;
   sqlite3 *db;
 
@@ -295,13 +345,27 @@ int main(int argc, char **argv){
   printf("B open+first-query: %.1f ms @%d rows, %.1f ms @%d rows\n",
          oS, seed, oL, seed*5);
   gateWithFloor("open_cost_at_most_linear", oL, oS, RATIO_B_MAX, OPEN_MIN_MS);
-  db = openDb(large);
-  x(db, "SELECT dolt_gc()");
-  sqlite3_close(db);
-  oGc = openCost3(large);
-  printf("B open after gc: %.1f ms (pre-gc %.1f ms)\n", oGc, oL);
-  gateWithFloor("open_after_gc_not_slower", oGc, oL, RATIO_B_GC_MAX,
-                OPEN_MIN_MS);
+  /* G: reads after gc on a store past the in-memory index limit */
+  {
+    char gcp[512];
+    double sPre, sGc;
+    snprintf(gcp, sizeof(gcp), "%s/growth_gc.db", dir);
+    remove(gcp);
+    snprintf(sql, sizeof(sql), "%s/.growth_gc.db-lock", dir);
+    remove(sql);
+    seedDb(gcp, GC_ROWS);
+    addGarbage(gcp);
+    sPre = scanCost3(gcp);
+    db = openDb(gcp);
+    x(db, "SELECT dolt_gc()");
+    sqlite3_close(db);
+    sGc = scanCost3(gcp);
+    printf("G open+scan after gc: %.1f ms (pre-gc with garbage %.1f ms, "
+           "%d rows)\n", sGc, sPre, GC_ROWS);
+    gateWithFloor("read_after_gc_not_slower", sGc, sPre, RATIO_G_MAX,
+                  OPEN_MIN_MS);
+    remove(gcp);
+  }
 
   /* C: commit latency vs history depth (single connection, no gc) */
   {
