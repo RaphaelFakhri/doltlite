@@ -53,6 +53,11 @@ i64 csIndexCacheBudgetFor(ChunkStore *cs, i64 nByte){
     nPage += nPage/8;
     nWant = sizeof(ChunkIndexCache)
           + nPage*(CS_INDEX_PAGE_SIZE + sizeof(ChunkIndexCachePage));
+  }else if( cs->index.lazy.active==2 ){
+    i64 nPage = cs->index.lazy.nEntries/128 + 1;
+    nPage += nPage/8;
+    nWant = sizeof(ChunkIndexCache)
+          + nPage*(CS_INDEX_PAGE_SIZE + sizeof(ChunkIndexCachePage));
   }
   return MAX(nByte/16, MIN(nByte/5*4, nWant));
 }
@@ -63,6 +68,28 @@ static int csIndexCacheSlot(ChunkStore *cs, const ProllyHash *pHash, int iChoice
   memcpy(&h, pHash->data+iChoice*sizeof(h), sizeof(h));
   return (int)(h % (cs->nIndexCacheSlot/CS_INDEX_CACHE_WAYS))
          *CS_INDEX_CACHE_WAYS;
+}
+
+static const u8 *csIndexCacheFind(
+  ChunkStore *cs, const ChunkIndexRun *pRun, i64 iOffset, int nBody,
+  const ProllyHash *pHash
+){
+  int choice;
+  if( !cs->pIndexCache ) return 0;
+  for(choice=0; choice<2; choice++){
+    int slot = csIndexCacheSlot(cs, pHash, choice);
+    int i;
+    for(i=0; i<CS_INDEX_CACHE_WAYS; i++){
+      ChunkIndexCachePage *p = &cs->pIndexCache->aPage[slot+i];
+      if( p->aBody && p->iOffset==iOffset && p->nBody==nBody
+       && p->iDataEnd==pRun->iDataEnd
+       && prollyHashCompare(&p->hash, pHash)==0 ){
+        p->lastUse = ++cs->pIndexCache->clock;
+        return p->aBody;
+      }
+    }
+  }
+  return 0;
 }
 
 static void csIndexCachePut(
@@ -258,18 +285,66 @@ static int csVisitFlat(ChunkStore *cs, CsIndexVisitor xVisit, void *pCtx){
   return SQLITE_OK;
 }
 
+static u64 csHashPrefix64(const u8 *p){
+  u64 v = 0;
+  int i;
+  for(i=0; i<8; i++) v = (v<<8) | p[i];
+  return v;
+}
+
+/* Flat blocks carry no content hash; the cache key is a mix of the offset,
+** and the cache never outlives the file it was filled from. */
+static int csReadFlatBlock(
+  ChunkStore *cs, const ChunkIndexRun *pRun, int first, int n,
+  u8 *aBuf, const u8 **pa
+){
+  i64 iOffset = pRun->iRootOffset+(i64)first*CHUNK_INDEX_ENTRY_SIZE;
+  int nBody = n*CHUNK_INDEX_ENTRY_SIZE;
+  u64 mix = (u64)iOffset*0x9E3779B97F4A7C15ULL;
+  ProllyHash key;
+  const u8 *aHit;
+  int rc;
+  memset(&key, 0, sizeof(key));
+  memcpy(key.data, &mix, sizeof(mix));
+  aHit = csIndexCacheFind(cs, pRun, iOffset, nBody, &key);
+  if( aHit ){
+    *pa = aHit;
+    return SQLITE_OK;
+  }
+  rc = csReadSliced(cs, aBuf, nBody, iOffset);
+  if( rc!=SQLITE_OK ) return rc;
+  csIndexCachePut(cs, pRun, iOffset, nBody, &key, aBuf);
+  *pa = aBuf;
+  return SQLITE_OK;
+}
+
+/* Each probe is a 4 KB block. Hashes are uniform, so interpolating
+** on the hash prefix lands on the right block in about one read; bisect
+** after a few probes so a skewed index stays logarithmic. */
 static int csFlatLookup(
   ChunkStore *cs, const ProllyHash *h, ChunkIndexEntry *e, int *pFound
 ){
-  u8 a[4096];
+  u8 aBuf[4096];
   const ChunkIndexRun *pRun = &cs->index.lazy.aRun[0];
   int lo = 0, hi = pRun->nEntries-1;
+  u64 k = csHashPrefix64(h->data);
+  u64 kLo = 0, kHi = ~(u64)0;
+  int nProbe = 0;
   while( lo<=hi ){
-    int first = ((lo+(hi-lo)/2)/128)*128;
-    int n = MIN(128, pRun->nEntries-first);
-    int l = 0, r = n-1;
-    int rc = csReadSliced(cs, a, n*CHUNK_INDEX_ENTRY_SIZE,
-                         pRun->iRootOffset+(i64)first*CHUNK_INDEX_ENTRY_SIZE);
+    int guess = lo+(hi-lo)/2;
+    const u8 *a;
+    int first, n, l, r, rc;
+    if( nProbe++<4 && k>=kLo && k<=kHi && kHi>kLo ){
+      double f = (double)(k-kLo)/((double)(kHi-kLo)+1.0);
+      guess = lo + (int)(f*(double)(hi-lo+1));
+      if( guess<lo ) guess = lo;
+      if( guess>hi ) guess = hi;
+    }
+    first = (guess/128)*128;
+    n = MIN(128, pRun->nEntries-first);
+    l = 0;
+    r = n-1;
+    rc = csReadFlatBlock(cs, pRun, first, n, aBuf, &a);
     if( rc!=SQLITE_OK ) return rc;
     while( l<=r ){
       int mid = l+(r-l)/2;
@@ -282,9 +357,15 @@ static int csFlatLookup(
       if( cmp<0 ) l = mid+1;
       else r = mid-1;
     }
-    if( l==0 ) hi = first-1;
-    else if( l==n ) lo = first+n;
-    else break;
+    if( l==0 ){
+      hi = first-1;
+      kHi = csHashPrefix64(a);
+    }else if( l==n ){
+      lo = first+n;
+      kLo = csHashPrefix64(a+(n-1)*CHUNK_INDEX_ENTRY_SIZE);
+    }else{
+      break;
+    }
   }
   return SQLITE_OK;
 }
@@ -417,22 +498,11 @@ static int csReadLazyPage(
    || iOffset>iLimit-CS_WAL_CHUNK_HDR_SIZE-nBody ){
     return SQLITE_CORRUPT;
   }
-  if( aBuffer && cs->pIndexCache ){
-    int choice;
-    for(choice=0; choice<2; choice++){
-      int slot = csIndexCacheSlot(cs, pHash, choice);
-      int i;
-      for(i=0; i<CS_INDEX_CACHE_WAYS; i++){
-        ChunkIndexCachePage *p = &cs->pIndexCache->aPage[slot+i];
-        if( p->aBody && p->iOffset==iOffset && p->nBody==nBody
-         && p->iDataEnd==pRun->iDataEnd
-         && prollyHashCompare(&p->hash, pHash)==0 ){
-          aBody = p->aBody;
-          p->lastUse = ++cs->pIndexCache->clock;
-          *ppBody = aBody;
-          return SQLITE_OK;
-        }
-      }
+  if( aBuffer ){
+    const u8 *aHit = csIndexCacheFind(cs, pRun, iOffset, nBody, pHash);
+    if( aHit ){
+      *ppBody = (u8*)aHit;
+      return SQLITE_OK;
     }
   }
   aBody = aBuffer ? aBuffer : sqlite3_malloc(nBody+CS_WAL_CHUNK_HDR_SIZE);
