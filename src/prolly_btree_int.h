@@ -303,6 +303,7 @@ struct Btree {
   Btree *pNext;
   u64 nSeek;
   int nBackup;
+  int nReadSnapshot;
 
   Catalog cat;
 

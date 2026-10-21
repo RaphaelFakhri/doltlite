@@ -1029,6 +1029,20 @@ int doltliteRefreshAutocommitWorkingState(sqlite3 *db){
   return btreeRefreshSharedWorkingState(p);
 }
 
+int doltliteBeginReadSnapshot(sqlite3 *db){
+  Btree *p = db->aDb[0].pBt;
+  int rc = SQLITE_OK;
+  if( p->inTrans==TRANS_NONE ) rc = sqlite3BtreeBeginTrans(p, 0, 0);
+  if( rc==SQLITE_OK ) p->nReadSnapshot++;
+  return rc;
+}
+
+void doltliteEndReadSnapshot(sqlite3 *db){
+  Btree *p = db->aDb[0].pBt;
+  assert( p->nReadSnapshot>0 );
+  p->nReadSnapshot--;
+}
+
 void doltliteGetSessionStaged(sqlite3 *db, ProllyHash *pStaged){
   if( db && db->nDb>0 && db->aDb[0].pBt ){
     memcpy(pStaged, &db->aDb[0].pBt->vc.stagedCatalog, sizeof(ProllyHash));

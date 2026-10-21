@@ -699,7 +699,8 @@ int prollyBtreeBeginTrans(Btree *p, int wrFlag, int *pSchemaVersion){
     ** stale-snapshot check. Schema initialization also owns a read snapshot:
     ** its cookie and sqlite_schema rows must come from the same catalog. */
     if( p->db && p->db->autoCommit && !p->db->pSavepoint
-     && p->db->nVdbeRead<=1 && !p->db->init.busy ){
+     && p->db->nVdbeRead<=1 && !p->db->init.busy
+     && p->nReadSnapshot==0 ){
       p->inTrans = TRANS_NONE;
       p->inTransaction = TRANS_NONE;
       pBt->store.snapshotPinned = 0;
@@ -1256,6 +1257,7 @@ int prollyBtreeCommitPhaseTwo(Btree *p, int bCleanup){
   }
 
   if( p->inTrans!=TRANS_WRITE ){
+    if( p->nReadSnapshot>0 ) return SQLITE_OK;
     commitPhaseTwoEndWriteTxn(p);
     commitPhaseTwoReleaseGraph(pBt);
     return SQLITE_OK;
