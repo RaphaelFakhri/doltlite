@@ -234,7 +234,6 @@ void chunkStoreFreeWsBranches(ChunkStore *cs){
   sqlite3_free(cs->wsBasisBranch.zLong);
   sqlite3_free(cs->wsSelfBranch.zLong);
   sqlite3_free(cs->wsSelfPublishedBranch.zLong);
-  sqlite3_free(cs->wsKnownBranch.zLong);
 }
 
 void chunkStoreNoteSelfPublishedWorkingSet(ChunkStore *cs){
@@ -246,8 +245,6 @@ void chunkStoreNoteSelfPublishedWorkingSet(ChunkStore *cs){
     cs->bWsSelfPublished = csSetWsBranch(&cs->wsSelfPublishedBranch,
                                          csWsBranch(&cs->wsSelfBranch));
     memcpy(&cs->wsSelfPublished, &cs->wsSelfWritten, sizeof(ProllyHash));
-    cs->bWsKnown = csSetWsBranch(&cs->wsKnownBranch, csWsBranch(&cs->wsSelfBranch));
-    memcpy(&cs->wsKnown, &cs->wsSelfWritten, sizeof(ProllyHash));
   }
 }
 
@@ -349,19 +346,6 @@ int chunkStoreGetBranchWorkingSet(ChunkStore *cs, const char *zBranch, ProllyHas
   return SQLITE_OK;
 }
 
-static void csNoteKnownWorkingSet(
-  ChunkStore *cs,
-  const char *zBranch,
-  const ProllyHash *pHash
-){
-  if( cs->bWsKnown && strcmp(csWsBranch(&cs->wsKnownBranch), zBranch)==0
-   && prollyHashCompare(&cs->wsKnown, pHash)!=0 ){
-    cs->nWsForeignAdopt++;
-  }
-  cs->bWsKnown = csSetWsBranch(&cs->wsKnownBranch, zBranch);
-  memcpy(&cs->wsKnown, pHash, sizeof(ProllyHash));
-}
-
 static void csNoteWorkingSetBasis(
   ChunkStore *cs,
   const char *zBranch,
@@ -403,7 +387,6 @@ void chunkStoreAdoptWorkingSetBasis(ChunkStore *cs, const char *zBranch){
     cs->wsBasisBranch.bOom = 0;
     return;
   }
-  csNoteKnownWorkingSet(cs, zBranch, &cs->refs.aBranches[i].workingSetHash);
   csNoteWorkingSetBasis(cs, zBranch, &cs->refs.aBranches[i].workingSetHash);
 }
 
@@ -426,7 +409,6 @@ void chunkStoreReadoptWorkingSetBasis(ChunkStore *cs){
 
 void chunkStoreGetWorkingSetBasis(ChunkStore *cs, const char *zBranch,
                                   ProllyHash *pHash){
-  cs->nWsForeignAdoptAtCapture = cs->nWsForeignAdopt;
   chunkStorePeekWorkingSetBasis(cs, zBranch, pHash);
 }
 

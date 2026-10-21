@@ -256,10 +256,6 @@ struct ChunkStore {
   CsWsBranch wsSelfPublishedBranch;
   ProllyHash wsSelfWritten;
   ProllyHash wsSelfPublished;
-  /* Bumped when this connection adopts a working set other than the last
-  ** one it knew to be durable (adopted or published itself); a command that
-  ** saw it bump picked up a peer's write mid-flight. Comparing against the
-  ** basis instead would count a rolled-back local write as foreign. */
   /* The session branch's working set as it stood, and the basis it was
   ** computed from, when this batch first replaced it. Publishing over a
   ** working set the session never read would erase a peer's write. */
@@ -280,11 +276,6 @@ struct ChunkStore {
   ** its steps; the outermost step still reloads as it would alone. */
   u8 nOuterLockHold;
   u8 bLockHoldOnly;
-  u8 bWsKnown;
-  CsWsBranch wsKnownBranch;
-  ProllyHash wsKnown;
-  u32 nWsForeignAdopt;
-  u32 nWsForeignAdoptAtCapture;
   ChunkIndex index;
   ChunkIndexCache *pIndexCache;
   int nIndexCacheSlot;

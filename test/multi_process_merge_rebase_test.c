@@ -790,116 +790,6 @@ static void test_concurrent_continue_adoption(void){
   remove(path);
 }
 
-static void test_continue_with_peer_shared_live_lock(void){
-  const char *path = DOLTLITE_TEST_TMPDIR "/test_rebase_shared_live_lock.db";
-  char branchPath[320], lockPath[384], parentOut[256], childOut[256];
-  sqlite3 *db = 0;
-  int readyfd[2], gofd[2], outfd[2];
-  int status;
-  pid_t child;
-
-  printf("--- Test: continue while a peer holds the shared live lock ---\n");
-  remove(path);
-  check("shared_live_open_seed", sqlite3_open(path, &db)==SQLITE_OK);
-  check("shared_live_seed", execSql(db,
-      "CREATE TABLE t(id INTEGER PRIMARY KEY, v INT);"
-      "INSERT INTO t VALUES(1,1);"
-      "SELECT dolt_commit('-Am','base');"
-      "SELECT dolt_checkout('-b','feat');"
-      "INSERT INTO t VALUES(2,2);"
-      "SELECT dolt_commit('-am','feature');"
-      "SELECT dolt_checkout('main');"
-      "INSERT INTO t VALUES(10,10);"
-      "SELECT dolt_commit('-am','main');")==SQLITE_OK);
-  sqlite3_close(db);
-  snprintf(branchPath, sizeof(branchPath), "%s/feat", path);
-  check("shared_live_open_feature", sqlite3_open(branchPath, &db)==SQLITE_OK);
-  check("shared_live_start", execSql(db, "SELECT dolt_rebase('-i','main')")==SQLITE_OK);
-  sqlite3_close(db);
-  memset(lockPath, 0, sizeof(lockPath));
-  snprintf(lockPath, sizeof(lockPath), "%s/.test_rebase_shared_live_lock.db-rebase-lock",
-           DOLTLITE_TEST_TMPDIR);
-  if( pipe(readyfd)!=0 || pipe(gofd)!=0 || pipe(outfd)!=0 ){
-    check("shared_live_pipes", 0);
-    return;
-  }
-  child = fork();
-  if( child==0 ){
-    sqlite3_vfs *vfs = sqlite3_vfs_find(0);
-    sqlite3_file *file = sqlite3_malloc(vfs->szOsFile);
-    int rc = SQLITE_NOMEM;
-    sqlite3 *peer = 0;
-    close(readyfd[0]);
-    close(gofd[1]);
-    close(outfd[0]);
-    if( file ){
-      memset(file, 0, vfs->szOsFile);
-      rc = vfs->xOpen(vfs, lockPath, file,
-                     SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_MAIN_DB, 0);
-      if( rc==SQLITE_OK ) rc = file->pMethods->xLock(file, SQLITE_LOCK_SHARED);
-    }
-    if( !writeSignal(readyfd[1]) || !readSignal(gofd[0]) ) _exit(1);
-    if( file && file->pMethods ){
-      file->pMethods->xUnlock(file, SQLITE_LOCK_NONE);
-      file->pMethods->xClose(file);
-    }
-    sqlite3_free(file);
-    if( rc!=SQLITE_OK ){
-      writeText(outfd[1], "LOCK_ERR");
-      _exit(1);
-    }
-    sqlite3_open(path, &peer);
-    sqlite3_busy_timeout(peer, 5000);
-    writeText(outfd[1], queryScalarText(peer, "SELECT dolt_rebase('--continue')"));
-    sqlite3_close(peer);
-    _exit(0);
-  }
-  if( child<0 ){
-    check("shared_live_fork", 0);
-    close(readyfd[0]);
-    close(readyfd[1]);
-    close(gofd[0]);
-    close(gofd[1]);
-    close(outfd[0]);
-    close(outfd[1]);
-    return;
-  }
-  close(readyfd[1]);
-  close(gofd[0]);
-  close(outfd[1]);
-  check("shared_live_peer_ready", child>0 && readSignal(readyfd[0]));
-  check("shared_live_open_parent", sqlite3_open(path, &db)==SQLITE_OK);
-  sqlite3_busy_timeout(db, 100);
-  snprintf(parentOut, sizeof(parentOut), "%s",
-           queryScalarText(db, "SELECT dolt_rebase('--continue')"));
-  check("shared_live_continue_completes", strstr(parentOut, "Successfully")!=0);
-  sqlite3_close(db);
-  check("shared_live_release_peer", writeSignal(gofd[1]));
-  {
-    ssize_t n = read(outfd[0], childOut, sizeof(childOut)-1);
-    if( n<0 ) n = 0;
-    childOut[n] = 0;
-  }
-  waitpid(child, &status, 0);
-  check("shared_live_peer_exited", WIFEXITED(status) && WEXITSTATUS(status)==0);
-  check("shared_live_loser_no_rebase", strstr(childOut, "no rebase in progress")!=0);
-  if( !strstr(parentOut, "Successfully") ){
-    fprintf(stderr, "shared live lock parent=[%s] child=[%s]\n", parentOut, childOut);
-  }
-  close(readyfd[0]);
-  close(gofd[1]);
-  close(outfd[0]);
-  sqlite3_open(path, &db);
-  check("shared_live_main_kept", countRows(db, "SELECT count(*) FROM t WHERE id IN (1,10)")==2);
-  sqlite3_close(db);
-  sqlite3_open(branchPath, &db);
-  check("shared_live_feature_rebased", countRows(db, "SELECT count(*) FROM t WHERE id IN (1,2,10)")==3);
-  check("shared_live_working_branch_removed",
-        countRows(db, "SELECT count(*) FROM dolt_branches WHERE name='dolt_rebase_feat'")==0);
-  sqlite3_close(db);
-  remove(path);
-}
-
 /* A peer commit on main fired from the operation's progress handler at step
 ** fireAt, so it lands between the operation planning its result and
 ** advancing the branch for some step. */
@@ -1059,7 +949,6 @@ int main(void){
   test_rebase_racing_checkout();
   test_concurrent_continue_abort();
   test_concurrent_continue_adoption();
-  test_continue_with_peer_shared_live_lock();
   test_revert_racing_peer_commit();
   test_pull_racing_peer_commit();
 

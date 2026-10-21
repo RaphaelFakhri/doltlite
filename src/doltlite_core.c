@@ -1122,11 +1122,6 @@ int doltliteConfirmWorkingSet(
 ){
   int rc = doltliteBranchWorkingSetUnmoved(
       cs, doltliteGetSessionBranch(db), pExpectedWorkingSet);
-  if( rc==SQLITE_OK && pExpectedWorkingSet
-   && !prollyHashIsEmpty(pExpectedWorkingSet) && chunkStoreHasPeers(cs)
-   && cs->nWsForeignAdopt!=cs->nWsForeignAdoptAtCapture ){
-    rc = SQLITE_BUSY;
-  }
   if( rc!=SQLITE_OK ) doltliteInvalidateSessionWorkingState(db);
   return rc;
 }
