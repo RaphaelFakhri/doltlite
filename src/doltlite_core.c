@@ -1138,18 +1138,8 @@ static int doltliteCompareAndAdvanceBranchImpl(
   ChunkStore *cs = doltliteGetChunkStore(db);
   DoltliteTxnState saved;
   ProllyHash branchTip;
-  ProllyHash wsAtSnapshot;
-  int haveWsSnapshot = 0;
   int rc;
   if( !cs ) return SQLITE_ERROR;
-  if( !bSwitchCatalog ){
-    const char *zBranch = doltliteGetSessionBranch(db);
-    memset(&wsAtSnapshot, 0, sizeof(wsAtSnapshot));
-    if( zBranch
-     && chunkStoreGetBranchWorkingSet(cs, zBranch, &wsAtSnapshot)==SQLITE_OK ){
-      haveWsSnapshot = 1;
-    }
-  }
   rc = doltliteSaveTxnState(db, &saved);
   if( rc!=SQLITE_OK ) return rc;
   rc = doltliteRefreshAndConfirmHead(db, cs, pExpectedHead);
@@ -1158,40 +1148,6 @@ static int doltliteCompareAndAdvanceBranchImpl(
     return rc;
   }
   PROLLY_ASSERT_STORE_GRAPH_LOCKED(cs);
-
-  /* An unchanged tip does not mean an unchanged working set. Without a write
-  ** transaction the graph lock was free until the confirm, so a peer may have
-  ** written the working set since this session adopted or wrote it, and
-  ** persisting ours would erase that write. */
-  if( !bSwitchCatalog
-   && sqlite3_txn_state(db, "main")!=SQLITE_TXN_WRITE
-   && chunkStoreWorkingSetMovedFromBasis(cs, doltliteGetSessionBranch(db)) ){
-    chunkStoreUnlock(cs);
-    doltliteInvalidateSessionWorkingState(db);
-    doltliteTxnStateClear(&saved);
-    return SQLITE_BUSY;
-  }
-
-  /* A local edit changes the catalog without publishing a new working set.
-  ** Only a working-set hash that moved after the snapshot is a peer write. */
-  if( !bSwitchCatalog && haveWsSnapshot ){
-    ProllyHash wsNow;
-    int haveNow = 0;
-    int prc = chunkStoreReadDiskBranchWorkingSet(
-        cs, doltliteGetSessionBranch(db), &wsNow, &haveNow);
-    if( prc!=SQLITE_OK ){
-      chunkStoreUnlock(cs);
-      doltliteInvalidateSessionWorkingState(db);
-      doltliteTxnStateClear(&saved);
-      return prc;
-    }
-    if( haveNow && prollyHashCompare(&wsNow, &wsAtSnapshot)!=0 ){
-      chunkStoreUnlock(cs);
-      doltliteInvalidateSessionWorkingState(db);
-      doltliteTxnStateClear(&saved);
-      return SQLITE_BUSY;
-    }
-  }
 
   rc = doltliteConfirmWorkingSet(db, cs, pExpectedWorkingSet);
   if( rc!=SQLITE_OK ){
