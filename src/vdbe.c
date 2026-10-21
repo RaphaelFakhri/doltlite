@@ -4618,6 +4618,19 @@ case OP_AutoCommit: {
   assert( db->nVdbeActive>0 );  /* At least this one VM is active */
   assert( p->bIsReader );
 
+#ifdef DOLTLITE_PROLLY
+  /* A version-control command that committed the caller's transaction
+  ** opened the next one, as Dolt does; BEGIN commits it, as in MySQL. */
+  if( db->autoCommit ) db->bVcReopenedTxn = 0;
+  if( !desiredAutoCommit && !db->autoCommit && db->bVcReopenedTxn ){
+    db->bVcReopenedTxn = 0;
+    rc = sqlite3_exec(db, "COMMIT", 0, 0, 0);
+    if( rc!=SQLITE_OK ){
+      sqlite3VdbeError(p, "%s", sqlite3_errmsg(db));
+      goto abort_due_to_error;
+    }
+  }
+#endif
   if( desiredAutoCommit!=db->autoCommit ){
 #ifdef DOLTLITE_PROLLY
     if( desiredAutoCommit && !iRollback

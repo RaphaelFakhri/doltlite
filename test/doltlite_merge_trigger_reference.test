@@ -74,6 +74,7 @@ foreach table {u2 select {select data} {odd"name}} {
           set readQuoted $quoted
           set expected [list 1 10 u2 2 [expr {20+$edit}] u2]
         }
+        if {$txn eq "explicit"} {execsql COMMIT}
         db close
         sqlite3 db [file normalize test.db]/$branch
         do_execsql_test $name-reopen "

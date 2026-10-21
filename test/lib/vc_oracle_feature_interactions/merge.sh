@@ -1191,7 +1191,7 @@ SELECT dolt_commit('-m','c3');
 
 echo "--- explicit transaction probes ---"
 
-VC_ORACLE_EXPECTATION=error oracle "begin_commit_across_dolt_commit" "
+oracle "begin_commit_across_dolt_commit" "
 CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);
 INSERT INTO t VALUES(1,'a');
 SELECT dolt_add('-A');

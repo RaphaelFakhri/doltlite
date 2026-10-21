@@ -617,11 +617,11 @@ else
   FAIL=$((FAIL+1))
   ERRORS="$ERRORS\nFAIL: linear_rebase_in_txn_seals\n  expected: TX|3|0|feat\n  got:      $TX_LINE"
 fi
-if echo "$TX_OUT" | grep -q "cannot rollback - no transaction is active"; then
+if ! echo "$TX_OUT" | grep -q "cannot rollback - no transaction is active"; then
   PASS=$((PASS+1))
 else
   FAIL=$((FAIL+1))
-  ERRORS="$ERRORS\nFAIL: linear_rebase_in_txn_rollback_refused\n  expected the post-rebase ROLLBACK to find no open transaction"
+  ERRORS="$ERRORS\nFAIL: linear_rebase_in_txn_rollback_continues\n  expected the post-rebase ROLLBACK to find the transaction the rebase left open, as in Dolt"
 fi
 rm -f "$DB11"
 

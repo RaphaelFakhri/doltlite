@@ -445,11 +445,11 @@ else
   ERRORS="$ERRORS\nFAIL: clean_merge_in_txn_seals\n  expected: TX|Merge branch 'feat' into main|3|0\n  got:      $TX_LINE"
 fi
 echo "$TX_OUT" | grep -q "cannot rollback - no transaction is active"
-if [ $? -eq 0 ]; then
+if [ $? -ne 0 ]; then
   PASS=$((PASS+1))
 else
   FAIL=$((FAIL+1))
-  ERRORS="$ERRORS\nFAIL: clean_merge_in_txn_rollback_refused\n  expected the post-merge ROLLBACK to find no open transaction"
+  ERRORS="$ERRORS\nFAIL: clean_merge_in_txn_rollback_continues\n  expected the post-merge ROLLBACK to find the transaction the merge left open, as in Dolt"
 fi
 
 DB25=/tmp/test_merge25_$$.db; rm -f "$DB25" "$DB26" "$DB27" "$DB28" "$DB29" "$DB30" "$DB31" "$DB32" "$DB33" "$DB34" "$DB35" "$DB36" "$DB37" "$DB38" "$DB39"
@@ -469,11 +469,11 @@ else
   ERRORS="$ERRORS\nFAIL: ff_merge_in_txn_seals\n  expected: TX|feat|2|0\n  got:      $TX_LINE"
 fi
 echo "$TX_OUT" | grep -q "cannot rollback - no transaction is active"
-if [ $? -eq 0 ]; then
+if [ $? -ne 0 ]; then
   PASS=$((PASS+1))
 else
   FAIL=$((FAIL+1))
-  ERRORS="$ERRORS\nFAIL: ff_merge_in_txn_rollback_refused\n  expected the post-merge ROLLBACK to find no open transaction"
+  ERRORS="$ERRORS\nFAIL: ff_merge_in_txn_rollback_continues\n  expected the post-merge ROLLBACK to find the transaction the merge left open, as in Dolt"
 fi
 
 

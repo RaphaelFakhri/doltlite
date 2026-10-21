@@ -1183,4 +1183,28 @@ INSERT INTO t VALUES (5);
 " "SELECT 'Q|' || count(*) || '|' || coalesce((SELECT id FROM audit), '~') FROM audit" \
 "SELECT concat('Q|', count(*), '|', coalesce((SELECT id FROM audit), '~')) FROM audit"
 
+echo "--- inside a transaction ---"
+
+# The new commit ends the caller's transaction, and a new one carries on: a
+# row inserted after it still rolls back.
+for op in "dolt_cherry_pick('feat')" "dolt_revert('HEAD')"; do
+name=$(printf '%s' "$op" | sed -E 's/^dolt_([a-z_]+).*/\1/')
+oracle_poststate "${name}_in_txn_then_rollback" "
+CREATE TABLE t(id INTEGER PRIMARY KEY, v INT);
+INSERT INTO t VALUES (1, 1);
+SELECT dolt_commit('-Am', 'base');
+SELECT dolt_checkout('-b', 'feat');
+INSERT INTO t VALUES (10, 10);
+SELECT dolt_commit('-am', 'feat1');
+SELECT dolt_checkout('main');
+INSERT INTO t VALUES (2, 2);
+SELECT dolt_commit('-am', 'main2');
+BEGIN;
+SELECT $op;
+INSERT INTO t VALUES (3, 3);
+ROLLBACK;
+" "SELECT (SELECT group_concat(id, ',') FROM (SELECT id FROM t ORDER BY id)) || '|' || (SELECT count(*) FROM dolt_log)" \
+"SELECT concat((SELECT group_concat(id ORDER BY id SEPARATOR ',') FROM t), '|', (SELECT count(*) FROM dolt_log))"
+done
+
 vc_oracle_finish

@@ -1246,7 +1246,7 @@ static void test_write_after_lost_commit_race(void){
     if( strlen(queryScalarText(db, "SELECT dolt_commit('-am','peer')"))!=40 ) _exit(3);
     mpWrite(ready[1], "D");
     mpRead(done[0], &ch);
-    if( execSql(db, "INSERT INTO t VALUES(11, 'peer')")!=SQLITE_OK ) _exit(4);
+    if( execSql(db, "INSERT INTO t VALUES(11, 'peer'); COMMIT")!=SQLITE_OK ) _exit(4);
     if( strcmp(queryScalarText(db, "SELECT count(*) FROM t WHERE id=3"), "1")!=0 ) _exit(5);
     sqlite3_close(db);
     _exit(0);

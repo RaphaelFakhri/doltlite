@@ -58,7 +58,7 @@ echo "--- BEGIN + dolt_commit + ROLLBACK ---"
 
 DB="$TMPROOT/a.db"
 rm -f "$DB"
-VC_ORACLE_EXPECTATION=error dl_query "$DB" "$(cat <<'SQL'
+dl_query "$DB" "$(cat <<'SQL'
 CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);
 INSERT INTO t VALUES(1,'base');
 BEGIN;
@@ -161,7 +161,7 @@ echo "--- BEGIN + multiple inserts + dolt_commit + ROLLBACK ---"
 
 DB="$TMPROOT/d.db"
 rm -f "$DB"
-VC_ORACLE_EXPECTATION=error dl_query "$DB" "$(cat <<'SQL'
+dl_query "$DB" "$(cat <<'SQL'
 CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);
 BEGIN;
 INSERT INTO t VALUES(1,'a');
@@ -336,7 +336,7 @@ echo "--- ROLLBACK TO nested savepoint before dolt_commit ---"
 
 DB="$TMPROOT/j.db"
 rm -f "$DB"
-VC_ORACLE_EXPECTATION=error dl_query "$DB" "$(cat <<'SQL'
+dl_query "$DB" "$(cat <<'SQL'
 CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);
 INSERT INTO t VALUES(1,'base');
 SELECT dolt_commit('-A','-m','base');

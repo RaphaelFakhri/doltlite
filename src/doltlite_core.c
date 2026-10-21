@@ -1554,7 +1554,9 @@ int doltliteVcSealBranchStyleTxn(sqlite3 *db){
   }
   rc = sqlite3_exec(db, "COMMIT", 0, 0, 0);
   if( rc!=SQLITE_OK ) return rc;
-  return sqlite3_exec(db, "BEGIN", 0, 0, 0);
+  rc = sqlite3_exec(db, "BEGIN", 0, 0, 0);
+  if( rc==SQLITE_OK ) db->bVcReopenedTxn = 1;
+  return rc;
 }
 
 int doltlitePrimeSchemaCache(sqlite3 *db){
