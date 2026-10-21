@@ -236,14 +236,139 @@ static void test_readonly_reset_does_not_unlock_writers(const char *zPath){
   remove(zPath);
 }
 
+typedef struct StatusSnapshotPeer StatusSnapshotPeer;
+struct StatusSnapshotPeer {
+  int toPeer[2];
+  int fromPeer[2];
+  unsigned event;
+  int fired;
+  int peerRc;
+  int txnState;
+};
+
+static int statusSnapshotPeer(
+  unsigned event, void *arg, void *stmt, void *extra
+){
+  StatusSnapshotPeer *p = (StatusSnapshotPeer*)arg;
+  const char *zSql = sqlite3_sql((sqlite3_stmt*)stmt);
+  char ch = 'g';
+  (void)extra;
+  if( event!=p->event || p->fired || !zSql
+   || strstr(zSql, "SELECT name, rootpage, sql")==0 ) return 0;
+  p->fired = 1;
+  p->txnState = sqlite3_txn_state(sqlite3_db_handle(stmt), "main");
+  if( write(p->toPeer[1], &ch, 1)!=1
+   || read(p->fromPeer[0], &p->peerRc, sizeof(p->peerRc))
+       !=sizeof(p->peerRc) ) p->fired = -1;
+  return 0;
+}
+
+static void test_status_snapshot_during_schema_change(
+  const char *zPath, int readonly, unsigned event, int boundary, int withTable
+){
+  sqlite3 *db = 0;
+  sqlite3_stmt *pStmt = 0;
+  StatusSnapshotPeer p;
+  pid_t pid;
+  int status = 0, rc;
+  char ch = 'g';
+
+  remove(zPath);
+  check("status_snapshot: seed open", sqlite3_open(zPath, &db)==SQLITE_OK);
+  check("status_snapshot: seed", exec_rc(db,
+      "CREATE TABLE w(id INTEGER PRIMARY KEY, v TEXT);"
+      "INSERT INTO w VALUES(1,'seed');"
+      "SELECT dolt_commit('-Am','seed');"
+      "CREATE TABLE d(id INTEGER PRIMARY KEY, v TEXT)")==SQLITE_OK);
+  sqlite3_close(db);
+  db = 0;
+  memset(&p, 0, sizeof(p));
+  p.event = event;
+  p.peerRc = SQLITE_ERROR;
+  if( pipe(p.toPeer) || pipe(p.fromPeer) ){ perror("pipe"); exit(1); }
+  pid = fork();
+  if( pid<0 ){ perror("fork"); exit(1); }
+  if( pid==0 ){
+    sqlite3 *peer = 0;
+    int peerRc = sqlite3_open(zPath, &peer);
+    sqlite3_busy_timeout(peer, 1000);
+    if( read(p.toPeer[0], &ch, 1)!=1 ) _exit(1);
+    if( peerRc==SQLITE_OK ) peerRc = exec_rc(peer,
+        "INSERT INTO w VALUES(2,'peer');"
+        "CREATE TABLE e(id INTEGER PRIMARY KEY, v TEXT);"
+        "SELECT dolt_gc()");
+    sqlite3_close(peer);
+    if( write(p.fromPeer[1], &peerRc, sizeof(peerRc))!=sizeof(peerRc) ) _exit(1);
+    _exit(0);
+  }
+  check("status_snapshot: reader open", sqlite3_open_v2(zPath, &db,
+      readonly ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE, 0)==SQLITE_OK);
+  if( boundary ) check("status_snapshot: begin", exec_rc(db,
+      boundary==1 ? "BEGIN" : "SAVEPOINT caller")==SQLITE_OK);
+  rc = sqlite3_prepare_v2(db,
+      withTable
+        ? "SELECT (SELECT count(*) FROM dolt_status), (SELECT count(*) FROM w)"
+        : "SELECT count(*) FROM dolt_status",
+      -1, &pStmt, 0);
+  check("status_snapshot: prepare", rc==SQLITE_OK);
+  sqlite3_trace_v2(db, event, statusSnapshotPeer, &p);
+  rc = sqlite3_step(pStmt);
+  check("status_snapshot: status and table use one snapshot", rc==SQLITE_ROW
+      && sqlite3_column_int(pStmt, 0)==1
+      && (!withTable || sqlite3_column_int(pStmt, 1)==1));
+  if( rc==SQLITE_ROW ) rc = sqlite3_step(pStmt);
+  check("status_snapshot: finish", rc==SQLITE_DONE);
+  check("status_snapshot: finalize", sqlite3_finalize(pStmt)==SQLITE_OK);
+  sqlite3_trace_v2(db, 0, 0, 0);
+  check("status_snapshot: nested read kept snapshot",
+      p.fired==1 && p.txnState==SQLITE_TXN_READ);
+  check("status_snapshot: peer write proceeded", p.peerRc==SQLITE_OK);
+  if( !p.fired ){
+    if( write(p.toPeer[1], &ch, 1)!=1
+     || read(p.fromPeer[0], &p.peerRc, sizeof(p.peerRc))
+         !=sizeof(p.peerRc) ) exit(1);
+  }
+  waitpid(pid, &status, 0);
+  check("status_snapshot: peer exit", WIFEXITED(status) && WEXITSTATUS(status)==0);
+  close(p.toPeer[0]); close(p.toPeer[1]);
+  close(p.fromPeer[0]); close(p.fromPeer[1]);
+  check("status_snapshot: caller transaction preserved",
+      sqlite3_get_autocommit(db)==(boundary==0));
+  if( boundary ){
+    check("status_snapshot: caller still sees old rows",
+        scalar(db, "SELECT count(*) FROM w")==1);
+    check("status_snapshot: end caller", exec_rc(db,
+        boundary==1 ? "COMMIT" : "RELEASE caller")==SQLITE_OK);
+  }
+  check("status_snapshot: snapshot released",
+      sqlite3_txn_state(db, "main")==SQLITE_TXN_NONE);
+  check("status_snapshot: next read sees peer rows",
+      scalar(db, "SELECT count(*) FROM w")==2);
+  check("status_snapshot: next status sees peer schema",
+      scalar(db, "SELECT count(*) FROM dolt_status")==3);
+  check("status_snapshot: close", sqlite3_close(db)==SQLITE_OK);
+  remove(zPath);
+}
+
 int main(void){
   char zPath[256];
+  int readonly, boundary, withTable;
   snprintf(zPath, sizeof(zPath), DOLTLITE_TEST_TMPDIR "/dolt_ro_reader_%d.db", (int)getpid());
 
   test_readonly_status_does_not_starve_a_writer(zPath, 1);
   test_readonly_status_does_not_starve_a_writer(zPath, 4);
   test_readonly_still_sees_peer_changes(zPath);
   test_readonly_reset_does_not_unlock_writers(zPath);
+  for(readonly=0; readonly<2; readonly++){
+    for(boundary=0; boundary<3; boundary++){
+      for(withTable=0; withTable<2; withTable++){
+        test_status_snapshot_during_schema_change(
+            zPath, readonly, SQLITE_TRACE_STMT, boundary, withTable);
+        test_status_snapshot_during_schema_change(
+            zPath, readonly, SQLITE_TRACE_PROFILE, boundary, withTable);
+      }
+    }
+  }
 
   printf("readonly_reader_writer_test: %d passed, %d failed\n", nPass, nFail);
   return nFail ? 1 : 0;

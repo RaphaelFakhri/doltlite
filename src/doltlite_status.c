@@ -1529,6 +1529,8 @@ static int statusFilter(sqlite3_vtab_cursor *pCursor,
     return SQLITE_OK;
   }
 
+  rc = doltliteBeginReadSnapshot(db);
+  if( rc!=SQLITE_OK ) return rc;
   doltliteGetSessionStaged(db, &stagedCatHash);
   if( iStagedOnly==1 && prollyHashIsEmpty(&stagedCatHash) ){
     goto status_done;
@@ -1614,6 +1616,7 @@ status_done:
   if( headLoaded ) doltliteFreeCatalog(aHead, nHead);
   if( stagedLoaded ) doltliteFreeCatalog(aStaged, nStaged);
   if( workingLoaded ) doltliteFreeCatalog(aWorking, nWorking);
+  doltliteEndReadSnapshot(db);
   return rc;
 }
 
