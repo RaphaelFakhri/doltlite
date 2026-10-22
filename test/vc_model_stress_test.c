@@ -1007,9 +1007,9 @@ static int chainHits(const Cmt *m, long long t, const char *zVictim){
 }
 
 /* Row p was in an acked commit -a on its branch that was still HEAD's
-** ancestor (no HEAD regression) by time t. The victim is read under the
+** ancestor (no HEAD regression) by time tHead. The victim is read under the
 ** rewriting op's lock, so amends up to tVictim (its end) can produce it. */
-static int committedBefore(const struct Ins *p, long long t,
+static int committedBefore(const struct Ins *p, long long t, long long tHead,
                            const char *zVictim, long long tVictim){
   int i;
   for(i=0;i<nCm;i++){
@@ -1018,7 +1018,7 @@ static int committedBefore(const struct Ins *p, long long t,
     if( m->S <= p->E || m->E >= t ) continue;
     if( zVictim && chainHits(m, tVictim, zVictim) ) continue;
     if( anyBetween(FW|FR, p->br, p->S, m->E) ) continue;
-    if( anyBetween(FK, p->br, m->S, t) ) continue;
+    if( anyBetween(FK, p->br, m->S, tHead) ) continue;
     return 1;
   }
   return 0;
@@ -1031,7 +1031,11 @@ static const Xev *rowExcused(const struct Ins *p){
     if( x->E <= p->S || !onBr(x, p->br) ) continue;
     if( x->flags & FR ) return x;
     if( (x->flags & FW) && (x->flags & FK) && !strcmp(x->victim, "*") ) return x;
-    if( (x->flags & FW) && !committedBefore(p, x->S, (x->flags & FK) ? x->victim : 0, x->E) ) return x;
+    /* A reset that waited for the lock reads HEAD when it gets it, so a
+    ** peer's HEAD move up to its end may already have dropped the commit. */
+    if( (x->flags & FW) && !committedBefore(p, x->S,
+            (x->flags & FK) ? x->S : x->E,
+            (x->flags & FK) ? x->victim : 0, x->E) ) return x;
   }
   return 0;
 }

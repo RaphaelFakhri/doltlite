@@ -109,6 +109,29 @@ for soft_branch in main b1; do
   fi
 done
 
+# A plain reset --hard waits for the lock while a peer's reset --soft HEAD~1
+# drops the commit holding the row; the hard reset then reads the older HEAD.
+for soft_branch in main b1; do
+  d=$(newdir "plain_reset_after_soft_${soft_branch}")
+  "$DOLTLITE" "$d/db.db" "INSERT INTO w VALUES(100000012,'acked'); SELECT dolt_commit('-Am','m_victim');" >/dev/null
+  if [ "$soft_branch" = main ]; then
+    "$DOLTLITE" "$d/db.db" "SELECT dolt_reset('--soft','HEAD~1'); SELECT dolt_reset('--hard');" >/dev/null
+  else
+    "$DOLTLITE" "$d/db.db" "DELETE FROM w WHERE id=100000012;" >/dev/null
+  fi
+  printf '%s\n' \
+    $'I\t100000012\tmain\t1000\t1100' \
+    $'C\tm_victim\tmain\t2000\t2100\t1' \
+    $'S\t3000\t6000\tc0\tBEGIN IMMEDIATE' \
+    $'X\t1\tmain\t3000\t9000\treset_hard\t*' > "$d/log.0"
+  printf 'X\t6\t%s\t4000\t4500\treset_soft_1\tm_victim\n' "$soft_branch" > "$d/log.1"
+  if [ "$soft_branch" = main ]; then
+    check plain_reset_after_soft_reset_excused 0 "$d" 2
+  else
+    check plain_reset_other_branch_soft_reset_lost 1 "$d" 2
+  fi
+done
+
 d=$(newdir commit_during_lock_wait)
 "$DOLTLITE" "$d/db.db" "SELECT dolt_commit('--allow-empty','-m','m_protected');" >/dev/null
 printf '%s\n' \
