@@ -157,8 +157,6 @@ static int mergePass1CheckRowEditOfDroppedColumn(MergePass1Ctx *c){
       pDropSe = findSchemaEntry(aDrop, nDrop, zTable);
       pEditSe = findSchemaEntry(aEdit, nEdit, zTable);
       if( !pDropSe || !pEditSe || !pDropSe->zSql || !pEditSe->zSql ) continue;
-      /* Schema disagreement is judged by the schema merge. */
-      if( strcmp(pEditSe->zSql, c->aAncSchema[i].zSql)!=0 ) continue;
       if( strcmp(pDropSe->zSql, c->aAncSchema[i].zSql)==0 ) continue;
       pAncCat = doltliteFindTableByName(c->aAnc, c->nAnc, zTable);
       pDropCatEnt = doltliteFindTableByName(aDropCat, nDropCat, zTable);
@@ -171,6 +169,31 @@ static int mergePass1CheckRowEditOfDroppedColumn(MergePass1Ctx *c){
       if( parseColumns(pDropSe->zSql, &aDropCols, &nDropCols)!=SQLITE_OK ){
         freeColumns(aAncCols, nAncCols);
         continue;
+      }
+      /* The schema merge turns our edits of a column theirs dropped into
+      ** row conflicts, but relays their edits onto our layout, which no
+      ** longer has the column. Appending columns leaves every ancestor field
+      ** where it was, so their cells still compare by position. */
+      if( strcmp(pEditSe->zSql, c->aAncSchema[i].zSql)!=0 ){
+        ParsedColumn *aEditCols = 0;
+        int nEditCols = 0, bAppends;
+        if( side
+         || parseColumns(pEditSe->zSql, &aEditCols, &nEditCols)!=SQLITE_OK ){
+          freeColumns(aAncCols, nAncCols);
+          freeColumns(aDropCols, nDropCols);
+          continue;
+        }
+        bAppends = nEditCols>nAncCols;
+        for(j=0; bAppends && j<nAncCols; j++){
+          bAppends = sqlite3_stricmp(aEditCols[j].zName, aAncCols[j].zName)==0
+                  && parsedColumnDefinitionsMatch(&aEditCols[j], &aAncCols[j]);
+        }
+        freeColumns(aEditCols, nEditCols);
+        if( !bAppends ){
+          freeColumns(aAncCols, nAncCols);
+          freeColumns(aDropCols, nDropCols);
+          continue;
+        }
       }
       /* A rename onto a dropped name removes the old name without dropping
       ** the column. Its cells still belong to that ancestor column. */
@@ -219,10 +242,11 @@ static int mergePass1CheckRowEditOfDroppedColumn(MergePass1Ctx *c){
           for(h=0; h<nDropCols; h++) if( aHeld[h]==j ) bHeld = 1;
           if( bHeld ) continue;
         }
-        /* Rename, not drop. */
+        /* Rename, not drop: a rename keeps the column's definition. */
         if( nDropCols>=nAncCols && j<nDropCols
          && parsedColumnIndexByName(aAncCols, nAncCols,
-                                    aDropCols[j].zName)<0 ){
+                                    aDropCols[j].zName)<0
+         && parsedColumnDefinitionsMatch(&aDropCols[j], &aAncCols[j]) ){
           continue;
         }
         iField = mergeStoredFieldIndex(aAncCols, j);

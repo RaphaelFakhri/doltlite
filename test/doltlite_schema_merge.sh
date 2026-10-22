@@ -1813,6 +1813,42 @@ run_test "merge_drop_vs_edit_added_column_kept" \
   "SELECT b FROM t WHERE k=1;" "edit" "$DB"
 rm -f "$DB"
 
+# An added column on either side must not hide the drop-vs-edit refusal.
+for shape in drop_side_adds edit_side_adds; do
+  for dir in ours theirs; do
+    COL=b; DROP="ALTER TABLE t DROP COLUMN b;"; EDIT="UPDATE t SET b='edit' WHERE k=1;"
+    if [ "$shape" = drop_side_adds ]; then
+      COL=n; EDIT="UPDATE t SET n=99 WHERE k=1;"
+      DROP="ALTER TABLE t DROP COLUMN n; ALTER TABLE t ADD COLUMN y INTEGER DEFAULT 7;"
+    else
+      EDIT="$EDIT ALTER TABLE t ADD COLUMN x TEXT DEFAULT 'x';"
+    fi
+    if [ "$dir" = ours ]; then MAIN="$DROP"; FEAT="$EDIT"; else MAIN="$EDIT"; FEAT="$DROP"; fi
+    WANT="column '$COL' of table 't' was dropped on one branch and its value changed"
+    # Our edit of a column theirs dropped surfaces as row conflicts, as in Dolt.
+    [ "$shape$dir" = edit_side_addstheirs ] && WANT="conflicts detected"
+    DB=/tmp/test_merge_drop_vs_edit_${shape}_${dir}_$$.db; rm -f "$DB"
+    cat <<EOF | $DOLTLITE "$DB" > /dev/null 2>&1
+CREATE TABLE t(k INTEGER PRIMARY KEY, a TEXT, b TEXT, n INTEGER);
+INSERT INTO t VALUES(1,'a1','b1',11),(2,'a2','b2',22);
+SELECT dolt_commit('-A','-m','base');
+SELECT dolt_branch('feat');
+SELECT dolt_checkout('feat');
+$FEAT
+SELECT dolt_commit('-Am','feat side');
+SELECT dolt_checkout('main');
+$MAIN
+SELECT dolt_commit('-Am','main side');
+EOF
+    run_test_error_match "merge_drop_vs_edit_${shape}_${dir}_stopped" \
+      "SELECT dolt_merge('feat');" \
+      "$WANT" "$DB"
+    run_test "merge_drop_vs_edit_${shape}_${dir}_head" \
+      "SELECT message FROM dolt_log LIMIT 1;" "main side" "$DB"
+    rm -f "$DB"
+  done
+done
+
 for theirs in "UPDATE t SET n=99 WHERE k=1;" "UPDATE t SET a='edit' WHERE k=1;" \
               "INSERT INTO t VALUES(9,'a9','b9',99);" "DELETE FROM t WHERE k=1;"; do
   DB=/tmp/test_merge_drop_vs_other_$$.db; rm -f "$DB"
