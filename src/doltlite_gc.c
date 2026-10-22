@@ -17,12 +17,20 @@
 #include "chunk_store_int.h"
 #include "doltlite_internal.h"
 
+typedef struct GcSlots GcSlots;
+struct GcSlots {
+  i64 *a;
+  sqlite3_file *pFile;
+};
+
 typedef struct GcMarks GcMarks;
 struct GcMarks {
   ChunkIndexSpool *pIndex;
   Bitvec *pBits;
   int nEntries;
   int keepAll;
+  GcSlots order;
+  int nOrder;
 };
 
 typedef struct GcQueue GcQueue;
@@ -103,7 +111,57 @@ static const char *gcSourceName(int eSource){
   return azSource[eSource];
 }
 
+#define GC_SLOTS_BYTES (32*1024*1024)
+
+static int gcSlotsInit(GcSlots *p, sqlite3_vfs *pVfs, int n){
+  i64 nLimit = GC_SLOTS_BYTES;
+#ifdef SQLITE_TEST
+  {
+    const char *zLimit = getenv("DOLTLITE_GC_SLOTS_LIMIT");
+    int nEnv;
+    if( zLimit && sqlite3GetInt32(zLimit, &nEnv) && nEnv>=0 ) nLimit = nEnv;
+  }
+#endif
+  memset(p, 0, sizeof(*p));
+  if( (i64)n*(i64)sizeof(i64)<=nLimit ){
+    p->a = sqlite3_malloc64((sqlite3_uint64)MAX(n,1)*sizeof(i64));
+    return p->a ? SQLITE_OK : SQLITE_NOMEM;
+  }
+  return sqlite3OsOpenMalloc(pVfs, 0, &p->pFile,
+      SQLITE_OPEN_TEMP_JOURNAL | SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
+    | SQLITE_OPEN_EXCLUSIVE | SQLITE_OPEN_DELETEONCLOSE, 0);
+}
+
+static void gcSlotsFree(GcSlots *p){
+  sqlite3_free(p->a);
+  if( p->pFile ) sqlite3OsCloseFree(p->pFile);
+  memset(p, 0, sizeof(*p));
+}
+
+static int gcSlotsPut(GcSlots *p, int i, i64 v){
+  u8 a[8];
+  if( p->a ){
+    p->a[i] = v;
+    return SQLITE_OK;
+  }
+  CS_WRITE_I64(a, v);
+  return sqlite3OsWrite(p->pFile, a, sizeof(a), (i64)i*(i64)sizeof(a));
+}
+
+static int gcSlotsGet(GcSlots *p, int i, i64 *pV){
+  u8 a[8];
+  int rc;
+  if( p->a ){
+    *pV = p->a[i];
+    return SQLITE_OK;
+  }
+  rc = sqlite3OsRead(p->pFile, a, sizeof(a), (i64)i*(i64)sizeof(a));
+  if( rc==SQLITE_OK ) *pV = CS_READ_I64(a);
+  return rc;
+}
+
 static void gcMarksFree(GcMarks *p){
+  gcSlotsFree(&p->order);
   sqlite3BitvecDestroy(p->pBits);
   csIndexSpoolFree(p->pIndex);
   memset(p, 0, sizeof(*p));
@@ -122,7 +180,9 @@ static int gcMarksInit(GcMarks *p, ChunkStore *cs){
       return SQLITE_NOMEM;
     }
   }
-  return SQLITE_OK;
+  rc = gcSlotsInit(&p->order, chunkFileGetVfs(&cs->file), p->nEntries);
+  if( rc!=SQLITE_OK ) gcMarksFree(p);
+  return rc;
 }
 
 static int gcMarksTest(GcMarks *p, int i){
@@ -136,7 +196,10 @@ static int gcMarksAdd(GcMarks *p, const ProllyHash *h, int *pSeen){
   *pSeen = 0;
   if( rc!=SQLITE_OK || i<0 ) return rc;
   *pSeen = gcMarksTest(p, i);
-  return *pSeen ? SQLITE_OK : sqlite3BitvecSet(p->pBits, (u32)i+1);
+  if( *pSeen ) return SQLITE_OK;
+  rc = sqlite3BitvecSet(p->pBits, (u32)i+1);
+  if( rc==SQLITE_OK ) rc = gcSlotsPut(&p->order, p->nOrder++, i);
+  return rc;
 }
 
 #define GC_QUEUE_BUFFER 256
@@ -720,6 +783,34 @@ static int gcReopenChunkFile(ChunkStore *cs, sqlite3_file **ppFile){
 ** to zPath, which must carry the VFS double-nul terminator. On success the
 ** open, synced file handle is returned for the caller to swap or close;
 ** the source store is not touched. */
+static int gcCopyChunk(
+  ChunkStore *cs,
+  GcMarks *marked,
+  int i,
+  GcFileWriter *pW,
+  GcSlots *pOffsets,
+  i64 *piPos
+){
+  ChunkIndexEntry e;
+  u8 *data = 0;
+  int nData = 0;
+  u8 aLen[4];
+  int rc = csIndexSpoolGet(marked->pIndex, i, &e);
+  if( rc==SQLITE_OK ) rc = chunkStoreGet(cs, &e.hash, &data, &nData);
+  if( rc!=SQLITE_OK ) return rc;
+  if( nData!=e.size ){
+    sqlite3_free(data);
+    return SQLITE_CORRUPT;
+  }
+  rc = gcSlotsPut(pOffsets, i, *piPos);
+  *piPos += 4+(i64)nData;
+  CS_WRITE_U32(aLen, nData);
+  if( rc==SQLITE_OK ) rc = gcWriterAppend(pW, aLen, sizeof(aLen));
+  if( rc==SQLITE_OK ) rc = gcWriterAppend(pW, data, nData);
+  sqlite3_free(data);
+  return rc;
+}
+
 static int gcWriteCompactedTo(
   ChunkStore *cs,
   GcMarks *marked,
@@ -782,6 +873,7 @@ static int gcWriteCompactedTo(
     int tmpFlags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
                  | SQLITE_OPEN_MAIN_DB;
     GcFileWriter w, indexWriter;
+    GcSlots offsets;
 
     if( bDeleteExisting ){
       /* Best-effort stale-tmp removal; failure here must not fail GC. */
@@ -829,40 +921,49 @@ static int gcWriteCompactedTo(
       return SQLITE_NOMEM;
     }
 
+    memset(&offsets, 0, sizeof(offsets));
     rc = gcWriterAppend(&w, manifest, CHUNK_MANIFEST_SIZE);
 
     indexWriter.pFile = pTmpFile;
     indexWriter.iOff = CHUNK_MANIFEST_SIZE+nDataBytes;
     indexWriter.nBuf = 0;
     indexWriter.aBuf = w.aBuf+GC_WRITER_BUF;
+    /* Data goes out in mark order, the index in hash order. Marking is FIFO
+    ** and pushes a node's children together, so siblings land adjacent and
+    ** readahead fetches them in one read; hash order scatters them. */
+    if( rc==SQLITE_OK ){
+      rc = gcSlotsInit(&offsets, chunkFileGetVfs(&cs->file), marked->nEntries);
+    }
+    for(i=0; rc==SQLITE_OK && i<marked->nOrder; i++){
+      i64 iSpool;
+      rc = gcSlotsGet(&marked->order, i, &iSpool);
+      if( rc==SQLITE_OK ){
+        rc = gcCopyChunk(cs, marked, (int)iSpool, &w, &offsets, &iPos);
+      }
+    }
+    for(i=0; rc==SQLITE_OK && marked->keepAll && i<marked->nEntries; i++){
+      if( marked->pBits && sqlite3BitvecTest(marked->pBits, (u32)i+1) ){
+        continue;
+      }
+      rc = gcCopyChunk(cs, marked, i, &w, &offsets, &iPos);
+    }
     for(i=0; rc==SQLITE_OK && i<marked->nEntries; i++){
       ChunkIndexEntry e;
-      u8 *data = 0;
-      int nData = 0;
+      i64 iOffset = 0;
       u8 aEntry[CHUNK_INDEX_ENTRY_SIZE];
-      u8 aLen[4];
       if( !gcMarksTest(marked, i) ) continue;
       rc = csIndexSpoolGet(marked->pIndex, i, &e);
-      if( rc==SQLITE_OK ) rc = chunkStoreGet(cs, &e.hash, &data, &nData);
+      if( rc==SQLITE_OK ) rc = gcSlotsGet(&offsets, i, &iOffset);
       if( rc!=SQLITE_OK ) break;
-      if( nData!=e.size ){
-        sqlite3_free(data);
-        rc = SQLITE_CORRUPT;
-        break;
-      }
-      e.offset = iPos;
+      e.offset = iOffset;
       if( aNewIndex ) aNewIndex[nNewIndex] = e;
       nNewIndex++;
-      iPos += 4+(i64)nData;
-      CS_WRITE_U32(aLen, nData);
-      rc = gcWriterAppend(&w, aLen, sizeof(aLen));
-      if( rc==SQLITE_OK ) rc = gcWriterAppend(&w, data, nData);
-      sqlite3_free(data);
       memcpy(aEntry, e.hash.data, PROLLY_HASH_SIZE);
       CS_WRITE_I64(aEntry+PROLLY_HASH_SIZE, e.offset);
       CS_WRITE_U32(aEntry+PROLLY_HASH_SIZE+8, e.size);
-      if( rc==SQLITE_OK ) rc = gcWriterAppend(&indexWriter, aEntry, sizeof(aEntry));
+      rc = gcWriterAppend(&indexWriter, aEntry, sizeof(aEntry));
     }
+    gcSlotsFree(&offsets);
     if( rc==SQLITE_OK
      && (nNewIndex!=kept || iPos!=CHUNK_MANIFEST_SIZE+nDataBytes) ){
       rc = SQLITE_CORRUPT;

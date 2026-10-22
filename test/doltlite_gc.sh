@@ -466,4 +466,33 @@ SQL
 done
 db_rm "$DB"
 
+DB=/tmp/test_gc_layout_$$.db; db_rm "$DB"
+echo "CREATE TABLE t(id INTEGER PRIMARY KEY, v BLOB);
+WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x<20000)
+INSERT INTO t SELECT x, randomblob(200) FROM c;
+SELECT dolt_commit('-Am','seed');
+SELECT dolt_checkout('-b','junk');
+UPDATE t SET v=randomblob(200) WHERE id%2=0;
+SELECT dolt_commit('-am','junk');
+SELECT dolt_checkout('main');
+SELECT dolt_branch('-D','junk');" | $DOLTLITE "$DB" > /dev/null 2>&1
+scan_chunk_reads() {
+  $DOLTLITE "$1" "SELECT sum(value) FROM dolt_engine_stats WHERE reset=1;
+SELECT sum(length(v)) FROM t;
+SELECT value FROM dolt_engine_stats WHERE name='chunk_read';" 2>&1 | tail -1
+}
+preReads=$(scan_chunk_reads "$DB")
+echo "SELECT dolt_gc();" | $DOLTLITE "$DB" > /dev/null 2>&1
+postReads=$(scan_chunk_reads "$DB")
+case "$preReads$postReads" in
+  *[!0-9]*|"") dltest_fail "gc_layout_keeps_siblings_adjacent" "  pre: $preReads post: $postReads" ;;
+  *) if [ "$postReads" -le $((preReads*2)) ]; then
+       dltest_pass "gc_layout_keeps_siblings_adjacent"
+     else
+       dltest_fail "gc_layout_keeps_siblings_adjacent" \
+         "  scan fetched $postReads chunks one by one after gc, $preReads before"
+     fi ;;
+esac
+db_rm "$DB"
+
 dltest_finish

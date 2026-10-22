@@ -128,6 +128,63 @@ foreach limit {1 8 256 1024 1048576} {
   }
 }
 
+unset -nocomplain env(DOLTLITE_GC_QUEUE_LIMIT)
+set env(DOLTLITE_GC_SLOTS_LIMIT) 0
+foreach {name sql} {
+  vacuum VACUUM
+  gc {SELECT dolt_gc()}
+  into {VACUUM INTO 'gc-queue-copy.db'}
+} {
+  gc_queue_open
+  forcedelete gc-queue-copy.db
+  do_test slots.$name.run {
+    db eval $sql
+    list [gc_queue_state] $events(xOpen) $events(xClose) \
+         [expr {$events(xWrite)>2}] [expr {$events(xRead)>2}]
+  } {{{10000 4000} 1 1 ok} 2 2 1 1}
+  db close
+  if {$name eq "into"} {
+    sqlite3 db gc-queue-copy.db
+  } else {
+    sqlite3 db test.db
+  }
+  do_test slots.$name.reopen {gc_queue_state} {{10000 4000} 1 1 ok}
+  do_test slots.$name.history {
+    db eval {SELECT dolt_checkout('old')}
+    db eval {SELECT count(*),sum(v) FROM t}
+  } {10000 0}
+  db close
+  foreach {method at code expected} {
+    xWrite 1 SQLITE_FULL SQLITE_FULL
+    xWrite 3 SQLITE_IOERR SQLITE_IOERR
+    xRead 1 SQLITE_IOERR SQLITE_IOERR
+    xRead 3 SQLITE_IOERR SQLITE_IOERR
+  } {
+    gc_queue_open
+    forcedelete gc-queue-copy.db
+    set before [gc_queue_bytes]
+    set fail_method $method
+    set fail_at $at
+    set fail_code $code
+    do_test slots.fail.$name.$method.$at.error {
+      list [catch {db eval $sql}] [sqlite3_errcode db]
+    } [list 1 $expected]
+    set fail_method ""
+    gcqueue full
+    do_test slots.fail.$name.$method.$at.intact {
+      list [expr {[gc_queue_bytes] eq $before}] [gc_queue_state] \
+           [expr {$events(xOpen)==$events(xClose)}] \
+           [file exists gc-queue-copy.db]
+    } {1 {{10000 4000} 1 1 ok} 1 0}
+    do_test slots.fail.$name.$method.$at.retry {
+      db eval $sql
+      gc_queue_state
+    } {{10000 4000} 1 1 ok}
+    db close
+  }
+}
+unset env(DOLTLITE_GC_SLOTS_LIMIT)
+
 set env(DOLTLITE_GC_QUEUE_LIMIT) 8
 foreach {method at code expected} {
   xOpen 1 SQLITE_CANTOPEN SQLITE_CANTOPEN
