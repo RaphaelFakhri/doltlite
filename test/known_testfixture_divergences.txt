@@ -5430,18 +5430,18 @@ fts5corruptA fts5corruptA-2.2 class=intentional  # injected blob is not a SQLite
 fts5faultG fts5faultG-1-oom-persistent.*{63} class=engine-gap issue=4151  # OOM inside a write leaves the fts5 index corrupt
 fts5faultG fts5faultG-1-oom-transient.*{63} class=engine-gap issue=4151  # OOM inside a write leaves the fts5 index corrupt
 fts5integrity fts5integrity-8.0 class=intentional issue=2493  # journal_mode reports wal, so exclusive locking stays on wal
-fts5locale fts5locale-col-10.2.3.8 class=engine-gap issue=4164  # corrupt locale blob: count(*) is 2
-fts5locale fts5locale-col-10.2.4.8 class=engine-gap issue=4164  # corrupt locale blob: count(*) is 2
-fts5locale fts5locale-full-10.2.2.7.1 class=engine-gap issue=4164  # corrupt locale blob: poslist read returns SQLITE_CORRUPT_VTAB
-fts5locale fts5locale-full-10.2.2.7.2 class=engine-gap issue=4164  # corrupt locale blob: columnsize read returns SQLITE_CORRUPT_VTAB
-fts5locale fts5locale-full-10.2.3.7.1 class=engine-gap issue=4164  # corrupt locale blob: poslist read returns SQLITE_CORRUPT_VTAB
-fts5locale fts5locale-full-10.2.3.7.2 class=engine-gap issue=4164  # corrupt locale blob: columnsize read returns SQLITE_CORRUPT_VTAB
-fts5locale fts5locale-full-10.2.3.8 class=engine-gap issue=4164  # corrupt locale blob: count(*) is 2
-fts5locale fts5locale-full-10.2.4.7.1 class=engine-gap issue=4164  # corrupt locale blob: poslist read returns SQLITE_CORRUPT_VTAB
-fts5locale fts5locale-full-10.2.4.7.2 class=engine-gap issue=4164  # corrupt locale blob: columnsize read returns SQLITE_CORRUPT_VTAB
-fts5locale fts5locale-full-10.2.4.8 class=engine-gap issue=4164  # corrupt locale blob: count(*) is 2
-fts5locale fts5locale-none-10.2.3.8 class=engine-gap issue=4164  # corrupt locale blob: count(*) is 2
-fts5locale fts5locale-none-10.2.4.8 class=engine-gap issue=4164  # corrupt locale blob: count(*) is 2
+fts5locale fts5locale-col-10.2.3.8 class=intentional issue=1840  # shared rowid counter: rebuilt blob stays past rowid 1 and also matches hello
+fts5locale fts5locale-col-10.2.4.8 class=intentional issue=1840  # shared rowid counter: rebuilt blob stays past rowid 1 and also matches hello
+fts5locale fts5locale-full-10.2.2.7.1 class=intentional issue=1840  # shared rowid counter: columnsize seeks content row 1, which the insert did not reuse
+fts5locale fts5locale-full-10.2.2.7.2 class=intentional issue=1840  # shared rowid counter: columnlocale seeks content row 1, which the insert did not reuse
+fts5locale fts5locale-full-10.2.3.7.1 class=intentional issue=1840  # shared rowid counter: columnsize seeks content row 1, which the insert did not reuse
+fts5locale fts5locale-full-10.2.3.7.2 class=intentional issue=1840  # shared rowid counter: columnlocale seeks content row 1, which the insert did not reuse
+fts5locale fts5locale-full-10.2.3.8 class=intentional issue=1840  # shared rowid counter: rebuilt blob stays past rowid 1 and also matches hello
+fts5locale fts5locale-full-10.2.4.7.1 class=intentional issue=1840  # shared rowid counter: columnsize seeks content row 1, which the insert did not reuse
+fts5locale fts5locale-full-10.2.4.7.2 class=intentional issue=1840  # shared rowid counter: columnlocale seeks content row 1, which the insert did not reuse
+fts5locale fts5locale-full-10.2.4.8 class=intentional issue=1840  # shared rowid counter: rebuilt blob stays past rowid 1 and also matches hello
+fts5locale fts5locale-none-10.2.3.8 class=intentional issue=1840  # shared rowid counter: rebuilt blob stays past rowid 1 and also matches hello
+fts5locale fts5locale-none-10.2.4.8 class=intentional issue=1840  # shared rowid counter: rebuilt blob stays past rowid 1 and also matches hello
 fts5matchinfo fts5matchinfo-16.1 class=intentional  # second connection expects "database is locked"; there is no pager write-lock
 fts5misc fts5misc-14.2 class=intentional  # second connection expects "database is locked"; there is no pager write-lock
 fts5misc fts5misc-14.3 class=intentional  # second connection expects "database is locked"; there is no pager write-lock
