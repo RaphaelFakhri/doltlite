@@ -1024,24 +1024,8 @@ static void doltliteCommitFuncImpl(
   }
 
   if( addAll ){
-    /* Stage the working catalog, but leave the rebase plan out of the
-    ** commit. The live catalog still has it for --continue. */
-    if( doltliteSessionOnRebasePlan(db) ){
-      rc = doltliteAddStageAll(db, context, 1);
-      if( rc!=SQLITE_OK ) return;
-    }else{
-      rc = doltliteFlushCatalogToHash(db, &catalogHash);
-      if( rc!=SQLITE_OK ){
-        doltliteVcResultErrorCode(context, sqlite3_context_db_handle(context),
-            "failed to flush", rc);
-        return;
-      }
-      rc = doltliteSetSessionStaged(db, &catalogHash);
-      if( rc!=SQLITE_OK ){
-        sqlite3_result_error_code(context, rc);
-        return;
-      }
-    }
+    rc = doltliteAddStageAll(db, context, 0);
+    if( rc!=SQLITE_OK ) return;
   }else if( addModifiedOnly ){
     rc = doltliteCommitStageModifiedOnly(db, context, amend);
     if( rc!=SQLITE_OK ) return;
