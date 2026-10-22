@@ -2803,6 +2803,27 @@ run_test_error_match "merge_rename_chain_refused" "SELECT dolt_merge('f');" \
   "renames a column to 'b', a name another of its columns had" "$DB"
 rm -f "$DB"
 
+DB=/tmp/test_merge_rename_onto_dropped_key_cell_$$.db; rm -f "$DB"
+cat <<'EOF' | $DOLTLITE "$DB" > /dev/null 2>&1
+CREATE TABLE t(id INT PRIMARY KEY, a INT, b INT, c INT);
+INSERT INTO t VALUES(1,1,10,100),(2,2,20,200);
+SELECT dolt_commit('-Am','base');
+SELECT dolt_branch('f');
+ALTER TABLE t DROP COLUMN b;
+SELECT dolt_commit('-Am','drop b');
+SELECT dolt_checkout('f');
+ALTER TABLE t DROP COLUMN b;
+ALTER TABLE t RENAME COLUMN c TO b;
+SELECT dolt_commit('-Am','drop b, rename c to b');
+SELECT dolt_checkout('main');
+EOF
+run_test_error_match "merge_rename_onto_dropped_key_cell_refused" \
+  "SELECT dolt_merge('f');" \
+  "renames a column to 'b', a name another of its columns had" "$DB"
+run_test "merge_rename_onto_dropped_key_cell_rows" \
+  "SELECT group_concat(id||':'||a||':'||c, ' ') FROM t;" "1:1:100 2:2:200" "$DB"
+rm -f "$DB"
+
 DB=/tmp/test_merge_rename_swap_edited_$$.db; rm -f "$DB"
 rename_reuse_base "$DB"
 cat <<'EOF' | $DOLTLITE "$DB" > /dev/null 2>&1
