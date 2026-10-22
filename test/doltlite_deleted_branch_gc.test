@@ -284,4 +284,61 @@ foreach gc {0 1} {
   }
 }
 
+foreach gc {none before after} {
+  foreach boundary {autocommit begin savepoint} {
+    foreach {mode checkout} {
+      table {SELECT dolt_checkout('t')}
+      head {SELECT dolt_checkout('HEAD','t')}
+      dot {SELECT dolt_checkout('.')}
+    } {
+      reset_db
+      execsql {
+        CREATE TABLE t(id INT PRIMARY KEY,v TEXT);
+        INSERT INTO t VALUES(1,'main');
+        SELECT dolt_commit('-Am','main');
+        SELECT dolt_checkout('-b','feat');
+        INSERT INTO t VALUES(2,'feat');
+        SELECT dolt_commit('-am','feat');
+        CREATE TABLE d(id INTEGER PRIMARY KEY,v TEXT);
+        INSERT INTO d VALUES(1,'uncommitted');
+      }
+      set peerSql {}
+      if {$gc eq "before"} {
+        append peerSql {
+          SELECT dolt_checkout('feat');
+          DROP TABLE d;
+          SELECT dolt_checkout('main');
+          SELECT dolt_gc();
+        }
+      }
+      append peerSql {SELECT dolt_branch('-D','feat');}
+      if {$gc eq "after"} {append peerSql {SELECT dolt_gc();}}
+      exec $engine -bail [file normalize test.db] $peerSql
+      switch $boundary {
+        begin {db eval BEGIN}
+        savepoint {db eval {SAVEPOINT caller}}
+      }
+      set prefix deleted-branch-table-$gc-$boundary-$mode
+      do_test $prefix.table-refused {
+        list [catch {db eval $checkout} message] [expr {[db errorcode]&255}]
+      } {1 5}
+      if {![sqlite3_get_autocommit db]} {db eval ROLLBACK}
+      do_test $prefix.table-durable {
+        exec $engine -bail [file normalize test.db] {
+          SELECT count(*) FROM dolt_branches WHERE name='feat';
+          SELECT id,v FROM t;
+          PRAGMA integrity_check;
+        }
+      } {0
+1|main
+ok}
+      do_execsql_test $prefix.recover {
+        SELECT dolt_checkout('main');
+        INSERT INTO t VALUES(3,'recovered');
+        SELECT id,v FROM t ORDER BY id;
+        PRAGMA integrity_check;
+      } {0 1 main 3 recovered ok}
+    }
+  }
+}
 finish_test
