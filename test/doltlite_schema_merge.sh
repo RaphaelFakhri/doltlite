@@ -3644,4 +3644,31 @@ run_test_error_match "added_check_in_literal_enforced" \
   "INSERT INTO t(id, v) VALUES (2, 0);" "CHECK constraint failed" "$DB"
 rm -f "$DB"
 
+for shape in rowid without_rowid; do
+  opts=""
+  [ "$shape" = without_rowid ] && opts=" WITHOUT ROWID"
+  for op in merge cherry_pick; do
+    DB=/tmp/test_drop_add_default_${shape}_${op}_$$.db; rm -f "$DB"
+    cat <<EOF | $DOLTLITE "$DB" > /dev/null 2>&1
+CREATE TABLE t(id INTEGER PRIMARY KEY, a INT, b INT, c INT)$opts;
+INSERT INTO t VALUES (1,1,1,1),(2,2,2,2);
+SELECT dolt_commit('-Am','base');
+SELECT dolt_branch('feat');
+ALTER TABLE t DROP COLUMN b;
+ALTER TABLE t ADD COLUMN y INT DEFAULT 1;
+SELECT dolt_commit('-Am','ours');
+SELECT dolt_checkout('feat');
+ALTER TABLE t ADD COLUMN w INT DEFAULT 6;
+SELECT dolt_commit('-Am','theirs');
+SELECT dolt_checkout('main');
+EOF
+    run_test_match "drop_add_default_${shape}_${op}" \
+      "SELECT dolt_${op}('feat');" "^[0-9a-f]{40}$" "$DB"
+    run_test "drop_add_default_${shape}_${op}_rows" \
+      "SELECT group_concat(id||':'||a||':'||c||':'||quote(y)||':'||w, ' ') FROM (SELECT * FROM t ORDER BY id);" \
+      "1:1:1:1:6 2:2:2:1:6" "$DB"
+    rm -f "$DB"
+  done
+done
+
 dltest_finish

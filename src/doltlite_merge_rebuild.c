@@ -1011,6 +1011,7 @@ int normalizeSideToMergedLayout(
   int oursCurInit = 0;
   DoltliteSerialValue *aMem = 0;
   u8 **apOwned = 0;
+  u8 *aSupplied = 0;
   int bSameKey;
   int bAncestorGap;
   int nMem;
@@ -1244,6 +1245,8 @@ mapped:
     apOwned = sqlite3_malloc64((sqlite3_uint64)nMergedRecord * sizeof(*apOwned));
     if( !apOwned ){ rc = SQLITE_NOMEM; goto done; }
     memset(apOwned, 0, (size_t)nMergedRecord * sizeof(*apOwned));
+    aSupplied = sqlite3_malloc64((sqlite3_uint64)nMergedRecord);
+    if( !aSupplied ){ rc = SQLITE_NOMEM; goto done; }
   }
 
   prollyCursorInit(&cur, cs, cache, pTheirsRoot, flags);
@@ -1287,6 +1290,7 @@ mapped:
     for(k=0; k<nMergedRecord; k++){
       memset(&aMem[k], 0, sizeof(aMem[k]));
       aMem[k].eType = SQLITE_NULL;
+      aSupplied[k] = 0;
     }
     if( rowOnlyTheirs || bFillSharedDefaults ){
       for(k=0; k<nOurs && k<oursDefaults.nCol; k++){
@@ -1309,6 +1313,7 @@ mapped:
       if( tgt<0 ) continue;
       m = &aMem[tgt];
       relayoutFieldValue(pVal, &info, src, m);
+      aSupplied[tgt] = 1;
       if( bSameKey && aMap[j]<nOurs ){
         char affTo = parsedColumnAffinity(&aOurs[aMap[j]]);
         char affFrom = parsedColumnAffinity(&aTheirs[j]);
@@ -1344,6 +1349,7 @@ mapped:
         tgt = aMergedRecord[aMap[j]];
         if( tgt<0 ) continue;
         relayoutFieldValue(pKeyRec, &kinfo, src, &aMem[tgt]);
+        aSupplied[tgt] = 1;
         if( bSameKey && aMap[j]<nOurs ){
           char affTo = parsedColumnAffinity(&aOurs[aMap[j]]);
           char affFrom = parsedColumnAffinity(&aTheirs[j]);
@@ -1362,6 +1368,22 @@ mapped:
         if( tgt+1>nEmit ) nEmit = tgt+1;
       }
       doltliteRecordInfoClear(&kinfo);
+    }
+
+    /* A field before the last emitted one is stored, not omitted: a slot
+    ** this row never supplied must hold the default a reader would see. */
+    for(k=0; k<nOurs && k<oursDefaults.nCol; k++){
+      int tgt = aMergedRecord[k];
+      if( tgt<0 || tgt>=nEmit || aSupplied[tgt] ) continue;
+      if( aMem[tgt].eType!=SQLITE_NULL ) continue;
+      aMem[tgt] = oursDefaults.aVal[k];
+    }
+    for(j=0; j<nTheirs; j++){
+      int tgt;
+      if( aMap[j]<0 || j>=theirsDefaults.nCol ) continue;
+      tgt = aMergedRecord[aMap[j]];
+      if( tgt<0 || tgt>=nEmit || aSupplied[tgt] ) continue;
+      aMem[tgt] = theirsDefaults.aVal[j];
     }
 
     /* Past the real columns, so neither side has this field. The diff
@@ -1403,6 +1425,7 @@ mapped:
 done:
   clearOwnedFields(apOwned, nMergedRecord);
   sqlite3_free(apOwned);
+  sqlite3_free(aSupplied);
   sqlite3_free(aMem); sqlite3_free(pKeyRec);
   mergeColDefaultsFree(&oursDefaults);
   mergeColDefaultsFree(&theirsDefaults);
