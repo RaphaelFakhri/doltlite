@@ -292,6 +292,9 @@ jobs:
         {
           echo "Nightly performance failed or produced incomplete results."
           echo ""
+          echo "Ceilings compare this run with SQLite or a fixed latency limit."
+          echo "They do not establish a slowdown from a previous DoltLite revision."
+          echo ""
         } > "$issue_body"
 
         for suite in $suites; do
@@ -395,7 +398,7 @@ jobs:
         path: nightly-results
         retention-days: 30
 
-    - name: Report regression as GitHub issue
+    - name: Report nightly failure as GitHub issue
       if: >-
         ${{ always() &&
             github.ref == 'refs/heads/master' &&
@@ -403,7 +406,7 @@ jobs:
       uses: ./.github/actions/report-failure-issue
       with:
         label: nightly-performance-regression
-        title: "Nightly performance regression"
+        title: "Nightly performance failure"
         body-file: ${{ steps.report.outputs.issue_body }}
         token: ${{ secrets.GITHUB_TOKEN }}
         label-description: Nightly absolute performance ceiling failure
@@ -428,7 +431,7 @@ jobs:
           --run-url "${{ steps.report.outputs.run_url }}" \
           --generated-date "${{ steps.report.outputs.generated_date }}"
 
-    - name: Fail when a ceiling regressed
+    - name: Fail when performance checks fail
       if: ${{ always() && steps.report.outputs.failed == '1' }}
       run: exit 1
 

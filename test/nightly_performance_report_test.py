@@ -115,6 +115,11 @@ class NightlyPerformanceReportTest(unittest.TestCase):
         self.assertIn("BENCH_AVG_MAX_MULTIPLIER: 1.9", workflow)
         self.assertIn("BENCH_AC_WRITE_MAX_MULTIPLIER: 5.5", workflow)
         self.assertIn("BENCH_AC_WRITE_AVG_MAX_MULTIPLIER: 5", workflow)
+        self.assertIn('title: "Nightly performance failure"', workflow)
+        self.assertIn(
+            "They do not establish a slowdown from a previous DoltLite revision.",
+            workflow,
+        )
 
     def test_generates_complete_pass_report(self):
         with tempfile.TemporaryDirectory() as temporary:
