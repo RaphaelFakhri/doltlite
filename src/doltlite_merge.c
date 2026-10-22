@@ -1108,7 +1108,7 @@ int doltliteMergeCatalogs(
   ** actions re-apply them; a table rename is lifted only for a branch
   ** merge, as Dolt's cherry-pick conflicts on it. */
   if( ppActions && pnActions ){
-    rc = mergePreNormalizeRenamedDependents(aAnc, nAnc, aOurs, nOurs,
+    rc = mergePreNormalizeRenamedDependents(db, aAnc, nAnc, aOurs, nOurs,
                                             aTheirs, nTheirs,
                                             aAncSchema, nAncSchema,
                                             aOursSchema, nOursSchema,

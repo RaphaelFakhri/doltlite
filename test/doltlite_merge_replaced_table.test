@@ -1,0 +1,101 @@
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+
+foreach key {INTEGER INT} {
+  foreach {change edit} {
+    rows {INSERT INTO logs VALUES(4,'ours new log')}
+    schema {ALTER TABLE logs ADD COLUMN extra TEXT DEFAULT 'old logs'}
+  } {
+    foreach {replacement rows} {
+      overlapping {INSERT INTO users VALUES(2,'alice'),(9,'bob')}
+      disjoint {INSERT INTO users VALUES(8,'alice'),(9,'bob')}
+      empty {}
+    } {
+      foreach replaced {main f} {
+        foreach txn {autocommit begin} {
+          reset_db
+          execsql "CREATE TABLE logs(id $key PRIMARY KEY,v TEXT)"
+          execsql {
+            INSERT INTO logs VALUES(1,'a'),(2,'b'),(3,'c');
+            SELECT dolt_commit('-Am','base');
+            SELECT dolt_branch('f');
+          }
+          set edited [expr {$replaced eq "main" ? "f" : "main"}]
+          execsql "SELECT dolt_checkout('$edited')"
+          execsql $edit
+          execsql {
+            SELECT dolt_commit('-Am','edited logs');
+          }
+          execsql "SELECT dolt_checkout('$replaced'); DROP TABLE logs"
+          execsql "CREATE TABLE users(id $key PRIMARY KEY,v TEXT)"
+          execsql $rows
+          execsql {
+            SELECT dolt_commit('-Am','replace logs with users');
+            SELECT dolt_checkout('main');
+          }
+          set table [expr {$replaced eq "main" ? "users" : "logs"}]
+          set state "SELECT * FROM $table ORDER BY id;"
+          append state {
+            SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY name;
+            SELECT name,hash FROM dolt_branches ORDER BY name;
+            SELECT dolt_hashof('HEAD');
+            SELECT dolt_hashof_catalog('STAGED');
+            SELECT * FROM dolt_status ORDER BY table_name,staged;
+            SELECT count(*) FROM dolt_conflicts;
+            PRAGMA integrity_check;
+          }
+          set before [execsql $state]
+          if {$txn eq "begin"} {execsql BEGIN}
+          set prefix replaced-table-$key-$change-$replacement-$replaced-$txn
+          do_test $prefix-refused {
+            set result [catchsql {SELECT dolt_merge('f')}]
+            list [lindex $result 0] \
+                 [string match {*conflict*} [lindex $result 1]]
+          } {1 1}
+          if {![sqlite3_get_autocommit db]} {execsql ROLLBACK}
+          do_test $prefix-restored {catchsql $state} [list 0 $before]
+          db close
+          sqlite3 db test.db
+          do_test $prefix-reopen {catchsql $state} [list 0 $before]
+        }
+      }
+    }
+  }
+}
+
+foreach key {INTEGER INT} {
+  foreach renamed {main f} {
+    reset_db
+    execsql "CREATE TABLE logs(id $key PRIMARY KEY,v TEXT)"
+    execsql {
+      INSERT INTO logs VALUES(1,'a'),(2,'b'),(3,'c');
+      SELECT dolt_commit('-Am','base');
+      SELECT dolt_branch('f');
+    }
+    set edited [expr {$renamed eq "main" ? "f" : "main"}]
+    execsql "SELECT dolt_checkout('$edited')"
+    execsql {
+      INSERT INTO logs VALUES(4,'ours new log');
+      ALTER TABLE logs ADD COLUMN extra TEXT DEFAULT 'old logs';
+      SELECT dolt_commit('-Am','edited logs');
+    }
+    execsql "SELECT dolt_checkout('$renamed')"
+    execsql {
+      ALTER TABLE logs RENAME TO archived_logs;
+      SELECT dolt_commit('-Am','rename logs');
+      SELECT dolt_checkout('main');
+    }
+    set prefix pure-rename-$key-$renamed
+    do_test $prefix-merge {
+      string length [db one {SELECT dolt_merge('f')}]
+    } 40
+    do_execsql_test $prefix-rows {
+      SELECT * FROM archived_logs ORDER BY id;
+      SELECT count(*) FROM sqlite_schema WHERE name='logs';
+      SELECT count(*) FROM dolt_status;
+      PRAGMA integrity_check;
+    } {1 a {old logs} 2 b {old logs} 3 c {old logs} 4 {ours new log} {old logs} 0 0 ok}
+  }
+}
+
+finish_test

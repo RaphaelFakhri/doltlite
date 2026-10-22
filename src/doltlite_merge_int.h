@@ -110,6 +110,7 @@ int rebuildDisjointSchemaRows(
   char ***pazReindex, int *pnReindex
 );
 int mergePreNormalizeRenamedDependents(
+  sqlite3 *db,
   struct TableEntry *aAnc, int nAnc,
   struct TableEntry *aOurs, int nOurs,
   struct TableEntry *aTheirs, int nTheirs,
