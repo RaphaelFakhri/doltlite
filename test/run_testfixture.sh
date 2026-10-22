@@ -286,17 +286,23 @@ fi
 for test in "$@"; do
   expected_specs="$(expected_for "$test")"
   termination_contracts="$(termination_contracts_for "$test")"
+  # FTS5 suites sit next to fts5_common.tcl. A copy under test/ would
+  # source that helper from the wrong directory.
+  suite_file="$SCRIPT_DIR/${test}.test"
+  if [ ! -f "$suite_file" ] && [ -f "$SCRIPT_DIR/../ext/fts5/test/${test}.test" ]; then
+    suite_file="$SCRIPT_DIR/../ext/fts5/test/${test}.test"
+  fi
   if [ -n "$termination_contracts" ]; then
     test_workdir=$(mktemp -d "${TMPDIR:-/tmp}/doltlite-testfixture.XXXXXX")
     ln -s "$TESTFIXTURE_BIN" "$test_workdir/testfixture"
-    if out=$(cd "$test_workdir" && run_with_timeout "$TIMEOUT" "${fixture_args[@]}" "$SCRIPT_DIR/${test}.test" 2>&1); then
+    if out=$(cd "$test_workdir" && run_with_timeout "$TIMEOUT" "${fixture_args[@]}" "$suite_file" 2>&1); then
       process_status=0
     else
       process_status=$?
     fi
     rm -rf "$test_workdir"
   else
-    if out=$(run_with_timeout "$TIMEOUT" "${fixture_args[@]}" "$SCRIPT_DIR/${test}.test" 2>&1); then
+    if out=$(run_with_timeout "$TIMEOUT" "${fixture_args[@]}" "$suite_file" 2>&1); then
       process_status=0
     else
       process_status=$?

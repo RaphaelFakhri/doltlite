@@ -386,6 +386,8 @@ jobs:
           - fts3
           - fts4-core
           - fts4-merge
+          - fts5
+          - fts5-fault
           - ported
           - shell
           - slow-plain
@@ -434,8 +436,8 @@ jobs:
     # and doltlite's own CLI tests against the doltlite CLI (aliased below);
     # shell1 stays in core-sql until issue 2709's stale read is fixed.
     # Every file belongs to: core-sql, ddl-schema, storage, fault-fuzz,
-    # fts3, fts4-core, fts4-merge, ported, shell, slow-plain. A file must
-    # appear in exactly one bucket; the guard below
+    # fts3, fts4-core, fts4-merge, fts5, fts5-fault, ported, shell,
+    # slow-plain. A file must appear in exactly one bucket; the guard below
     # enforces it. Nondeterministic-class files (thread*, walcrash*,
     # writecrash, wal*fault) stay excluded, same rationale as the crash.test
     # exclusion. fts3.test is also excluded: it is the permutations
