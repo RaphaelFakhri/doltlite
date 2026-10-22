@@ -5416,7 +5416,6 @@ fts5aa fts5aa-none-1.0 class=intentional issue=1852  # canonical adoption: shado
 fts5aa fts5aa-none-17.8 class=engine-gap issue=4162  # INSERT with no rowid returns SQLITE_FULL while free rowids remain
 fts5aa fts5aa-none-origintext-1.0 class=intentional issue=1852  # canonical adoption: shadow-table SQL text and sqlite_master order
 fts5aa fts5aa-none-origintext-17.8 class=engine-gap issue=4162  # INSERT with no rowid returns SQLITE_FULL while free rowids remain
-fts5bigtok2 fts5bigtok2-1.1 class=engine-gap issue=4165  # a token longer than SQLITE_MAX_LENGTH is inserted
 fts5content fts5content-3.4 class=intentional issue=1840  # rowids continue after delete-all instead of restarting at 1
 fts5content fts5content-3.5 class=intentional issue=1840  # rowids continue after delete-all instead of restarting at 1
 fts5content fts5content-6.1 class=intentional issue=1852  # canonical adoption: sqlite_master order of fts5 shadow tables
