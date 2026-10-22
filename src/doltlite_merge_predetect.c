@@ -931,10 +931,67 @@ static int mergeRecordTableRename(
   return SQLITE_OK;
 }
 
+static int mergeTableSharesValue(
+  sqlite3 *db,
+  struct TableEntry *pAnc,
+  struct TableEntry *pSide,
+  SchemaEntry *pSchema,
+  int *pbShared
+){
+  DoltliteColInfo ci;
+  DoltliteRecordInfo oldInfo, newInfo;
+  ProllyDiffIter iter;
+  ProllyDiffChange *pChange;
+  int rc, i;
+
+  memset(&ci, 0, sizeof(ci));
+  memset(&iter, 0, sizeof(iter));
+  doltliteRecordInfoInit(&oldInfo);
+  doltliteRecordInfoInit(&newInfo);
+  rc = mergeLoadReaderColumns(pSchema->zSql, pSchema->zName, &ci);
+  if( rc!=SQLITE_OK ) goto done;
+  rc = prollyDiffIterOpen(&iter, doltliteGetChunkStore(db),
+                          doltliteGetCache(db), &pAnc->root, &pSide->root,
+                          pAnc->flags, pSide->flags);
+  if( rc!=SQLITE_OK ) goto done;
+  while( (rc = prollyDiffIterStep(&iter, &pChange))==SQLITE_ROW ){
+    if( pChange->type!=PROLLY_DIFF_MODIFY ) continue;
+    rc = doltliteParseRecordStrict(pChange->pOldVal, pChange->nOldVal,
+                                   &oldInfo);
+    if( rc==SQLITE_OK ){
+      rc = doltliteParseRecordStrict(pChange->pNewVal, pChange->nNewVal,
+                                     &newInfo);
+    }
+    if( rc!=SQLITE_OK ) break;
+    for(i=0; i<ci.nCol; i++){
+      int slot = mergeReaderRecordSlot(&ci, i);
+      if( slot<0 || i==ci.iPkCol || (!ci.bHasRowid && slot<ci.nPk)
+       || slot>=oldInfo.nField || slot>=newInfo.nField
+       || oldInfo.aType[slot]==0 || newInfo.aType[slot]==0 ) continue;
+      if( mergeStoredFieldsEqual(pChange->pOldVal, pChange->nOldVal,
+                                 &oldInfo, slot,
+                                 pChange->pNewVal, pChange->nNewVal,
+                                 &newInfo, slot) ){
+        *pbShared = 1;
+        break;
+      }
+    }
+    if( *pbShared ) break;
+  }
+  if( rc==SQLITE_ROW || rc==SQLITE_DONE ) rc = SQLITE_OK;
+done:
+  prollyDiffIterClose(&iter);
+  doltliteRecordInfoClear(&oldInfo);
+  doltliteRecordInfoClear(&newInfo);
+  doltliteFreeColInfo(&ci);
+  return rc;
+}
+
 static int mergeTableSharesRows(
   sqlite3 *db,
   struct TableEntry *pAnc,
   struct TableEntry *pSide,
+  SchemaEntry *pSchema,
   int *pbShared
 ){
   ChunkStore *cs = doltliteGetChunkStore(db);
@@ -966,6 +1023,9 @@ static int mergeTableSharesRows(
   if( rc==SQLITE_ROW || rc==SQLITE_DONE ){
     *pbShared = nChanged<nRows;
     rc = SQLITE_OK;
+    if( !*pbShared ){
+      rc = mergeTableSharesValue(db, pAnc, pSide, pSchema, pbShared);
+    }
   }
   return rc;
 }
@@ -1020,7 +1080,7 @@ static int mergePreNormalizeTableRename(
         }
         pSideEnt = doltliteFindTableByNumber(aSideEnt, nSideEnt,
                                             aSide[i].iRootpage);
-        rc = mergeTableSharesRows(db, pAncEnt, pSideEnt, &bShared);
+        rc = mergeTableSharesRows(db, pAncEnt, pSideEnt, pAncT, &bShared);
         if( rc!=SQLITE_OK ) return rc;
         if( !bShared ) continue;
         pNewT = &aSide[i];

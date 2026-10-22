@@ -2356,9 +2356,10 @@ SELECT 'Q' || char(9) || count(*) FROM dolt_log;" \
 SELECT concat('Q', char(9), count(*)) FROM dolt_log;"
 done
 
-for replacement in overlapping disjoint empty empty_base; do
+for replacement in overlapping same_keys disjoint empty empty_base; do
   case "$replacement" in
     overlapping) replacement_rows="INSERT INTO users VALUES(2,'alice'),(9,'bob');" ;;
+    same_keys) replacement_rows="INSERT INTO users VALUES(1,'alice'),(2,'bob'),(3,'carol');" ;;
     disjoint) replacement_rows="INSERT INTO users VALUES(8,'alice'),(9,'bob');" ;;
     *) replacement_rows="" ;;
   esac
