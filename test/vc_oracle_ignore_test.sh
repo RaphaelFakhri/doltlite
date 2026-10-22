@@ -260,6 +260,68 @@ CREATE TABLE tmp_bar(x INT PRIMARY KEY);
 INSERT INTO keep VALUES (1);
 "
 
+oracle_head_commit() {
+  local name="$1" setup="$2" expect="${3:---success}"
+  local dir="$TMPROOT/$name"
+  mkdir -p "$dir/dl" "$dir/dt"
+
+  local q="SELECT CONCAT('H|', coalesce(from_table_name,''), '|', coalesce(to_table_name,''), '|', diff_type) FROM dolt_diff_summary('HEAD~1','HEAD') ORDER BY to_table_name;"
+
+  local dl_out
+  dl_out=$(printf "%s\n.headers off\n.mode list\n%s\n" "$setup" "$q" \
+           | vc_oracle_run_doltlite "$expect" "$dir/dl/db" 2>"$dir/dl.err" \
+           | tr -d '\r' | grep '^H|' | sort)
+
+  local dolt_setup
+  dolt_setup=$(vc_oracle_translate_for_dolt "$setup")
+  (
+    cd "$dir/dt" || exit 1
+    vc_oracle_init_repo
+    {
+      echo "$dolt_setup"
+      echo "$q"
+    } | "$DOLT" sql -c -r csv 2>"$dir/dt.err"
+  ) > "$dir/dt.raw"
+
+  local dt_out
+  dt_out=$(tr -d '"\r' < "$dir/dt.raw" | grep '^H|' | sort)
+
+  vc_oracle_assert_match "$name" "$dl_out" "$dt_out"
+}
+
+oracle_head_commit "commit_A_head_skips_ignored" "
+INSERT INTO dolt_ignore VALUES ('tmp_*', 1);
+CREATE TABLE tmp_foo(x INT PRIMARY KEY);
+INSERT INTO tmp_foo VALUES (1);
+CREATE TABLE keep(x INT PRIMARY KEY);
+SELECT dolt_commit('-A', '-m', 'first');
+"
+
+oracle_head_commit "commit_A_head_skips_ignored_committed_pattern" "
+INSERT INTO dolt_ignore VALUES ('tmp_*', 1);
+SELECT dolt_commit('-A', '-m', 'pattern');
+CREATE TABLE tmp_x(x INT PRIMARY KEY);
+CREATE TABLE keep(x INT PRIMARY KEY);
+SELECT dolt_commit('-A', '-m', 'second');
+"
+
+oracle_head_commit "commit_A_head_conflicting_patterns_refused" "
+CREATE TABLE keep(x INT PRIMARY KEY);
+SELECT dolt_commit('-A', '-m', 'keep');
+INSERT INTO dolt_ignore VALUES ('a*', 1), ('*b', 0);
+CREATE TABLE ab(x INT PRIMARY KEY);
+SELECT dolt_commit('-A', '-m', 'ab');
+" --expect-error
+
+oracle_head_commit "commit_A_head_tracked_ignored" "
+CREATE TABLE tmp_foo(x INT PRIMARY KEY);
+SELECT dolt_commit('-A', '-m', 'track');
+INSERT INTO dolt_ignore VALUES ('tmp_*', 1);
+INSERT INTO tmp_foo VALUES (1);
+CREATE TABLE keep(x INT PRIMARY KEY);
+SELECT dolt_commit('-A', '-m', 'second');
+"
+
 echo "--- scope: only gates new tables ---"
 
 oracle "already_tracked_still_shows" "
