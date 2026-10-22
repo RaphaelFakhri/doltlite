@@ -1,0 +1,97 @@
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+
+set child [open rebase-conflict-check.tcl w]
+puts $child {
+  sqlite3 db test.db
+  puts [db eval {
+    PRAGMA integrity_check;
+    SELECT * FROM t;
+    SELECT count(*) FROM dolt_conflicts;
+    SELECT count(*) FROM dolt_status;
+  }]
+  db close
+}
+close $child
+
+foreach operation {merge cherry_pick revert} {
+  foreach {mode rebase} {
+    linear {SELECT dolt_rebase('f')}
+    interactive {SELECT dolt_rebase('-i','f')}
+  } {
+    foreach finish {rollback resolve} {
+      reset_db
+      execsql {
+        CREATE TABLE t(id INT PRIMARY KEY,v INT);
+        INSERT INTO t VALUES(1,1);
+        SELECT dolt_commit('-Am','base');
+        SELECT dolt_branch('f');
+        SELECT dolt_checkout('-b','g');
+        UPDATE t SET v=7;
+        SELECT dolt_commit('-am','other');
+        SELECT dolt_checkout('main');
+        UPDATE t SET v=5;
+        SELECT dolt_commit('-am','main');
+        BEGIN;
+      }
+      set prefix rebase-conflict-$operation-$mode-$finish
+      do_test $prefix-conflict {
+        set result [catchsql "SELECT dolt_${operation}('g')"]
+        list [lindex $result 0] [db one {SELECT count(*) FROM dolt_conflicts}]
+      } {1 1}
+      set head [execsql {SELECT dolt_hashof('HEAD')}]
+      set staged [execsql {SELECT dolt_hashof_db('STAGED')}]
+      set conflicts [execsql {SELECT * FROM dolt_conflicts_t}]
+      set branches [execsql {SELECT name,hash FROM dolt_branches ORDER BY name}]
+      do_test $prefix-refused {
+        set result [catchsql $rebase]
+        list [lindex $result 0] \
+             [string match {*unable to start rebase while a merge is in progress*} \
+                           [lindex $result 1]]
+      } {1 1}
+      do_test $prefix-preserved {
+        list [sqlite3_get_autocommit db] \
+             [db one {SELECT active_branch()}] \
+             [expr {$head eq [execsql {SELECT dolt_hashof('HEAD')}]}] \
+             [expr {$staged eq [execsql {SELECT dolt_hashof_db('STAGED')}]}] \
+             [expr {$conflicts eq [execsql {SELECT * FROM dolt_conflicts_t}]}] \
+             [expr {$branches eq [execsql {
+               SELECT name,hash FROM dolt_branches ORDER BY name
+             }]}]
+      } {0 main 1 1 1 1}
+      if {$finish eq "resolve"} {
+        execsql {SELECT dolt_conflicts_resolve('--ours','t'); COMMIT}
+      } else {
+        execsql {ROLLBACK}
+      }
+      do_execsql_test $prefix-intact {
+        PRAGMA integrity_check;
+        SELECT * FROM t;
+        SELECT count(*) FROM dolt_conflicts;
+        SELECT count(*) FROM dolt_status;
+      } {ok 1 5 0 0}
+      db close
+      do_test $prefix-process {
+        exec [info nameofexecutable] rebase-conflict-check.tcl
+      } {ok 1 5 0 0}
+      sqlite3 db test.db
+      do_execsql_test $prefix-reopen {
+        PRAGMA integrity_check;
+        SELECT * FROM t;
+        SELECT count(*) FROM dolt_conflicts;
+        SELECT count(*) FROM dolt_status;
+      } {ok 1 5 0 0}
+      do_test $prefix-later-write {
+        execsql {
+          INSERT INTO t VALUES(2,2);
+          SELECT dolt_commit('-am','after rebase refusal');
+          SELECT dolt_gc();
+        }
+        execsql {PRAGMA integrity_check; SELECT * FROM t ORDER BY id}
+      } {ok 1 5 2 2}
+    }
+  }
+}
+
+forcedelete rebase-conflict-check.tcl
+finish_test
