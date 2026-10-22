@@ -1253,6 +1253,10 @@ static int mergePass1TheirsModifyDelete(MergePass1Ctx *c){
          && strcmp(zObject, pAncEntry->zName)!=0 ){
           pByNo = 0;
         }
+        if( pByNo && pByNo->zName
+         && doltliteFindTableByName(c->aAnc, c->nAnc, pByNo->zName) ){
+          pByNo = 0;
+        }
         pOurEntry = pByNo;
       }
       if( pAncEntry ){

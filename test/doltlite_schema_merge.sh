@@ -141,6 +141,30 @@ run_test "drop_vs_modify_keep" "SELECT w FROM keep WHERE id=1;" "x" "$DB"
 
 rm -f "$DB"
 
+DB=/tmp/test_alter_merge4b_$$.db; rm -f "$DB"
+echo "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);
+CREATE TABLE u(id INTEGER PRIMARY KEY, w TEXT);
+INSERT INTO t VALUES(1,'a');
+INSERT INTO u VALUES(1,'x');
+SELECT dolt_commit('-A','-m','init');
+SELECT dolt_branch('feat');
+DROP TABLE t;
+SELECT dolt_commit('-A','-m','drop t');
+SELECT dolt_checkout('feat');
+UPDATE t SET v='b' WHERE id=1;
+SELECT dolt_commit('-A','-m','modify t');
+SELECT dolt_checkout('main');" | $DOLTLITE "$DB" > /dev/null 2>&1
+
+run_test_error_match "drop_vs_modify_later_table_merge" \
+  "SELECT dolt_merge('feat');" "conflict" "$DB"
+run_test "drop_vs_modify_later_table_head" \
+  "SELECT message FROM dolt_log LIMIT 1;" "drop t" "$DB"
+run_test_error_match "drop_vs_modify_later_table_cherry_pick" \
+  "SELECT dolt_cherry_pick('feat');" "conflict" "$DB"
+run_test "drop_vs_modify_later_table_u" "SELECT w FROM u WHERE id=1;" "x" "$DB"
+
+rm -f "$DB"
+
 DB=/tmp/test_alter_cp_$$.db; rm -f "$DB"
 echo "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);
 INSERT INTO t VALUES(1,'a');
