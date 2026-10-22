@@ -124,4 +124,48 @@ $apply" "$query" "$dt_query" "$expected"
   done
 done
 
+for default in none numeric text; do
+  column='x INT'
+  [ "$default" = numeric ] && column='x INT DEFAULT 9'
+  [ "$default" = text ] && column="x VARCHAR(30) DEFAULT 'new'"
+  for order in add_drop drop_add; do
+    ddl="ALTER TABLE t ADD COLUMN $column; ALTER TABLE t DROP COLUMN b;"
+    [ "$order" = drop_add ] && ddl="ALTER TABLE t DROP COLUMN b; ALTER TABLE t ADD COLUMN $column;"
+    for edit in delete update; do
+      edit_sql='DELETE FROM t WHERE id=1;'
+      [ "$edit" = update ] && edit_sql='UPDATE t SET a=83 WHERE id=1;'
+      for schema_side in main feature; do
+        edited=feature
+        [ "$schema_side" = feature ] && edited=main
+        for operation in merge cherry_pick; do
+          setup="CREATE TABLE t(id INTEGER PRIMARY KEY,a INT,b INT,c INT);
+CREATE INDEX ia ON t(a);
+CREATE INDEX ic ON t(c);
+INSERT INTO t VALUES(1,11,101,1001),(2,22,202,2002);
+SELECT dolt_commit('-Am','base');
+SELECT dolt_branch('feature');
+SELECT dolt_checkout('$schema_side');
+$ddl
+SELECT dolt_commit('-Am','drop and add');
+SELECT dolt_checkout('$edited');
+$edit_sql
+SELECT dolt_commit('-Am','edit');
+SELECT dolt_checkout('main');
+SELECT dolt_${operation}('feature');"
+          query="SELECT CONCAT('Q|row|',id,'|',a,'|',c,'|',COALESCE(x,'NULL')) FROM t ORDER BY id;
+SELECT CONCAT('Q|status|',COUNT(*)) FROM dolt_status;
+SELECT CONCAT('Q|conflicts|',COUNT(*)) FROM dolt_conflicts;"
+          dt_query="$query
+SELECT CONCAT('Q|column|',column_name) FROM information_schema.columns
+ WHERE table_schema=DATABASE() AND table_name='t' ORDER BY ordinal_position;"
+          query="$query
+SELECT CONCAT('Q|column|',name) FROM pragma_table_info('t') ORDER BY cid;"
+          oracle_replay "drop_add_${default}_${order}_${edit}_${schema_side}_${operation}" \
+            "$setup" "$query" "$dt_query" success
+        done
+      done
+    done
+  done
+done
+
 vc_oracle_finish

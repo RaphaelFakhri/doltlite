@@ -131,51 +131,76 @@ static int indexIdentEq(const char *z, int n, const char *zName){
   return n==nName && sqlite3_strnicmp(z, zName, n)==0;
 }
 
-/* Index text uses zFromSql's column names. zToSql is the merged table,
-** a position-stable rename of that side. One pass, so a swap does not chain. */
-static char *retargetIndexSqlToRenamedSlots(
+static int retargetIndexSqlToRenamedSlots(
+  sqlite3 *db,
   const char *zIndexSql,
-  const char *zAncSql,
-  const char *zNewSql
+  const SchemaEntry *pSource,
+  const SchemaEntry *pNew,
+  const ProllyHash *pSourceCatalog,
+  struct TableEntry *aMerged, int nMerged,
+  char **pzOut
 ){
   ParsedColumn *aAnc = 0, *aNew = 0;
-  int nAnc = 0, nNew = 0, i, changed = 0;
+  int nAnc = 0, nNew = 0, i, changed = 0, bSlots = 0;
+  int *aMap = 0;
   sqlite3_str *pOut = 0;
   const char *z;
-  char *zOut = 0;
+  struct TableEntry *aSource = 0, *pSourceEntry, *pNewEntry;
+  int nSource = 0;
+  int rc;
 
-  if( !zIndexSql || !zAncSql || !zNewSql ) return 0;
-  if( parseColumns(zAncSql, &aAnc, &nAnc)!=SQLITE_OK ) return 0;
-  if( parseColumns(zNewSql, &aNew, &nNew)!=SQLITE_OK ){
-    freeColumns(aAnc, nAnc);
-    return 0;
-  }
-  if( nAnc!=nNew ) goto retarget_done;
+  *pzOut = 0;
+  rc = parseColumns(pSource->zSql, &aAnc, &nAnc);
+  if( rc==SQLITE_OK ) rc = parseColumns(pNew->zSql, &aNew, &nNew);
+  if( rc!=SQLITE_OK || nAnc!=nNew ) goto retarget_done;
   for(i=0; i<nAnc; i++){
     if( !parsedColumnDefinitionsMatch(&aNew[i], &aAnc[i]) ) goto retarget_done;
     if( sqlite3_stricmp(aAnc[i].zName, aNew[i].zName)!=0 ) changed = 1;
   }
   if( !changed ) goto retarget_done;
+  pNewEntry = doltliteFindTableByName(aMerged, nMerged, pNew->zName);
+  if( !pNewEntry ) goto retarget_done;
+  rc = doltliteLoadCatalog(db, pSourceCatalog, &aSource, &nSource, 0);
+  if( rc!=SQLITE_OK ) goto retarget_done;
+  pSourceEntry = doltliteFindTableByNumber(aSource, nSource, pSource->iRootpage);
+  if( !pSourceEntry ){ rc = SQLITE_CORRUPT; goto retarget_done; }
+  rc = mergeSchemaReusesColumnSlots(db, &pSourceEntry->root, &pNewEntry->root,
+      pSourceEntry->flags, pNewEntry->flags, pSource->zSql, pNew->zSql,
+      pNew->zName, 1, &bSlots);
+  if( rc!=SQLITE_OK ) goto retarget_done;
+  aMap = sqlite3_malloc64((u64)nNew*sizeof(*aMap));
+  if( !aMap ){ rc = SQLITE_NOMEM; goto retarget_done; }
+  if( bSlots ){
+    for(i=0; i<nNew; i++) aMap[i] = i;
+  }else{
+    mergeMapColumnsToAncestor(aAnc, nAnc, aNew, nNew, aMap);
+  }
   pOut = sqlite3_str_new(0);
-  if( !pOut ) goto retarget_done;
+  if( !pOut ){ rc = SQLITE_NOMEM; goto retarget_done; }
   z = zIndexSql;
   while( *z ){
     int type, nTok, slot = -1;
     nTok = sqlite3GetToken((const u8*)z, &type);
     if( type==TK_ID || type==TK_STRING || (nTok>0 && (z[0]=='"' || z[0]=='`' || z[0]=='[')) ){
-      for(i=0; i<nAnc; i++){
-        if( indexIdentEq(z, nTok, aAnc[i].zName) ){ slot = i; break; }
+      for(i=0; i<nNew; i++){
+        if( aMap[i]>=0 && indexIdentEq(z, nTok, aAnc[aMap[i]].zName) ){
+          slot = i;
+          break;
+        }
       }
     }
     if( slot>=0 ) sqlite3_str_appendall(pOut, aNew[slot].zName);
     else sqlite3_str_append(pOut, z, nTok);
     z += nTok;
   }
-  zOut = sqlite3_str_finish(pOut);
+  *pzOut = sqlite3_str_finish(pOut);
+  if( !*pzOut ) rc = SQLITE_NOMEM;
 retarget_done:
+  doltliteFreeCatalog(aSource, nSource);
+  sqlite3_free(aMap);
   freeColumns(aAnc, nAnc);
   freeColumns(aNew, nNew);
-  return zOut;
+  return rc;
 }
 
 static int retargetRelayoutIndexBeforeActions(
@@ -484,7 +509,9 @@ int rebuildDisjointSchemaRows(
       if( rc!=SQLITE_OK ) return rc;
       if( pSrcTbl && pWinTbl && pSrcTbl->zSql && pWinTbl->zSql
        && pSrcTbl!=pWinTbl ){
-        zSql = retargetIndexSqlToRenamedSlots(pSe->zSql, pSrcTbl->zSql, pWinTbl->zSql);
+        rc = retargetIndexSqlToRenamedSlots(db, pSe->zSql, pSrcTbl, pWinTbl,
+            pOurCatalog, aMerged, nMerged, &zSql);
+        if( rc!=SQLITE_OK ) return rc;
         if( zSql ){
           sqlite3_free(pSe->zSql);
           pSe->zSql = zSql;
@@ -578,7 +605,9 @@ int rebuildDisjointSchemaRows(
       if( rc!=SQLITE_OK ) return rc;
       if( pSrcTbl && pWinTbl && pSrcTbl->zSql && pWinTbl->zSql
        && pSrcTbl!=pWinTbl ){
-        zSql = retargetIndexSqlToRenamedSlots(pSe->zSql, pSrcTbl->zSql, pWinTbl->zSql);
+        rc = retargetIndexSqlToRenamedSlots(db, pSe->zSql, pSrcTbl, pWinTbl,
+            pTheirCatalog, aMerged, nMerged, &zSql);
+        if( rc!=SQLITE_OK ) return rc;
         if( zSql ){
           sqlite3_free(pSe->zSql);
           pSe->zSql = zSql;
@@ -1045,6 +1074,21 @@ int normalizeSideToMergedLayout(
   for(j=0; bSlotRenames && j<nAnc; j++){
     bSlotRenames = parsedColumnDefinitionsMatch(&aOurs[j], &aAnc[j])
                 && parsedColumnDefinitionsMatch(&aTheirs[j], &aAnc[j]);
+  }
+
+  if( bSlotRenames && pAncRoot ){
+    int bOurSlots = 0, bTheirSlots = 0;
+    if( strcmp(zAncSql, zOursSql)!=0 ){
+      rc = mergeSchemaReusesColumnSlots(db, pAncRoot, pOursRoot,
+          ancFlags, flags, zAncSql, zOursSql, zTable, 1, &bOurSlots);
+      if( rc!=SQLITE_OK ) goto done;
+    }
+    if( strcmp(zAncSql, zTheirsSql)!=0 ){
+      rc = mergeSchemaReusesColumnSlots(db, pAncRoot, pTheirsRoot,
+          ancFlags, srcFlags, zAncSql, zTheirsSql, zTable, 1, &bTheirSlots);
+      if( rc!=SQLITE_OK ) goto done;
+    }
+    bSlotRenames = bOurSlots || bTheirSlots;
   }
 
   nMerged = nOurs;

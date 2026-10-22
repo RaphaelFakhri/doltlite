@@ -118,6 +118,7 @@ doltlite_vc_txn_ioerr
 doltlite_reset_schema
 doltlite_cache_budget
 doltlite_merge_schema_relayout
+doltlite_merge_drop_add
 doltlite_merge_column_attributes
 doltlite_merge_unique_columns
 doltlite_merge_index_encoding

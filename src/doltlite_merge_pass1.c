@@ -654,10 +654,10 @@ static int mergePass1CheckPrimaryKeysMatch(
   return SQLITE_ERROR;
 }
 
-static int mergePass1SchemaAppendsColumns(
+static int mergePass1SchemaAddsColumns(
   const char *zAncSql,
   const char *zSideSql,
-  int *pbAppends
+  int *pbAdds
 );
 
 /* Cell merge is by merged column position. Relayout the unmerged side
@@ -684,7 +684,7 @@ static int mergePass1RelayoutToMergedSchema(
   *pbRelaid = 0;
   if( !zAncSql || !zMergedSql || !zOtherSql ) return SQLITE_OK;
 
-  rc = mergePass1SchemaAppendsColumns(
+  rc = mergePass1SchemaAddsColumns(
       zAncSql, zMergedSql, &bFillSharedDefaults);
   if( rc!=SQLITE_OK ) return rc;
 
@@ -702,19 +702,26 @@ static int mergePass1RelayoutToMergedSchema(
   return SQLITE_OK;
 }
 
-static int mergePass1SchemaAppendsColumns(
+static int mergePass1SchemaAddsColumns(
   const char *zAncSql,
   const char *zSideSql,
-  int *pbAppends
+  int *pbAdds
 ){
-  int bPrefix = 0;
-  int nAnc = 0, nSide = 0;
+  ParsedColumn *aAnc = 0, *aSide = 0;
+  int nAnc = 0, nSide = 0, i;
   int rc;
 
-  *pbAppends = 0;
-  rc = mergePass1SchemaPrefixInfo(
-      zAncSql, zSideSql, &bPrefix, &nAnc, &nSide, 0);
-  if( rc==SQLITE_OK ) *pbAppends = bPrefix && nSide>nAnc;
+  *pbAdds = 0;
+  rc = parseColumns(zAncSql, &aAnc, &nAnc);
+  if( rc==SQLITE_OK ) rc = parseColumns(zSideSql, &aSide, &nSide);
+  for(i=0; rc==SQLITE_OK && i<nSide; i++){
+    if( parsedColumnIndexByName(aAnc, nAnc, aSide[i].zName)<0 ){
+      *pbAdds = 1;
+      break;
+    }
+  }
+  freeColumns(aAnc, nAnc);
+  freeColumns(aSide, nSide);
   return rc;
 }
 
