@@ -76,4 +76,40 @@ foreach source {empty indexed reordered} {
     } {1 base 3 after 0 ok}
   }
 }
+foreach key {INTEGER INT} {
+  foreach {mode checkout} {
+    table {SELECT dolt_checkout('w')}
+    dot {SELECT dolt_checkout('.')}
+  } {
+    foreach boundary {rollback commit} {
+      reset_db
+      execsql "CREATE TABLE w(id $key PRIMARY KEY,v TEXT)"
+      execsql {
+        INSERT INTO w VALUES(1,'base');
+        SELECT dolt_commit('-Am','base');
+        CREATE INDEX iw ON w(v);
+        INSERT INTO w VALUES(2,'discard');
+      }
+      execsql $checkout
+      execsql {BEGIN IMMEDIATE; SELECT dolt_add('w')}
+      execsql $boundary
+      set prefix checkout-table-baseline-$key-$mode-$boundary
+      do_execsql_test $prefix.rows {
+        INSERT INTO w VALUES(3,'after'),(4,'after');
+        SELECT id,v FROM w ORDER BY id;
+        SELECT count(*) FROM sqlite_schema WHERE name='iw';
+        PRAGMA integrity_check;
+      } {1 base 3 after 4 after 0 ok}
+      do_test $prefix.reopen {
+        db close
+        sqlite3 db test.db
+        db eval {
+          SELECT id,v FROM w ORDER BY id;
+          SELECT count(*) FROM sqlite_schema WHERE name='iw';
+          PRAGMA integrity_check;
+        }
+      } {1 base 3 after 4 after 0 ok}
+    }
+  }
+}
 finish_test
