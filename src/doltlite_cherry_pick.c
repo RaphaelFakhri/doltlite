@@ -597,7 +597,7 @@ int applyMergedCatalogAndCommit(
   char *hexBuf
 ){
   int bOwnTxn = db->autoCommit;
-  int rc;
+  int rc = SQLITE_OK;
   if( bOwnTxn ){
     ChunkStore *cs = doltliteGetChunkStore(db);
     rc = doltliteRefreshAndConfirmHead(db, cs, ourHead);
@@ -605,12 +605,13 @@ int applyMergedCatalogAndCommit(
     chunkStoreUnlock(cs);
     /* Keep nested SQL private while retaining autocommit conflict handling. */
     rc = sqlite3_exec(db, "SAVEPOINT doltlite_apply", 0, 0, 0);
-    if( rc!=SQLITE_OK ) return rc;
   }
-  rc = applyMergedCatalogAndCommitInTxn(db, context, ancCatHash,
-      ourCatHash, theirCatHash, ourHead, pCommitOurCatHash, zMessage,
-      zAuthorName, zAuthorEmail, bPreferOurMaster, bRejectUnchanged,
-      pnConflicts, pnViolations, pzApplyErr, hexBuf);
+  if( rc==SQLITE_OK ){
+    rc = applyMergedCatalogAndCommitInTxn(db, context, ancCatHash,
+        ourCatHash, theirCatHash, ourHead, pCommitOurCatHash, zMessage,
+        zAuthorName, zAuthorEmail, bPreferOurMaster, bRejectUnchanged,
+        pnConflicts, pnViolations, pzApplyErr, hexBuf);
+  }
   if( bOwnTxn && !db->autoCommit ){
     int erc;
     db->nVcInterruptMask++;

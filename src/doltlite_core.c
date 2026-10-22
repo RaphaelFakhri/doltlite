@@ -1239,7 +1239,6 @@ int doltliteDetectConstraintViolationsInTxn(
   char **pzErr
 ){
   int vrc;
-  int erc;
   int bOwnTxn = 0;
 
   *pnViolations = 0;
@@ -1248,16 +1247,12 @@ int doltliteDetectConstraintViolationsInTxn(
   ** commits and the next cursor has no txn; hold one across the pass. */
   if( db->autoCommit ){
     vrc = sqlite3_exec(db, "BEGIN", 0, 0, 0);
-    if( vrc!=SQLITE_OK ) return vrc;
-    bOwnTxn = 1;
+    bOwnTxn = !db->autoCommit;
+    if( vrc!=SQLITE_OK ) return doltliteMergeAutocommitTxnEnd(db, bOwnTxn, vrc);
   }
   vrc = doltliteDetectConstraintViolationsFiltered(
       db, pAncCat, 0, 0, 1, pnViolations, pzErr);
-  if( bOwnTxn ){
-    erc = vrc==SQLITE_OK ? doltliteCommitInternalTxn(db)
-                        : sqlite3_exec(db, "ROLLBACK", 0, 0, 0);
-    if( vrc==SQLITE_OK ) vrc = erc;
-  }
+  if( bOwnTxn ) vrc = doltliteMergeAutocommitTxnEnd(db, 1, vrc);
   return vrc;
 }
 

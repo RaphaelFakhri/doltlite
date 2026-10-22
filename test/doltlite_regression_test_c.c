@@ -10958,6 +10958,7 @@ static void run_vc_interrupt(void){
         rc = execSqlSilent(db, azOps[op]);
         sqlite3_progress_handler(db, 0, 0, 0);
         check("vc_interrupt_result", rc==SQLITE_OK || rc==SQLITE_INTERRUPT);
+        check("vc_interrupt_autocommit", sqlite3_get_autocommit(db));
         if( rc==SQLITE_INTERRUPT ){
           nInterrupted++;
           vcInterruptState(db,zAfter,sizeof(zAfter));
