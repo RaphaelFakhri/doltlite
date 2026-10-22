@@ -1183,6 +1183,10 @@ static int rebaseRestoreBranchState(sqlite3 *db, const char *zBranch){
     rc = doltliteSetSessionConstraintViolationsCatalog(db, &emptyHash);
   }
   if( rc==SQLITE_OK ) rc = doltliteLoadWorkingSet(db, zBranch);
+  if( rc==SQLITE_OK && !doltliteSessionHasUnresolvedConflicts(db)
+   && prollyHashCompare(&workingCat, &headCommit.catalogHash)==0 ){
+    doltliteAdoptRollbackBaseline(db, &headCommit.catalogHash);
+  }
   doltliteCommitClear(&headCommit);
   return rc;
 }
