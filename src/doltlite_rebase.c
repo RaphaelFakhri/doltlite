@@ -1183,7 +1183,10 @@ static int rebaseRestoreBranchState(sqlite3 *db, const char *zBranch){
     rc = doltliteSetSessionConstraintViolationsCatalog(db, &emptyHash);
   }
   if( rc==SQLITE_OK ) rc = doltliteLoadWorkingSet(db, zBranch);
-  if( rc==SQLITE_OK ) doltliteAdoptRollbackBaseline(db, &workingCat);
+  if( rc==SQLITE_OK && !doltliteSessionHasUnresolvedConflicts(db)
+   && prollyHashCompare(&workingCat, &headCommit.catalogHash)==0 ){
+    doltliteAdoptRollbackBaseline(db, &headCommit.catalogHash);
+  }
   doltliteCommitClear(&headCommit);
   return rc;
 }
@@ -3558,6 +3561,17 @@ static void doltliteRebaseFunc(
     keepTopLevelSavepoint = 1;
     doltliteRebaseInteractiveContinue(context, db);
     goto rebase_cleanup;
+  }
+  {
+    u8 isMerging = 0;
+    doltliteGetSessionMergeState(db, &isMerging, 0, 0);
+    if( isMerging || doltliteSessionHasUnresolvedConflicts(db) ){
+      sqlite3_result_error(context,
+        "unable to start rebase while a merge is in progress; "
+        "abort the current merge before proceeding", -1);
+      keepTopLevelSavepoint = 1;
+      goto rebase_cleanup;
+    }
   }
   if( isInteractive ){
     const char *zUpstream;
