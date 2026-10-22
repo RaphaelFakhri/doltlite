@@ -35,53 +35,6 @@ static void mergePass1FreeIdxInfo(MergeIndexInfo *aIdxInfo, int nIdxInfo){
   sqlite3_free(aIdxInfo);
 }
 
-static int mergePass1SchemaPrefixInfo(
-  const char *zAncSql,
-  const char *zSideSql,
-  int *pbPrefix,
-  int *pnAnc,
-  int *pnSide,
-  int *pnAncRecord
-){
-  ParsedColumn *aAnc = 0;
-  ParsedColumn *aSide = 0;
-  int nAnc = 0;
-  int nSide = 0;
-  int i;
-  int rc;
-
-  *pbPrefix = 0;
-  *pnAnc = 0;
-  *pnSide = 0;
-  if( pnAncRecord ) *pnAncRecord = 0;
-  if( !zAncSql || !zSideSql ) return SQLITE_OK;
-  rc = parseColumns(zAncSql, &aAnc, &nAnc);
-  if( rc!=SQLITE_OK ) return rc;
-  rc = parseColumns(zSideSql, &aSide, &nSide);
-  if( rc!=SQLITE_OK ){
-    freeColumns(aAnc, nAnc);
-    return rc;
-  }
-  if( nSide>=nAnc ){
-    *pbPrefix = 1;
-    for(i=0; i<nAnc; i++){
-      if( sqlite3_stricmp(aAnc[i].zName, aSide[i].zName)!=0
-       || !parsedColumnDefinitionsMatch(&aAnc[i], &aSide[i]) ){
-        *pbPrefix = 0;
-        break;
-      }
-    }
-  }
-  *pnAnc = nAnc;
-  *pnSide = nSide;
-  for(i=0; pnAncRecord && i<nAnc; i++){
-    if( !parsedColumnIsVirtual(&aAnc[i]) ) (*pnAncRecord)++;
-  }
-  freeColumns(aAnc, nAnc);
-  freeColumns(aSide, nSide);
-  return SQLITE_OK;
-}
-
 static int mergePass1CollectIndexes(
   MergePass1Ctx *c,
   const char *zName,
