@@ -54,6 +54,17 @@ C
     fail=1
   fi
   rm -f "$tmp/src/doltlite_bad.c"
+  cat > "$tmp/src/doltlite_track.c" <<'C'
+int fetchEntry(ChunkStore *cs){
+  return chunkStoreUpdateTracking(cs, "origin", "main", 0);
+}
+C
+  out=$(bash "$0" "$tmp" "$tmp/allow.txt" 2>&1)
+  if [ $? -eq 0 ] || ! printf '%s\n' "$out" | grep -q 'fetchEntry'; then
+    echo "selftest: tracking-ref write outside a callback was accepted"
+    fail=1
+  fi
+  rm -f "$tmp/src/doltlite_track.c"
   printf 'src/doltlite_ok.c:listed\nsrc/doltlite_ok.c:gone\n' > "$tmp/allow.txt"
   out=$(bash "$0" "$tmp" "$tmp/allow.txt" 2>&1)
   if [ $? -eq 0 ] || ! printf '%s\n' "$out" | grep -q 'gone'; then
@@ -75,7 +86,9 @@ import os, re, sys, glob
 PRIMS = ("chunkStoreUpdateBranch", "chunkStoreAddBranch", "chunkStoreDeleteBranch",
          "chunkStoreSetDefaultBranch", "chunkStoreAddTagFull", "chunkStoreDeleteTag",
          "chunkStoreSetBranchWorkingSet", "chunkStoreSerializeRefs",
-         "chunkStoreInstallRefsBlob")
+         "chunkStoreInstallRefsBlob", "chunkStoreAddRemote",
+         "chunkStoreDeleteRemote", "chunkStoreUpdateTracking",
+         "chunkStoreDeleteTracking")
 RUNNERS = ("doltliteMutateRefs", "doltliteMutateRefsExpected")
 TOKEN_RE = re.compile(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\\n])*"'
                       r"|'(?:\\.|[^'\\\n])*'", re.S)
