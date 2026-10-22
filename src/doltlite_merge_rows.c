@@ -975,17 +975,21 @@ static int assignColumnsByCells(
   const u8 *pAncRec, int nAncRec, const DoltliteRecordInfo *pAncInfo,
   int *aSideAnc
 ){
+  int nSideKey = pSide->bHasRowid ? 0 : pSide->nPk;
+  int nAncKey = pAnc->bHasRowid ? 0 : pAnc->nPk;
   int i, next = 0;
   for(i=0; i<pSide->nCol; i++){
     int iS = mergeReaderRecordSlot(pSide, i);
     int nHit = 0, hit = -1, k;
-    if( iS<0 ){
+    /* A clustered key column is the row's identity, not a cell that can
+    ** have moved; its value may equal any other column's. */
+    if( iS<0 || iS<nSideKey ){
       aSideAnc[i] = colInfoIndex(pAnc, pSide->azName[i]);
       continue;
     }
     for(k=next; k<pAnc->nCol; k++){
       int iA = mergeReaderRecordSlot(pAnc, k);
-      if( iA<0 ) continue;
+      if( iA<0 || iA<nAncKey ) continue;
       if( mergeStoredFieldsEqual(pSideRec, nSideRec, pSideInfo, iS,
                             pAncRec, nAncRec, pAncInfo, iA) ){
         nHit++;
