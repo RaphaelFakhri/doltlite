@@ -1,0 +1,155 @@
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+
+foreach {layout key} {rowid {INTEGER PRIMARY KEY} clustered {INT PRIMARY KEY}} {
+  foreach conflict {add drop} {
+    foreach indexes {unchanged dropped redefined added unique partial expression} {
+      foreach direction {forward reverse} {
+        reset_db
+        execsql "CREATE TABLE t(id $key,a INT,b INT)"
+        if {$indexes eq "unique"} {
+          execsql {CREATE UNIQUE INDEX ia ON t(a)}
+        } else {
+          execsql {CREATE INDEX ia ON t(a)}
+        }
+        execsql {
+          CREATE TABLE u(id INTEGER PRIMARY KEY);
+          INSERT INTO t VALUES(1,11,101),(2,22,202),(3,33,303);
+          SELECT dolt_commit('-Am','base');
+          SELECT dolt_branch('feature');
+        }
+        if {$conflict eq "add"} {
+          execsql {ALTER TABLE t ADD COLUMN w TEXT DEFAULT 'ours'}
+        } else {
+          execsql {ALTER TABLE t RENAME COLUMN b TO c}
+        }
+        execsql {
+          UPDATE t SET a=44 WHERE id=3;
+          SELECT dolt_commit('-Am','ours');
+          SELECT dolt_checkout('feature');
+          UPDATE t SET a=83 WHERE id=2;
+          DELETE FROM t WHERE id=3;
+          INSERT INTO t VALUES(4,55,404);
+          INSERT INTO u VALUES(1);
+        }
+        if {$conflict eq "add"} {
+          execsql {ALTER TABLE t ADD COLUMN w INT DEFAULT 0}
+        } else {
+          execsql {ALTER TABLE t DROP COLUMN b}
+        }
+        switch $indexes {
+          dropped {execsql {DROP INDEX ia}}
+          redefined {execsql {DROP INDEX ia; CREATE INDEX ia ON t(a DESC)}}
+          added {execsql {CREATE INDEX ix ON t(a,id)}}
+          partial {execsql {CREATE INDEX ix ON t(a) WHERE a>20}}
+          expression {execsql {CREATE INDEX ix ON t(a+1)}}
+        }
+        execsql {SELECT dolt_commit('-Am','theirs')}
+        set target feature
+        if {$direction eq "forward"} {
+          execsql {SELECT dolt_checkout('main')}
+        } else {
+          set target main
+        }
+        set state {
+          SELECT * FROM t ORDER BY id;
+          SELECT id,a FROM t INDEXED BY ia ORDER BY a,id;
+          SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE tbl_name='t'
+            ORDER BY type,name;
+          PRAGMA integrity_check;
+        }
+        if {$direction eq "reverse" && $indexes eq "dropped"} {
+          set state [string map {{INDEXED BY ia} {NOT INDEXED}} $state]
+        }
+        set branch [execsql {SELECT active_branch()}]
+        set before [execsql $state]
+        set head [execsql {SELECT dolt_hashof('HEAD')}]
+        set prefix schema-index-$layout-$conflict-$indexes-$direction
+        execsql BEGIN
+        do_test $prefix-conflict {
+          set result [catchsql "SELECT dolt_merge('$target')"]
+          list [lindex $result 0] [string match {*conflict*} [lindex $result 1]]
+        } {1 1}
+        do_execsql_test $prefix-recorded {
+          SELECT table_name FROM dolt_schema_conflicts;
+          SELECT is_merging FROM dolt_merge_status;
+        } {t 1}
+        do_test $prefix-consistent {execsql $state} $before
+        do_execsql_test $prefix-other-table {SELECT id FROM u} {1}
+        do_test $prefix-write {
+          catchsql {
+            SAVEPOINT edit;
+            UPDATE t SET a=a+100 WHERE id=1;
+            INSERT INTO t(id,a) VALUES(5,66);
+            DELETE FROM t WHERE id=2;
+          }
+        } {0 {}}
+        do_execsql_test $prefix-write-integrity {PRAGMA integrity_check} {ok}
+        execsql {ROLLBACK TO edit; RELEASE edit}
+        if {$direction eq "forward"} {
+          do_execsql_test $prefix-abort-merge {SELECT dolt_merge('--abort')} {0}
+          execsql ROLLBACK
+        } else {
+          do_test $prefix-commit-refused {lindex [catchsql COMMIT] 0} 1
+          catchsql ROLLBACK
+        }
+        do_test $prefix-abort {execsql $state} $before
+        do_test $prefix-head {execsql {SELECT dolt_hashof('HEAD')}} $head
+        db close
+        sqlite3 db test.db/$branch
+        do_test $prefix-reopen {execsql $state} $before
+        do_execsql_test $prefix-cleared {
+          SELECT count(*) FROM dolt_schema_conflicts;
+          SELECT is_merging FROM dolt_merge_status;
+        } {0 0}
+      }
+    }
+  }
+}
+foreach {layout key} {rowid {INTEGER PRIMARY KEY} clustered {INT PRIMARY KEY}} {
+  reset_db
+  execsql "CREATE TABLE t(id $key,a INT,b INT,c TEXT)"
+  execsql {
+    CREATE INDEX ia ON t(a);
+    INSERT INTO t VALUES(1,11,101,'original');
+    SELECT dolt_commit('-Am','base');
+    SELECT dolt_branch('feature');
+    DROP INDEX ia;
+    CREATE INDEX ia ON t(a DESC);
+    UPDATE t SET c='ours';
+    SELECT dolt_commit('-Am','ours');
+    SELECT dolt_checkout('feature');
+    ALTER TABLE t DROP COLUMN b;
+    DROP INDEX ia;
+    CREATE INDEX ia ON t(c);
+    UPDATE t SET c='theirs';
+    SELECT dolt_commit('-Am','theirs');
+    SELECT dolt_checkout('main');
+    BEGIN;
+  }
+  set prefix index-schema-layout-$layout
+  do_test $prefix-conflict {
+    set result [catchsql {SELECT dolt_merge('feature')}]
+    list [lindex $result 0] [string match {*conflict*} [lindex $result 1]]
+  } {1 1}
+  do_execsql_test $prefix-schema {
+    SELECT name FROM pragma_table_info('t') ORDER BY cid;
+    SELECT sql FROM sqlite_schema WHERE name='ia';
+  } {id a b c {CREATE INDEX ia ON t(a DESC)}}
+  do_execsql_test $prefix-rows {
+    SELECT * FROM t;
+    SELECT id,a,b,c FROM t INDEXED BY ia WHERE a>0;
+    PRAGMA integrity_check;
+  } {1 11 101 ours 1 11 101 ours ok}
+  do_execsql_test $prefix-write {
+    UPDATE t SET a=12,c='resolved' WHERE id=1;
+    SELECT * FROM t;
+    PRAGMA integrity_check;
+  } {1 12 101 resolved ok}
+  execsql {SELECT dolt_merge('--abort'); ROLLBACK}
+  do_execsql_test $prefix-abort {
+    SELECT * FROM t;
+    PRAGMA integrity_check;
+  } {1 11 101 ours ok}
+}
+finish_test

@@ -1560,6 +1560,28 @@ static void mergePass1ApplyIndexPatches(MergePass1Ctx *c){
   }
 }
 
+static void mergePass1KeepSchemaConflictRoots(MergePass1Ctx *c){
+  int i, k;
+  if( !hasAnySchemaConflict(*c->ppConflictTables, *c->pnConflictTables) ) return;
+  for(i=0; i<c->nOurs; i++){
+    struct TableEntry *pOur = &c->aOurs[i];
+    const char *zTable = pOur->zName;
+    if( pOur->iTable<=1 ) continue;
+    if( !zTable ){
+      SchemaEntry *pSe = findSchemaEntryByRootpage(
+          c->aOursSchema, c->nOursSchema, pOur->iTable);
+      if( pSe ) zTable = pSe->zTblName;
+    }
+    if( !zTable || !hasSchemaConflictTable(
+          *c->ppConflictTables, *c->pnConflictTables, zTable) ) continue;
+    for(k=0; k<*c->pnMerged; k++){
+      if( c->aMerged[k].iTable==pOur->iTable ) break;
+    }
+    if( k==*c->pnMerged ) (*c->pnMerged)++;
+    c->aMerged[k] = *pOur;
+  }
+}
+
 int mergeCatalogPass1(
   sqlite3 *db,
   struct TableEntry *aAnc, int nAnc,
@@ -1632,6 +1654,7 @@ int mergeCatalogPass1(
 
   rc = mergePass1MergeMaster(&c, iTable1Idx);
   if( rc==SQLITE_DONE ){
+    mergePass1KeepSchemaConflictRoots(&c);
     mergePass1Free(&c);
     return SQLITE_OK;
   }
@@ -1642,6 +1665,7 @@ int mergeCatalogPass1(
 
   /* Inline index roots already include row conflicts. */
   mergePass1ApplyIndexPatches(&c);
+  mergePass1KeepSchemaConflictRoots(&c);
   mergePass1Free(&c);
   return rc;
 }

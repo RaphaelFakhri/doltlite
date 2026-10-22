@@ -109,7 +109,8 @@ static SchemaEntry *mergedSchemaChoice(
                                              aOursSchema, nOursSchema, zName);
   int theirsChanged = schemaEntryChangedByName(aAncSchema, nAncSchema,
                                                aTheirsSchema, nTheirsSchema, zName);
-  if( hasSchemaConflictObject(aConflictTables, nConflictTables, zName) ){
+  if( hasSchemaConflictObject(aConflictTables, nConflictTables, zName)
+   || hasSchemaConflictTable(aConflictTables, nConflictTables, zName) ){
     return pOurs;
   }
   if( oursChanged && !theirsChanged ) return pOurs;
@@ -453,12 +454,14 @@ int rebuildDisjointSchemaRows(
      || !doltliteFindTableByName(aMerged, nMerged, pSe->zTblName) ){
       continue;
     }
-    if( findSchemaEntry(aAncSchema, nAncSchema, pSe->zName)
+    if( !hasSchemaConflictTable(aConflictTables, nConflictTables, pSe->zTblName)
+     && findSchemaEntry(aAncSchema, nAncSchema, pSe->zName)
      && !findSchemaEntry(aTheirsSchema, nTheirsSchema, pSe->zName) ){
       /* Theirs dropped it. */
       continue;
     }
-    if( !schemaEntryChangedByName(aAncSchema, nAncSchema,
+    if( !hasSchemaConflictTable(aConflictTables, nConflictTables, pSe->zTblName)
+     && !schemaEntryChangedByName(aAncSchema, nAncSchema,
                                   aOursSchema, nOursSchema,
                                   pSe->zName) ){
       /* Unchanged here: theirs' loop writes it when they changed it.
