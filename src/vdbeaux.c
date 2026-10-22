@@ -3599,6 +3599,9 @@ int sqlite3VdbeHalt(Vdbe *p){
   ** to invoke any required unlock-notify callbacks.
   */
   if( db->autoCommit ){
+#ifdef DOLTLITE_PROLLY
+    db->bVcReopenedTxn = 0;
+#endif
     sqlite3ConnectionUnlocked(db);
   }
 

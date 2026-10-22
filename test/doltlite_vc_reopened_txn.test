@@ -1,0 +1,101 @@
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+
+proc vc_reopen {command} {
+  execsql {BEGIN; INSERT INTO t(id) VALUES(1)}
+  if {$command eq "commit"} {
+    execsql {SELECT dolt_commit('-am','row one')}
+  } else {
+    execsql {SELECT dolt_branch('side')}
+  }
+}
+
+foreach command {commit branch} {
+  foreach finish {commit rollback constraint} {
+    foreach boundary {savepoint nested} {
+      reset_db
+      execsql {
+        CREATE TABLE t(id INTEGER PRIMARY KEY);
+        SELECT dolt_commit('-Am','init');
+      }
+      vc_reopen $command
+      set prefix vc-reopened-$command-$finish-$boundary
+      do_test $prefix.open {sqlite3_get_autocommit db} 0
+      execsql {INSERT INTO t VALUES(2)}
+      set rows {1}
+      if {$finish eq "constraint"} {
+        do_catchsql_test $prefix.finish {
+          INSERT OR ROLLBACK INTO t VALUES(1);
+        } {1 {UNIQUE constraint failed: t.id}}
+      } else {
+        do_catchsql_test $prefix.finish $finish {0 {}}
+        if {$finish eq "commit"} {set rows {1 2}}
+      }
+      do_test $prefix.ended {sqlite3_get_autocommit db} 1
+      execsql {SAVEPOINT caller}
+      if {$boundary eq "nested"} {execsql {SAVEPOINT inner}}
+      execsql {INSERT INTO t VALUES(3)}
+      do_catchsql_test $prefix.begin {
+        BEGIN;
+      } {1 {cannot start a transaction within a transaction}}
+      do_catchsql_test $prefix.rollback {ROLLBACK} {0 {}}
+      do_execsql_test $prefix.rows {SELECT id FROM t ORDER BY id} $rows
+      do_test $prefix.reopen {
+        db close
+        sqlite3 db test.db
+        db eval {SELECT id FROM t ORDER BY id; PRAGMA integrity_check}
+      } [concat $rows ok]
+    }
+  }
+
+  reset_db
+  execsql {
+    CREATE TABLE t(id INTEGER PRIMARY KEY);
+    SELECT dolt_commit('-Am','init');
+  }
+  vc_reopen $command
+  execsql {
+    INSERT INTO t VALUES(2);
+    SAVEPOINT inner;
+    INSERT INTO t VALUES(3);
+    ROLLBACK TO inner;
+    RELEASE inner;
+  }
+  do_catchsql_test vc-reopened-$command-live-begin {BEGIN} {0 {}}
+  do_execsql_test vc-reopened-$command-live-rollback {
+    INSERT INTO t VALUES(4);
+    ROLLBACK;
+    SELECT id FROM t ORDER BY id;
+    PRAGMA integrity_check;
+  } {1 2 ok}
+
+  reset_db
+  execsql {
+    PRAGMA foreign_keys=ON;
+    CREATE TABLE parent(id INTEGER PRIMARY KEY);
+    CREATE TABLE t(
+      id INTEGER PRIMARY KEY,
+      pid INTEGER DEFAULT 1 REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED
+    );
+    INSERT INTO parent VALUES(1);
+    SELECT dolt_commit('-Am','init');
+  }
+  vc_reopen $command
+  execsql {INSERT INTO t VALUES(2,2)}
+  do_catchsql_test vc-reopened-$command-failed-commit {
+    COMMIT;
+  } {1 {FOREIGN KEY constraint failed}}
+  do_test vc-reopened-$command-failed-commit-open {
+    sqlite3_get_autocommit db
+  } 0
+  execsql {DELETE FROM t WHERE id=2}
+  do_catchsql_test vc-reopened-$command-retry-begin {BEGIN} {0 {}}
+  do_execsql_test vc-reopened-$command-retry-rollback {
+    INSERT INTO t(id) VALUES(3);
+    ROLLBACK;
+    SELECT id FROM t ORDER BY id;
+    PRAGMA integrity_check;
+  } {1 ok}
+}
+
+finish_test
