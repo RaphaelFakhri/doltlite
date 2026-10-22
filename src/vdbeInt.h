@@ -513,6 +513,7 @@ struct Vdbe {
 #if defined(DOLTLITE_PROLLY)
   bft vcInstalled:1;
   bft hasVUpdate:1;       /* True if program invokes virtual-table xUpdate */
+  int nBindTooBig;        /* Parameters rejected by SQLITE_LIMIT_LENGTH */
 #endif
   bft readOnly:1;         /* True for statements that do not write */
   bft bIsReader:1;        /* True for statements that read */

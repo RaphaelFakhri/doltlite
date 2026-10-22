@@ -172,6 +172,9 @@ int sqlite3_clear_bindings(sqlite3_stmt *pStmt){
     sqlite3VdbeMemRelease(&p->aVar[i]);
     p->aVar[i].flags = MEM_Null;
   }
+#ifdef DOLTLITE_PROLLY
+  p->nBindTooBig = 0;
+#endif
   assert( (p->prepFlags & SQLITE_PREPARE_SAVESQL)!=0 || p->expmask==0 );
   if( p->expmask ){
     p->expired = 1;
@@ -844,6 +847,15 @@ static int sqlite3Step(Vdbe *p){
   if( p->eVdbeState!=VDBE_RUN_STATE ){
     restart_step:
     if( p->eVdbeState==VDBE_READY_STATE ){
+#ifdef DOLTLITE_PROLLY
+      if( p->nBindTooBig ){
+        p->rc = SQLITE_TOOBIG;
+        sqlite3Error(db, SQLITE_TOOBIG);
+        rc = (p->prepFlags & SQLITE_PREPARE_SAVESQL)!=0
+           ? SQLITE_TOOBIG : SQLITE_ERROR;
+        goto end_of_step;
+      }
+#endif
       if( p->expired ){
         p->rc = SQLITE_SCHEMA;
         rc = SQLITE_ERROR;
@@ -1729,6 +1741,15 @@ const void *sqlite3_column_origin_name16(sqlite3_stmt *pStmt, int N){
 ** An assert() is normally added after vdbeUnbind() to help static analyzers
 ** realize this.
 */
+#ifdef DOLTLITE_PROLLY
+/* Not a pointer subtype. sqlite3_bind_pointer() uses 'p'. */
+#define DOLTLITE_BIND_TOOBIG_SUBTYPE 1
+
+static int bindValueTooBig(Mem *pVar){
+  return (pVar->flags & (MEM_Null|MEM_Subtype))==(MEM_Null|MEM_Subtype)
+      && pVar->eSubtype==DOLTLITE_BIND_TOOBIG_SUBTYPE;
+}
+#endif
 static int vdbeUnbind(Vdbe *p, unsigned int i){
   Mem *pVar;
   if( vdbeSafetyNotNull(p) ){
@@ -1748,6 +1769,11 @@ static int vdbeUnbind(Vdbe *p, unsigned int i){
     return SQLITE_RANGE;
   }
   pVar = &p->aVar[i];
+#ifdef DOLTLITE_PROLLY
+  if( p->nBindTooBig && bindValueTooBig(pVar) ){
+    p->nBindTooBig--;
+  }
+#endif
   sqlite3VdbeMemRelease(pVar);
   pVar->flags = MEM_Null;
   p->db->errCode = SQLITE_OK;
@@ -1813,6 +1839,20 @@ static int bindText(
         rc = sqlite3VdbeChangeEncoding(pVar, ENC(p->db));
       }
       if( rc ){
+#ifdef DOLTLITE_PROLLY
+        /* sqlite3VdbeMemSetText() drops an oversized value and returns
+        ** SQLITE_TOOBIG. Leaving the parameter NULL lets a caller that
+        ** ignores the bind result insert NULL. Remember the rejection so
+        ** sqlite3_step() fails before the statement runs. */
+        if( (rc&0xff)==SQLITE_TOOBIG ){
+          sqlite3VdbeMemSetNull(pVar);
+          pVar->flags = MEM_Null|MEM_Subtype;
+          pVar->eSubtype = DOLTLITE_BIND_TOOBIG_SUBTYPE;
+          pVar->n = 0;
+          pVar->z = 0;
+          p->nBindTooBig++;
+        }
+#endif
         sqlite3Error(p->db, rc);
         rc = sqlite3ApiExit(p->db, rc);
       }
