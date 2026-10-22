@@ -5427,8 +5427,8 @@ fts5corrupt7 fts5corrupt7-3.0 class=intentional issue=2493  # journal_mode repor
 fts5corruptA fts5corruptA-1.4 class=intentional issue=2493  # page_count is a chunk-store metric, not a SQLite page count
 fts5corruptA fts5corruptA-1.5 class=intentional  # injected blob is not a SQLite page, so the store reports a malformed image
 fts5corruptA fts5corruptA-2.2 class=intentional  # injected blob is not a SQLite page, so the store reports a malformed image
-fts5faultG fts5faultG-1-oom-persistent.*{61} class=engine-gap issue=4151  # OOM inside a write leaves the fts5 index corrupt
-fts5faultG fts5faultG-1-oom-transient.*{61} class=engine-gap issue=4151  # OOM inside a write leaves the fts5 index corrupt
+fts5faultG fts5faultG-1-oom-persistent.*{63} class=engine-gap issue=4151  # OOM inside a write leaves the fts5 index corrupt
+fts5faultG fts5faultG-1-oom-transient.*{63} class=engine-gap issue=4151  # OOM inside a write leaves the fts5 index corrupt
 fts5integrity fts5integrity-8.0 class=intentional issue=2493  # journal_mode reports wal, so exclusive locking stays on wal
 fts5locale fts5locale-col-10.2.3.8 class=engine-gap issue=4164  # corrupt locale blob: count(*) is 2
 fts5locale fts5locale-col-10.2.4.8 class=engine-gap issue=4164  # corrupt locale blob: count(*) is 2
