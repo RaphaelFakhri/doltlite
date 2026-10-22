@@ -5405,17 +5405,11 @@ incrvacuum incrvacuum-3.3 class=intentional  # shared sequence metadata changes 
 # not a SQLite page count. Those are the same storage-model gates as the
 # suites above. The engine-gap rows are bugs with their own issues.
 fts5aa fts5aa-col-1.0 class=intentional issue=1852  # canonical adoption: shadow-table SQL text and sqlite_master order
-fts5aa fts5aa-col-17.8 class=engine-gap issue=4162  # INSERT with no rowid returns SQLITE_FULL while free rowids remain
 fts5aa fts5aa-col-origintext-1.0 class=intentional issue=1852  # canonical adoption: shadow-table SQL text and sqlite_master order
-fts5aa fts5aa-col-origintext-17.8 class=engine-gap issue=4162  # INSERT with no rowid returns SQLITE_FULL while free rowids remain
 fts5aa fts5aa-full-1.0 class=intentional issue=1852  # canonical adoption: shadow-table SQL text and sqlite_master order
-fts5aa fts5aa-full-17.8 class=engine-gap issue=4162  # INSERT with no rowid returns SQLITE_FULL while free rowids remain
 fts5aa fts5aa-full-origintext-1.0 class=intentional issue=1852  # canonical adoption: shadow-table SQL text and sqlite_master order
-fts5aa fts5aa-full-origintext-17.8 class=engine-gap issue=4162  # INSERT with no rowid returns SQLITE_FULL while free rowids remain
 fts5aa fts5aa-none-1.0 class=intentional issue=1852  # canonical adoption: shadow-table SQL text and sqlite_master order
-fts5aa fts5aa-none-17.8 class=engine-gap issue=4162  # INSERT with no rowid returns SQLITE_FULL while free rowids remain
 fts5aa fts5aa-none-origintext-1.0 class=intentional issue=1852  # canonical adoption: shadow-table SQL text and sqlite_master order
-fts5aa fts5aa-none-origintext-17.8 class=engine-gap issue=4162  # INSERT with no rowid returns SQLITE_FULL while free rowids remain
 fts5content fts5content-3.4 class=intentional issue=1840  # rowids continue after delete-all instead of restarting at 1
 fts5content fts5content-3.5 class=intentional issue=1840  # rowids continue after delete-all instead of restarting at 1
 fts5content fts5content-6.1 class=intentional issue=1852  # canonical adoption: sqlite_master order of fts5 shadow tables
