@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <sys/wait.h>
 #include <pthread.h>
 #include "sqlite3.h"
 #include "lib/test_tmpdir.h"
@@ -410,6 +412,171 @@ static void test_open_statement_snapshot(void){
   remove(dbpath);
 }
 
+/* A no-wait reset that finds the lock held retries once it is free. If the
+** holder deleted this connection's branch before releasing the lock, the
+** retry reports that branch, not a lock busy. The holder stays on main:
+** the branch being deleted is not its current branch. */
+static void test_reset_probe_deleted_branch(void){
+  char path[256];
+  char pause[256];
+  char ready[300];
+  char dirtied[256];
+  char go[256];
+  sqlite3 *holder = 0;
+  int status = 0;
+  int i;
+  pid_t pid;
+
+  printf("--- Test 14: reset probe retry names a deleted branch ---\n");
+  snprintf(path, sizeof(path),
+           DOLTLITE_TEST_TMPDIR "/reset_probe_deleted_%d.db", (int)getpid());
+  snprintf(pause, sizeof(pause),
+           DOLTLITE_TEST_TMPDIR "/reset_probe_deleted_%d.pause", (int)getpid());
+  snprintf(ready, sizeof(ready), "%s.ready", pause);
+  snprintf(dirtied, sizeof(dirtied),
+           DOLTLITE_TEST_TMPDIR "/reset_probe_deleted_%d.dirtied", (int)getpid());
+  snprintf(go, sizeof(go),
+           DOLTLITE_TEST_TMPDIR "/reset_probe_deleted_%d.go", (int)getpid());
+  remove(path);
+  remove(pause);
+  remove(ready);
+  remove(dirtied);
+  remove(go);
+
+  check("probe_del_open", sqlite3_open(path, &holder)==SQLITE_OK);
+  sqlite3_busy_timeout(holder, 5000);
+  check("probe_del_seed", execSql(holder,
+    "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);"
+    "INSERT INTO t VALUES(1,'one');"
+    "SELECT dolt_commit('-A','-m','base');"
+    "SELECT dolt_branch('other');")==SQLITE_OK);
+  check("probe_del_holder_on_main",
+        strcmp(queryScalarText(holder, "SELECT active_branch()"), "main")==0);
+  pid = fork();
+  if( pid<0 ){
+    perror("fork");
+    check("probe_del_fork", 0);
+    sqlite3_close(holder);
+    remove(path);
+    return;
+  }
+  if( pid==0 ){
+    sqlite3 *db = 0;
+    FILE *mark = 0;
+    char *err = 0;
+    int rc;
+    int ok;
+    int j;
+    if( sqlite3_open(path, &db)!=SQLITE_OK ) _exit(1);
+    sqlite3_busy_timeout(db, 5000);
+    rc = sqlite3_exec(db,
+        "SELECT dolt_checkout('other');"
+        "INSERT INTO t VALUES(2,'two');", 0, 0, &err);
+    if( rc!=SQLITE_OK ){
+      fprintf(stderr, "  child setup rc=%d err=%s\n", rc, err ? err : "(null)");
+      sqlite3_free(err);
+      sqlite3_close(db);
+      _exit(4);
+    }
+    mark = fopen(dirtied, "w");
+    if( !mark || fputc('x', mark)==EOF ){
+      if( mark ) fclose(mark);
+      sqlite3_close(db);
+      _exit(4);
+    }
+    fclose(mark);
+    for( j=0; j<500 && access(go, F_OK)!=0; j++ ) sqlite3_sleep(20);
+    if( access(go, F_OK)!=0 ){
+      sqlite3_close(db);
+      _exit(3);
+    }
+    setenv("DOLTLITE_PAUSE_BEFORE_HEAD_CONFIRM", pause, 1);
+    err = 0;
+    rc = sqlite3_exec(db, "SELECT dolt_reset('--hard');", 0, 0, &err);
+    ok = rc==SQLITE_BUSY && err
+      && strstr(err, "branch 'other' no longer exists")!=0
+      && strstr(err, "holds the write lock")==0;
+    if( !ok ){
+      fprintf(stderr, "  child reset rc=%d err=%s\n", rc, err ? err : "(null)");
+    }
+    sqlite3_free(err);
+    sqlite3_close(db);
+    _exit(ok ? 0 : 2);
+  }
+  for( i=0; i<500 && access(dirtied, F_OK)!=0; i++ ) sqlite3_sleep(20);
+  check("probe_del_dirtied", access(dirtied, F_OK)==0);
+  check("probe_del_lock", execSql(holder, "BEGIN IMMEDIATE;")==SQLITE_OK);
+  {
+    FILE *hold = 0;
+    FILE *started = 0;
+    hold = fopen(pause, "w");
+    if( !hold || fputc('x', hold)==EOF ){
+      perror("pause");
+      if( hold ) fclose(hold);
+      check("probe_del_pause_file", 0);
+    }else{
+      fclose(hold);
+      started = fopen(go, "w");
+      if( !started || fputc('x', started)==EOF ){
+        perror("go");
+        if( started ) fclose(started);
+        check("probe_del_go_file", 0);
+      }else{
+        fclose(started);
+        check("probe_del_go_file", 1);
+      }
+    }
+  }
+  for( i=0; i<500 && access(ready, F_OK)!=0; i++ ) sqlite3_sleep(20);
+  check("probe_del_reached_pause", access(ready, F_OK)==0);
+  check("probe_del_drop_branch",
+        execSql(holder, "SELECT dolt_branch('-D','other');")==SQLITE_OK);
+  check("probe_del_commit", execSql(holder, "COMMIT;")==SQLITE_OK);
+  remove(pause);
+  waitpid(pid, &status, 0);
+  check("probe_del_reset_names_branch",
+        WIFEXITED(status) && WEXITSTATUS(status)==0);
+  check("probe_del_stays_deleted",
+        strcmp(queryScalarText(holder,
+            "SELECT count(*) FROM dolt_branches WHERE name='other'"), "0")==0);
+  sqlite3_close(holder);
+  remove(path);
+  remove(pause);
+  remove(ready);
+  remove(dirtied);
+  remove(go);
+
+  check("probe_lock_open", sqlite3_open(path, &holder)==SQLITE_OK);
+  sqlite3_busy_timeout(holder, 0);
+  check("probe_lock_seed", execSql(holder,
+    "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);"
+    "INSERT INTO t VALUES(1,'one');"
+    "SELECT dolt_commit('-A','-m','base');"
+    "SELECT dolt_checkout('-b','other');"
+    "INSERT INTO t VALUES(2,'two');")==SQLITE_OK);
+  {
+    sqlite3 *waiter = 0;
+    char *err = 0;
+    int rc;
+    check("probe_lock_peer", sqlite3_open(path, &waiter)==SQLITE_OK);
+    sqlite3_busy_timeout(waiter, 0);
+    check("probe_lock_held", execSql(holder, "BEGIN IMMEDIATE;")==SQLITE_OK);
+    rc = sqlite3_exec(waiter, "SELECT dolt_reset('--hard');", 0, 0, &err);
+    check("probe_lock_is_busy", rc==SQLITE_BUSY);
+    check("probe_lock_names_lock",
+          err!=0 && strstr(err, "holds the write lock")!=0);
+    sqlite3_free(err);
+    check("probe_lock_release", execSql(holder, "ROLLBACK;")==SQLITE_OK);
+    check("probe_lock_branch_remains",
+          strcmp(queryScalarText(holder,
+              "SELECT count(*) FROM dolt_branches WHERE name='other'"),
+              "1")==0);
+    sqlite3_close(waiter);
+  }
+  sqlite3_close(holder);
+  remove(path);
+}
+
 int main(){
   sqlite3 *db1 = 0, *db2 = 0, *db3 = 0, *db4 = 0;
   const char *dbpath = DOLTLITE_TEST_TMPDIR "/test_concurrent_write.db";
@@ -575,6 +742,7 @@ int main(){
   test_multi_writer_dml();
   test_cross_thread_transaction();
   test_open_statement_snapshot();
+  test_reset_probe_deleted_branch();
 
   printf("\nResults: %d passed, %d failed out of %d tests\n", nPass, nFail, nPass+nFail);
   return nFail > 0 ? 1 : 0;

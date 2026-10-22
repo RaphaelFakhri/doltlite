@@ -94,6 +94,14 @@ void doltliteVcCommandInstalled(sqlite3 *db){
 #define DOLTLITE_CMD_SCOPED   1
 #define DOLTLITE_CMD_NOWAIT   2
 
+/* A missing branch, a command that needs no transaction, and a read-only
+** database are reported by the command itself. A lock busy is not. */
+static int cmdScopeBeginAbsorbed(Btree *pMain, int rc){
+  if( rc==SQLITE_DONE || (rc&0xff)==SQLITE_READONLY ) return 1;
+  return (rc&0xff)==SQLITE_BUSY
+      && doltliteBtreeMissingWriteBranch(pMain)!=0;
+}
+
 /* Begin the write transaction a command runs in: its own in autocommit,
 ** or a hold on the graph lock while it runs in the caller's. A read-only
 ** command, or one on a peer-deleted branch, cannot begin one and reports
@@ -113,21 +121,16 @@ static int cmdScopeBegin(
     return SQLITE_OK;
   }
   if( db->autoCommit && !db->pSavepoint ){
-    int bMissing;
     rc = doltliteBtreeBeginCommandTxn(pMain, eScope==DOLTLITE_CMD_SCOPED);
-    bMissing = (rc&0xff)==SQLITE_BUSY
-            && doltliteBtreeMissingWriteBranch(pMain)!=0;
     pScope->bScope = rc==SQLITE_OK;
     /* A no-wait command finds out whether it changes anything without the
     ** lock; one that does starts over in a transaction that waits. */
-    if( (rc&0xff)==SQLITE_BUSY && !bMissing && eScope==DOLTLITE_CMD_NOWAIT
-     && pbProbe ){
+    if( (rc&0xff)==SQLITE_BUSY && !cmdScopeBeginAbsorbed(pMain, rc)
+     && eScope==DOLTLITE_CMD_NOWAIT && pbProbe ){
       *pbProbe = 1;
       return SQLITE_OK;
     }
-    if( rc==SQLITE_DONE || bMissing || (rc&0xff)==SQLITE_READONLY ){
-      return SQLITE_OK;
-    }
+    if( cmdScopeBeginAbsorbed(pMain, rc) ) return SQLITE_OK;
     return rc;
   }
   rc = doltliteBtreeBeginJoinedCommand(pMain);
@@ -235,6 +238,9 @@ static void doltliteRunCommand(
       rcBegin = doltliteBtreeBeginCommandTxn(pMain, 1);
       scope.bScope = rcBegin==SQLITE_OK;
       bProbe = 0;
+      /* Same absorbed results as the no-wait attempt. The branch may have
+      ** been deleted while this retry waited for the lock. */
+      if( cmdScopeBeginAbsorbed(pMain, rcBegin) ) rcBegin = SQLITE_OK;
     }
   }
   if( rcBegin!=SQLITE_OK ){
