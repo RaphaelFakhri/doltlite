@@ -1942,6 +1942,11 @@ int sqlite3_bind_int64(sqlite3_stmt *pStmt, int i, sqlite_int64 iValue){
       }
     }
   }
+#ifdef DOLTLITE_PROLLY
+  if( p->nBindTooBig && bindValueTooBig(pVar) ){
+    p->nBindTooBig--;
+  }
+#endif
   sqlite3VdbeMemSetInt64(pVar, iValue);
   sqlite3_mutex_leave(p->db->mutex);
   return SQLITE_OK;
@@ -2124,6 +2129,15 @@ int sqlite3TransferBindings(sqlite3_stmt *pFromStmt, sqlite3_stmt *pToStmt){
   for(i=0; i<pFrom->nVar; i++){
     sqlite3VdbeMemMove(&pTo->aVar[i], &pFrom->aVar[i]);
   }
+#ifdef DOLTLITE_PROLLY
+  /* MemMove frees the destination value and leaves the source NULL, so a
+  ** copied counter would still describe bindings that no longer exist. */
+  pFrom->nBindTooBig = 0;
+  pTo->nBindTooBig = 0;
+  for(i=0; i<pTo->nVar; i++){
+    if( bindValueTooBig(&pTo->aVar[i]) ) pTo->nBindTooBig++;
+  }
+#endif
   sqlite3_mutex_leave(pTo->db->mutex);
   return SQLITE_OK;
 }

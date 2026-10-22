@@ -104,4 +104,76 @@ do_test doltlite_bind_length-3.6 {
   list $step $n
 } [list SQLITE_ROW $limit]
 
+# sqlite3_transfer_bindings moves the rejected parameter. The destination
+# must fail and write nothing. The source no longer holds that rejection.
+ifcapable deprecated {
+  do_test doltlite_bind_length-3.7 {
+    set n0 [db eval {SELECT count(*) FROM t}]
+    set from [sqlite3_prepare_v2 db {INSERT INTO t(x) VALUES(?)} -1 TAIL]
+    set to [sqlite3_prepare_v2 db {INSERT INTO t(x) VALUES(?)} -1 TAIL]
+    set rc1 [catch {sqlite3_bind_blob $from 1 $big [string length $big]}]
+    set err [sqlite3_errcode db]
+    set xfer [sqlite3_transfer_bindings $from $to]
+    set stepTo [sqlite3_step $to]
+    set n1 [db eval {SELECT count(*) FROM t}]
+    sqlite3_reset $to
+    sqlite3_bind_text $to 1 $ok [string length $ok]
+    set stepTo2 [sqlite3_step $to]
+    set stepFrom [sqlite3_step $from]
+    sqlite3_finalize $from
+    sqlite3_finalize $to
+    set n2 [db eval {SELECT count(*) FROM t}]
+    set last [db eval {SELECT x IS NULL FROM t ORDER BY rowid DESC LIMIT 1}]
+    set prev [db eval {
+      SELECT length(x) FROM t ORDER BY rowid DESC LIMIT 1 OFFSET 1
+    }]
+    list $rc1 $err $xfer $stepTo [expr {$n0==$n1}] $stepTo2 $stepFrom \
+         [expr {$n2==$n0+2}] $last $prev
+  } {1 SQLITE_TOOBIG 0 SQLITE_TOOBIG 1 SQLITE_DONE SQLITE_DONE 1 1 100}
+
+  do_test doltlite_bind_length-3.8 {
+    set from [sqlite3_prepare_v2 db {INSERT INTO t(x) VALUES(?)} -1 TAIL]
+    set to [sqlite3_prepare_v2 db {INSERT INTO t(x) VALUES(?)} -1 TAIL]
+    catch {sqlite3_bind_text $to 1 $big [string length $big]}
+    sqlite3_bind_text $from 1 $ok [string length $ok]
+    set xfer [sqlite3_transfer_bindings $from $to]
+    set stepTo [sqlite3_step $to]
+    set stepFrom [sqlite3_step $from]
+    set n [db eval {SELECT x IS NULL, length(x) FROM t ORDER BY rowid DESC LIMIT 2}]
+    sqlite3_finalize $from
+    sqlite3_finalize $to
+    list $xfer $stepTo $stepFrom $n
+  } {0 SQLITE_DONE SQLITE_DONE {1 {} 0 100}}
+
+  do_test doltlite_bind_length-3.9 {
+    set from [sqlite3_prepare_v2 db {INSERT INTO t(x) VALUES(?||?)} -1 TAIL]
+    set to [sqlite3_prepare_v2 db {INSERT INTO t(x) VALUES(?||?)} -1 TAIL]
+    sqlite3_bind_text $from 1 $ok [string length $ok]
+    set rc1 [catch {sqlite3_bind_blob $from 2 $big [string length $big]}]
+    set err [sqlite3_errcode db]
+    set xfer [sqlite3_transfer_bindings $from $to]
+    set stepTo [sqlite3_step $to]
+    set n1 [db eval {SELECT count(*) FROM t}]
+    sqlite3_reset $to
+    sqlite3_bind_text $to 2 z 1
+    set stepTo2 [sqlite3_step $to]
+    set got [db eval {SELECT x FROM t ORDER BY rowid DESC LIMIT 1}]
+    set stepFrom [sqlite3_step $from]
+    sqlite3_finalize $from
+    sqlite3_finalize $to
+    set n2 [db eval {SELECT count(*) FROM t}]
+    list $rc1 $err $xfer $stepTo [expr {$n2==$n1+2}] $stepTo2 $got $stepFrom
+  } [list 1 SQLITE_TOOBIG 0 SQLITE_TOOBIG 1 SQLITE_DONE ${ok}z SQLITE_DONE]
+}
+
+do_test doltlite_bind_length-3.10 {
+  set stmt [sqlite3_prepare_v2 db {INSERT INTO t(x) VALUES(?)} -1 TAIL]
+  catch {sqlite3_bind_text $stmt 1 $big [string length $big]}
+  set rc [catch {sqlite3_bind_int64 $stmt 1 7} msg]
+  set step [sqlite3_step $stmt]
+  sqlite3_finalize $stmt
+  set got [db eval {SELECT x FROM t ORDER BY rowid DESC LIMIT 1}]
+  list $rc $msg $step $got
+} {0 {} SQLITE_DONE 7}
+
 finish_test
