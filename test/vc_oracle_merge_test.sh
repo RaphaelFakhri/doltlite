@@ -2356,4 +2356,39 @@ SELECT 'Q' || char(9) || count(*) FROM dolt_log;" \
 SELECT concat('Q', char(9), count(*)) FROM dolt_log;"
 done
 
+for replacement in overlapping same_keys disjoint empty empty_base; do
+  case "$replacement" in
+    overlapping) replacement_rows="INSERT INTO users VALUES(2,'alice'),(9,'bob');" ;;
+    same_keys) replacement_rows="INSERT INTO users VALUES(1,'alice'),(2,'bob'),(3,'carol');" ;;
+    disjoint) replacement_rows="INSERT INTO users VALUES(8,'alice'),(9,'bob');" ;;
+    *) replacement_rows="" ;;
+  esac
+  base_rows="INSERT INTO logs VALUES(1,'a'),(2,'b'),(3,'c');"
+  [ "$replacement" != empty_base ] || base_rows=""
+  for change in rows schema; do
+    case "$change" in
+      rows) edit="INSERT INTO logs VALUES(4,'ours new log');" ;;
+      schema) edit="ALTER TABLE logs ADD COLUMN extra TEXT;" ;;
+    esac
+    for replaced in main feature; do
+      if [ "$replaced" = main ]; then edited=feature; else edited=main; fi
+      vc_oracle_error "replaced_table_${replacement}_${change}_${replaced}" "
+CREATE TABLE logs(id INTEGER PRIMARY KEY,v TEXT);
+$base_rows
+SELECT dolt_commit('-Am','base');
+SELECT dolt_branch('feature');
+SELECT dolt_checkout('$edited');
+$edit
+SELECT dolt_commit('-Am','edited logs');
+SELECT dolt_checkout('$replaced');
+DROP TABLE logs;
+CREATE TABLE users(id INTEGER PRIMARY KEY,v TEXT);
+$replacement_rows
+SELECT dolt_commit('-Am','replace logs with users');
+SELECT dolt_checkout('main');
+SELECT dolt_merge('feature');"
+    done
+  done
+done
+
 vc_oracle_finish
