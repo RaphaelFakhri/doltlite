@@ -887,7 +887,9 @@ static void doltliteCommitFuncImpl(
     doltliteGetSessionHead(db, &sessionHeadBeforeLock);
     rc = doltliteRefreshAndConfirmHead(db, cs, &sessionHeadBeforeLock);
     if( rc!=SQLITE_OK ){
-      if( rc==SQLITE_BUSY ) doltliteCmdResultPeerBranchBusy(context, "commit");
+      if( rc==SQLITE_BUSY ){
+        doltliteCmdResultBranchBusyOrGone(context, db, "commit");
+      }
       sqlite3_result_error_code(context, rc);
       return;
     }

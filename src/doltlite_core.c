@@ -392,10 +392,13 @@ int doltliteRefreshAndConfirmHead(
   zBranch = doltliteGetSessionBranch(db);
   rc = chunkStoreReadDiskBranchTip(cs, zBranch, &branchTip, &found);
   if( rc==SQLITE_OK && found ){
+    doltliteBtreeClearMissingWriteBranch(db->aDb[0].pBt);
     if( prollyHashCompare(&branchTip, pExpectedHead)!=0 ) rc = SQLITE_BUSY;
   }else if( rc==SQLITE_OK && !prollyHashIsEmpty(pExpectedHead) ){
-    /* A non-empty expected tip requires the branch to exist on disk; treating
-    ** missing as confirmed would skip a peer that already created it. */
+    /* A non-empty expected tip requires the branch to exist on disk.
+    ** The branch is gone, so this is not a peer commit to retry. */
+    sqlite3_free(chunkStoreSourceTakeError(cs, 0));
+    doltliteBtreeNoteMissingWriteBranch(db->aDb[0].pBt);
     rc = SQLITE_BUSY;
   }
   if( rc==SQLITE_OK ){

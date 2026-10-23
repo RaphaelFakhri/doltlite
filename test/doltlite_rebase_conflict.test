@@ -47,8 +47,10 @@ foreach operation {merge cherry_pick revert} {
         set result [catchsql $rebase]
         list [lindex $result 0] \
              [string match {*unable to start rebase while a merge is in progress*} \
+                           [lindex $result 1]] \
+             [string match {*rebase working branch already exists*} \
                            [lindex $result 1]]
-      } {1 1}
+      } {1 1 0}
       do_test $prefix-preserved {
         list [sqlite3_get_autocommit db] \
              [db one {SELECT active_branch()}] \

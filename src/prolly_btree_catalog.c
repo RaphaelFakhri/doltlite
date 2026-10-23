@@ -171,6 +171,33 @@ void invalidateCursors(BtShared *pBt, Pgno iTable, int errCode){
   }
 }
 
+/* Fault every cursor, then let the statement that performed the swap
+** end its own scan. Another statement's cursor stays faulted: stepping
+** it must not keep reading the catalog that was just replaced. */
+static void invalidateCursorsFinished(sqlite3 *db, BtShared *pBt){
+  Vdbe *pVdbe;
+  int i;
+  assert( pBt!=0 );
+  invalidateCursors(pBt, 0, SQLITE_ABORT);
+  pVdbe = db ? db->pVcCommand : 0;
+  if( !pVdbe ) return;
+  for(i=0; i<pVdbe->nCursor; i++){
+    VdbeCursor *pC;
+    BtCursor *pCur;
+    pC = pVdbe->apCsr[i];
+    if( !pC || pC->eCurType!=CURTYPE_BTREE ) continue;
+    pCur = pC->uc.pCursor;
+    if( !pCur || pCur->pBt!=pBt ) continue;
+    pCur->eState = CURSOR_INVALID;
+    pCur->skipNext = 0;
+    pCur->mmActive = 0;
+    pCur->mmPhysActive = 0;
+    pCur->mmIdx = -1;
+    pCur->mmPhysIdx = -1;
+    prollyCursorReleaseAll(&pCur->pCur);
+  }
+}
+
 static void faultIncrblobCursor(BtCursor *p){
   p->eState = CURSOR_FAULT;
   p->skipNext = SQLITE_ABORT;
@@ -2587,7 +2614,11 @@ int doltliteGetHeadCatalogHash(sqlite3 *db, ProllyHash *pCatHash){
     rc = chunkStoreEnsureRefsFresh(cs);
     if( rc!=SQLITE_OK ) return rc;
     if( chunkStoreFindBranch(cs, p->zBranch ? p->zBranch : "main", 0)
-        ==SQLITE_NOTFOUND ) return SQLITE_BUSY;
+        ==SQLITE_NOTFOUND ){
+      sqlite3_free(chunkStoreSourceTakeError(cs, 0));
+      doltliteBtreeNoteMissingWriteBranch(p);
+      return SQLITE_BUSY;
+    }
     return SQLITE_NOTFOUND;
   }
   if( rc!=SQLITE_OK ) return rc;
@@ -2749,7 +2780,7 @@ static int hardReset(sqlite3 *db, const ProllyHash *catHash, int persist){
   oldMergeCommitHash = pBtree->vc.mergeCommitHash;
   oldConflictsCatalogHash = pBtree->vc.conflictsCatalogHash;
 
-  invalidateCursors(pBt, 0, SQLITE_ABORT);
+  invalidateCursorsFinished(db, pBt);
 
   rc = deserializeCatalog(pBtree, data, nData);
   sqlite3_free(data);

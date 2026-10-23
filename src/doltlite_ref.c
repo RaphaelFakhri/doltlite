@@ -435,7 +435,11 @@ int doltliteLoadCommit(sqlite3 *db, const ProllyHash *pHash,
       rc = chunkStoreEnsureRefsFresh(cs);
       if( rc!=SQLITE_OK ) return rc;
       if( chunkStoreFindBranch(cs, doltliteGetSessionBranch(db), 0)
-          ==SQLITE_NOTFOUND ) return SQLITE_BUSY;
+          ==SQLITE_NOTFOUND ){
+        sqlite3_free(chunkStoreSourceTakeError(cs, 0));
+        doltliteBtreeNoteMissingWriteBranch(db->aDb[0].pBt);
+        return SQLITE_BUSY;
+      }
       return SQLITE_NOTFOUND;
     }
   }

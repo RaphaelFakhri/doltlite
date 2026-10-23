@@ -898,7 +898,11 @@ static void doltliteResetFunc(
       if( confirmRc!=SQLITE_OK ) rc = confirmRc;
     }
     if( rc!=SQLITE_OK ){
-      sqlite3_result_error_code(context, rc);
+      if( (rc&0xff)==SQLITE_BUSY ){
+        doltliteCmdResultWriteTxnError(context, db, rc);
+      }else{
+        sqlite3_result_error_code(context, rc);
+      }
       goto reset_cleanup;
     }
   }
@@ -914,14 +918,23 @@ static void doltliteResetFunc(
     if( !isHard ) rc = doltliteConfirmWorkingSet(db, cs, &wsBasis);
   }
   if( rc==SQLITE_BUSY ){
-    if( zRef ){
+    int branchGone = 0;
+    if( doltliteBtreeMissingWriteBranch(db->aDb[0].pBt) ) branchGone = 1;
+    if( !branchGone && !doltliteIsDetached(db) && cs && cs->refs.nBranches>0
+     && chunkStoreFindBranch(cs, doltliteGetSessionBranch(db), 0)
+        ==SQLITE_NOTFOUND ){
+      branchGone = 1;
+    }
+    if( branchGone ){
+      doltliteCmdResultWriteTxnError(context, db, SQLITE_BUSY);
+    }else if( zRef ){
       sqlite3_result_error(context,
         "reset conflict: another connection moved this branch. "
         "Please retry your transaction.", -1);
+      sqlite3_result_error_code(context, SQLITE_BUSY);
     }else{
       doltliteCmdResultPeerBranchBusy(context, "reset");
     }
-    sqlite3_result_error_code(context, SQLITE_BUSY);
     goto reset_cleanup;
   }
   if( rc!=SQLITE_OK ){

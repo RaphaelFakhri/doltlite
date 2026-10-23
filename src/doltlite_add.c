@@ -1200,7 +1200,7 @@ static int doltliteStageArgsAndPersist(
   }
   rc = doltliteEnsureWriteTxnAndSavepoints(db);
   if( rc!=SQLITE_OK ){
-    sqlite3_result_error_code(context, rc);
+    doltliteCmdResultWriteTxnError(context, db, rc);
     goto stage_done;
   }
 
