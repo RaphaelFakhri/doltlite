@@ -450,6 +450,9 @@ static int addStageAllTables(
   int workingIdxInit = 0;
   int onPlan;
   int skippedPlan = 0;
+  struct TableEntry *aHead = 0;
+  int nHead = 0;
+  int headLoaded = 0;
 
   rc = addLoadWorkingAndStagedCatalogs(db, pWorkingHash,
                                        &aWorking, &nWorking,
@@ -510,17 +513,36 @@ static int addStageAllTables(
 
   for(k=0; k<nStaged; k++){
     const char *zName = aStaged[k].zName;
+    struct TableEntry *pMate = 0;
     if( aStaged[k].iTable<=1 || !zName ) continue;
     if( addNameIndexFind(&workingIdx, zName) ) continue;
     /* Force stages the deletion of an ignored table like any other. */
     if( bForce ) continue;
+    /* A renamed table is staged or left by its new name, as Dolt does. */
+    if( !headLoaded ){
+      ProllyHash headCat;
+      headLoaded = 1;
+      rc = doltliteGetHeadCatalogHash(db, &headCat);
+      if( rc==SQLITE_OK && !prollyHashIsEmpty(&headCat) ){
+        rc = doltliteLoadCatalog(db, &headCat, &aHead, &nHead, 0);
+      }
+    }
+    if( rc==SQLITE_OK ){
+      rc = doltliteCatalogRenameMate(db, aHead, nHead, aStaged, nStaged,
+                                     aWorking, nWorking, &aStaged[k], 1,
+                                     &pMate);
+    }
     {
       int ignored = 0;
-      rc = addCheckIgnore(db, context, zName, &ignored);
+      if( rc==SQLITE_OK ){
+        rc = addCheckIgnore(db, context, pMate ? pMate->zName : zName,
+                            &ignored);
+      }
       if( rc!=SQLITE_OK ){
         if( workingIdxInit ) addNameIndexFree(&workingIdx);
         if( stagedIdxInit ) addNameIndexFree(&stagedIdx);
         addFreeEntries(aWorking, nWorking, aStaged, nStaged, aNew, nNew);
+        doltliteFreeCatalog(aHead, nHead);
         return rc;
       }
       if( !ignored ) continue;
@@ -531,9 +553,11 @@ static int addStageAllTables(
       if( workingIdxInit ) addNameIndexFree(&workingIdx);
       if( stagedIdxInit ) addNameIndexFree(&stagedIdx);
       addFreeEntries(aWorking, nWorking, aStaged, nStaged, aNew, nNew);
+      doltliteFreeCatalog(aHead, nHead);
       return rc;
     }
   }
+  doltliteFreeCatalog(aHead, nHead);
 
   /* Plan-only edits match the staged catalog once that table is omitted.
   ** Rebuilding sqlite_master would still be a different hash and -A would
