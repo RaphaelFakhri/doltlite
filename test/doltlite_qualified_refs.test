@@ -1,0 +1,108 @@
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+
+set remote [file normalize qualified-refs-remote.db]
+forcedelete $remote
+execsql {
+  CREATE TABLE t(id INTEGER PRIMARY KEY,v INT);
+  INSERT INTO t VALUES(1,10);
+  SELECT dolt_commit('-Am','base');
+}
+set hash(10) [execsql {SELECT dolt_hashof('HEAD')}]
+execsql {UPDATE t SET v=20; SELECT dolt_commit('-Am','tag-tip')}
+set hash(20) [execsql {SELECT dolt_hashof('HEAD')}]
+execsql {
+  SELECT dolt_tag('b1');
+  SELECT dolt_tag('v1');
+  SELECT dolt_tag('origin/main');
+  UPDATE t SET v=30;
+  SELECT dolt_commit('-Am','branch-tip');
+  SELECT dolt_branch('b1');
+}
+set hash(30) [execsql {SELECT dolt_hashof('HEAD')}]
+execsql "SELECT dolt_remote('add','origin','file://$remote')"
+execsql {
+  SELECT dolt_push('origin','main');
+  UPDATE t SET v=40;
+  SELECT dolt_commit('-Am','head-tip');
+  SELECT dolt_branch('heads/b1');
+  SELECT dolt_tag('tags/b1');
+  SELECT dolt_tag('heads/v1');
+}
+set hash(40) [execsql {SELECT dolt_hashof('HEAD')}]
+
+foreach collision {tag branch} {
+  if {$collision eq "branch"} {
+    execsql {SELECT dolt_branch('origin/main')}
+  }
+  foreach phase {live reopen} {
+    if {$phase eq "reopen"} {db close; sqlite3 db test.db}
+    foreach {ref value} {
+      b1 30 refs/heads/b1 30 heads/b1 30
+      refs/tags/b1 20 tags/b1 20 refs/tags/v1 20
+      remotes/origin/main 30 refs/remotes/origin/main 30
+      refs/heads/heads/b1 40 refs/tags/tags/b1 40 heads/v1 40
+      refs/heads/b1~1 20 heads/b1^ 20 refs/tags/b1~1 10
+      tags/b1^1 10 refs/remotes/origin/main~1 20
+      remotes/origin/main^1~1 10
+    } {
+      set name qualified-refs-$collision-$phase-$ref
+      do_execsql_test $name-rows "SELECT v FROM dolt_at_t('$ref')" $value
+      set hashValue $value
+      if {$ref in {heads/b1 tags/b1}} {set hashValue 40}
+      if {$ref in {heads/b1^ tags/b1^1}} {set hashValue 30}
+      do_execsql_test $name-hash "SELECT dolt_hashof('$ref')" $hash($hashValue)
+      do_execsql_test $name-log "SELECT message FROM dolt_log('$ref') LIMIT 1" \
+        [dict get {10 base 20 tag-tip 30 branch-tip 40 head-tip} $value]
+      do_execsql_test $name-catalog "
+        SELECT dolt_hashof_table('t','$ref')=dolt_hashof_table('t','$hash($value)');
+      " 1
+    }
+    set value [expr {$collision eq "tag" ? 20 : 40}]
+    do_execsql_test qualified-refs-$collision-$phase-short-tracking {
+      SELECT v FROM dolt_at_t('origin/main');
+    } $value
+    if {$collision eq "tag"} {
+      do_catchsql_test qualified-refs-$collision-$phase-hashof-tracking {
+        SELECT dolt_hashof('origin/main');
+      } {1 {dolt_hashof: invalid ref spec}}
+    } else {
+      do_execsql_test qualified-refs-$collision-$phase-hashof-tracking {
+        SELECT dolt_hashof('origin/main');
+      } $hash(40)
+    }
+    foreach ref {refs/heads/missing heads/missing refs/tags/missing tags/missing
+                 refs/remotes/origin/missing remotes/origin/missing
+                 refs/remotes//main remotes//main} {
+      do_test qualified-refs-$collision-$phase-missing-$ref {
+        set result [catchsql "SELECT * FROM dolt_at_t('$ref')"]
+        list [lindex $result 0] [string match {*ref not found*} [lindex $result 1]]
+      } {1 1}
+    }
+  }
+}
+
+do_execsql_test qualified-refs-branch-from-tag {
+  SELECT dolt_branch('from-tag','refs/tags/b1');
+  SELECT v FROM dolt_at_t('from-tag');
+} {0 20}
+do_execsql_test qualified-refs-tag-from-branch {
+  SELECT dolt_tag('from-branch','heads/b1');
+  SELECT v FROM dolt_at_t('refs/tags/from-branch');
+} {0 30}
+do_execsql_test qualified-refs-parent-mutation {
+  SELECT dolt_branch('from-parent','refs/remotes/origin/main^');
+  SELECT v FROM dolt_at_t('from-parent');
+  PRAGMA integrity_check;
+} {0 20 ok}
+
+execsql {SELECT dolt_checkout('heads/b1')}
+do_execsql_test qualified-refs-head-mutation {
+  SELECT dolt_branch('from-head','HEAD');
+  SELECT v FROM dolt_at_t('from-head');
+} {0 40}
+
+db close
+forcedelete $remote
+sqlite3 db test.db
+finish_test

@@ -15,6 +15,7 @@ vc_oracle_hashof_errors_test.sh
 vc_oracle_hashof_test.sh
 vc_oracle_ignore_test.sh
 vc_oracle_log_test.sh
+vc_oracle_qualified_refs_test.sh
 vc_oracle_reset_test.sh
 vc_oracle_state_transitions_test.sh
 vc_oracle_status_schema_objects_test.sh
