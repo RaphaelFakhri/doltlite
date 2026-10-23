@@ -1182,7 +1182,8 @@ int doltliteMergeCatalogs(
                           bDisjointSchemaChanges,
                           aConflictTables, nConflictTables,
                           &aRemap, &nRemap,
-                          pazReindex, pnReindex);
+                          pazReindex, pnReindex,
+                          pzErrMsg);
   if( rc!=SQLITE_OK ) goto merge_cleanup;
 
   if( !bBranchMerge && hasAnySchemaConflict(aConflictTables, nConflictTables) ){
