@@ -189,6 +189,13 @@ static int dtArgText(
         "dolt_diff_%s: invalid argument: NULL", pVtab->zTableName);
     return pVtab->base.zErrMsg ? SQLITE_ERROR : SQLITE_NOMEM;
   }
+  if( doltliteValueHasNul(pValue) ){
+    sqlite3_free(pVtab->base.zErrMsg);
+    pVtab->base.zErrMsg = sqlite3_mprintf(
+        "dolt_diff_%s: invalid argument: contains a NUL byte",
+        pVtab->zTableName);
+    return pVtab->base.zErrMsg ? SQLITE_ERROR : SQLITE_NOMEM;
+  }
   *pzValue = (const char*)sqlite3_value_text(pValue);
   return *pzValue ? SQLITE_OK : SQLITE_NOMEM;
 }
@@ -995,8 +1002,12 @@ static int dtFilter(sqlite3_vtab_cursor *cur,
     if( zBadRef ) rc = dtRefError(pVtab, zBadRef, rc);
   }else if( (idxNum & DT_IDX_RANGE_SPEC)!=0 && argc>=1 ){
     const char *zSpec = (const char*)sqlite3_value_text(argv[0]);
-    rc = buildRangeSpecDiffPair(c, db, pVtab->zTableName, zSpec);
-    if( rc==SQLITE_MISMATCH ){
+    int bNul = doltliteValueHasNul(argv[0]);
+    rc = bNul ? dtArgText(pVtab, argv[0], &zSpec)
+              : buildRangeSpecDiffPair(c, db, pVtab->zTableName, zSpec);
+    if( bNul ){
+      /* dtArgText reported the argument. */
+    }else if( rc==SQLITE_MISMATCH ){
       sqlite3_free(pVtab->base.zErrMsg);
       pVtab->base.zErrMsg = sqlite3_mprintf(
           "dolt_diff_%s requires a '..' or '...' revision range",

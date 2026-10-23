@@ -1027,6 +1027,7 @@ static int diffFilter(sqlite3_vtab_cursor *pCursor,
   memset(&startHash, 0, sizeof(startHash));
 
   if( (idxNum & DIFF_IDX_COMMIT_HASH) && argIdx<argc ){
+    if( doltliteValueHasNul(argv[argIdx]) ) return SQLITE_OK;
     zHashArg = (const char*)sqlite3_value_text(argv[argIdx++]);
     if( zHashArg ){
       if( strcmp(zHashArg, "WORKING")==0 ){
@@ -1050,6 +1051,7 @@ static int diffFilter(sqlite3_vtab_cursor *pCursor,
     const char *z;
     /* NULL name matches no table. Unset filter would mean "no filter"; xBestIndex omits it. */
     if( sqlite3_value_type(argv[argIdx])==SQLITE_NULL ) return SQLITE_OK;
+    if( doltliteValueHasNul(argv[argIdx]) ) return SQLITE_OK;
     z = (const char*)sqlite3_value_text(argv[argIdx++]);
     if( z ){
       pCur->zFilterTable = sqlite3_mprintf("%s", z);

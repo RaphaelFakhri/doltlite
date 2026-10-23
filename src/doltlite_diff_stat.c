@@ -558,6 +558,12 @@ static int dsArgText(
     pVtab->zErrMsg = sqlite3_mprintf("%s: invalid argument: NULL", zName);
     return pVtab->zErrMsg ? SQLITE_ERROR : SQLITE_NOMEM;
   }
+  if( doltliteValueHasNul(pValue) ){
+    sqlite3_free(pVtab->zErrMsg);
+    pVtab->zErrMsg = sqlite3_mprintf(
+        "%s: invalid argument: contains a NUL byte", zName);
+    return pVtab->zErrMsg ? SQLITE_ERROR : SQLITE_NOMEM;
+  }
   *pzValue = (const char*)sqlite3_value_text(pValue);
   return *pzValue ? SQLITE_OK : SQLITE_NOMEM;
 }

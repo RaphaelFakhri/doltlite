@@ -174,7 +174,8 @@ static int caFilter(
     const char *z;
     if( argc<=0 ) return SQLITE_OK;
     z = (const char*)sqlite3_value_text(argv[0]);
-    if( !z || doltliteHexToHash(z, &head)!=SQLITE_OK
+    if( !z || doltliteValueHasNul(argv[0])
+        || doltliteHexToHash(z, &head)!=SQLITE_OK
         || prollyHashIsEmpty(&head) ){
       return SQLITE_OK;
     }

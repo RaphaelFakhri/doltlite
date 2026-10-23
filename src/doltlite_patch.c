@@ -1346,6 +1346,13 @@ static int patchFilter(sqlite3_vtab_cursor *pCursor, int idxNum,
     patchSetError(&pVtab->base,"dolt_patch: invalid arguments%s","");
     return SQLITE_ERROR;
   }
+  for(i=0; i<argc; i++){
+    if( doltliteValueHasNul(argv[i]) ){
+      patchSetError(&pVtab->base,
+          "dolt_patch: invalid argument: contains a NUL byte%s", "");
+      return SQLITE_ERROR;
+    }
+  }
   rc=doltliteSplitRevisionRange(zArg1,&zLeft,&zRight,&rangeType);
   if( rc==SQLITE_OK ){
     zFrom=zLeft; zTo=zRight; zFilter=zArg2;

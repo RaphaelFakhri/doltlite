@@ -382,7 +382,8 @@ static int htFilter(sqlite3_vtab_cursor *cur,
   }
   if( idxNum & HIST_IDX_COMMIT_EQ ){
     const char *zHash = iArg<argc ? (const char*)sqlite3_value_text(argv[iArg]) : 0;
-    if( !zHash || doltliteHexToHash(zHash, &startHash)!=SQLITE_OK
+    if( !zHash || doltliteValueHasNul(argv[iArg])
+     || doltliteHexToHash(zHash, &startHash)!=SQLITE_OK
      || prollyHashIsEmpty(&startHash) ){
       return SQLITE_OK;
     }
@@ -406,6 +407,13 @@ static int htFilter(sqlite3_vtab_cursor *cur,
     }
     zRef = (const char*)sqlite3_value_text(argv[iArg]);
     if( !zRef ) return SQLITE_NOMEM;
+    if( doltliteValueHasNul(argv[iArg]) ){
+      sqlite3_free(cur->pVtab->zErrMsg);
+      cur->pVtab->zErrMsg = sqlite3_mprintf(
+          "dolt_history_%s: invalid argument: contains a NUL byte",
+          v->zTableName);
+      return cur->pVtab->zErrMsg ? SQLITE_ERROR : SQLITE_NOMEM;
+    }
     rc = doltliteResolveRef(v->db, zRef, &head);
     if( rc==SQLITE_NOTFOUND ){
       sqlite3_free(cur->pVtab->zErrMsg);

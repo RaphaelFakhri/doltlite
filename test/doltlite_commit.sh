@@ -508,6 +508,34 @@ SELECT staged FROM dolt_status WHERE table_name='t';" \
   "0
 0" "$DB16"
 
+NUL_REF="'main' || char(0) || 'zzz'"
+for q in "SELECT count(*) FROM dolt_log($NUL_REF)" \
+         "SELECT dolt_hashof($NUL_REF)" \
+         "SELECT dolt_hashof_db($NUL_REF)" \
+         "SELECT dolt_merge_base($NUL_REF, 'main')" \
+         "SELECT count(*) FROM dolt_at_t($NUL_REF)" \
+         "SELECT count(*) FROM dolt_history_t($NUL_REF)" \
+         "SELECT count(*) FROM dolt_diff_t($NUL_REF, 'main')" \
+         "SELECT count(*) FROM dolt_diff_t('main..' || $NUL_REF)" \
+         "SELECT count(*) FROM dolt_diff_summary($NUL_REF, 'main')" \
+         "SELECT count(*) FROM dolt_diff_stat('main', 'WORKING', 't' || char(0))" \
+         "SELECT count(*) FROM dolt_patch('main', 'WORKING', 't' || char(0))" \
+         "SELECT count(*) FROM dolt_schema_diff($NUL_REF, 'main')" \
+         "SELECT dolt_hashof_table('t' || char(0))"; do
+  run_test_error_match "nul_read_argument_rejected: $q" "$q" \
+    "contains a NUL byte|invalid ref spec|table not found" "$DB16"
+done
+
+run_test "nul_filter_values_match_nothing" \
+  "SELECT count(*) FROM dolt_log WHERE commit_hash=dolt_hashof('main') || char(0);
+SELECT count(*) FROM dolt_commit_ancestors WHERE commit_hash=dolt_hashof('main') || char(0);
+SELECT count(*) FROM dolt_history_t WHERE commit_hash=dolt_hashof('main') || char(0);
+SELECT count(*) FROM dolt_diff WHERE table_name='t' || char(0);" \
+  "0
+0
+0
+0" "$DB16"
+
 DB17=/tmp/test_dolt_commit_missing_fk_$$.db; rm -f "$DB17"
 
 run_test "missing_fk_empty_setup" \

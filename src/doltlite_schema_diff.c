@@ -910,18 +910,21 @@ static int sdParseArgs(
   if( (idxNum & 1) && argIdx<argc ){
     pArg = argv[argIdx++];
     if( sqlite3_value_type(pArg)==SQLITE_NULL ) goto null_arg;
+    if( doltliteValueHasNul(pArg) ) goto nul_byte_arg;
     zFromRef = (const char*)sqlite3_value_text(pArg);
     if( !zFromRef ) return SQLITE_NOMEM;
   }
   if( (idxNum & 2) && argIdx<argc ){
     pArg = argv[argIdx++];
     if( sqlite3_value_type(pArg)==SQLITE_NULL ) goto null_arg;
+    if( doltliteValueHasNul(pArg) ) goto nul_byte_arg;
     zToRef = (const char*)sqlite3_value_text(pArg);
     if( !zToRef ) return SQLITE_NOMEM;
   }
   if( (idxNum & 4) && argIdx<argc ){
     pArg = argv[argIdx++];
     if( sqlite3_value_type(pArg)==SQLITE_NULL ) goto null_arg;
+    if( doltliteValueHasNul(pArg) ) goto nul_byte_arg;
     zTableFilter = (const char*)sqlite3_value_text(pArg);
     if( !zTableFilter ) return SQLITE_NOMEM;
   }
@@ -1018,6 +1021,12 @@ null_arg:
   sqlite3_free(pVtab->zErrMsg);
   pVtab->zErrMsg = sqlite3_mprintf(
       "dolt_schema_diff: invalid argument: NULL");
+  return pVtab->zErrMsg ? SQLITE_ERROR : SQLITE_NOMEM;
+
+nul_byte_arg:
+  sqlite3_free(pVtab->zErrMsg);
+  pVtab->zErrMsg = sqlite3_mprintf(
+      "dolt_schema_diff: invalid argument: contains a NUL byte");
   return pVtab->zErrMsg ? SQLITE_ERROR : SQLITE_NOMEM;
 }
 
