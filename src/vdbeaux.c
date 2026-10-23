@@ -3249,6 +3249,39 @@ static void checkActiveVdbeCnt(sqlite3 *db){
 #else
 #define checkActiveVdbeCnt(x)
 #endif
+#if defined(DOLTLITE_PROLLY) && !defined(SQLITE_OMIT_VIRTUALTABLE)
+/*
+** Flush pending fts5 terms before a statement savepoint is released.
+** The next statement's xSavepoint would otherwise be the first flush.
+** If that flush runs out of memory, fts5 drops the hash and the index
+** no longer matches rows this statement already wrote.
+**
+** Only fts5 is flushed here. Other modules run xSync at commit.
+*/
+static int vdbeFlushFtsPending(Vdbe *p){
+  sqlite3 *db = p->db;
+  int rc = SQLITE_OK;
+  int i;
+
+  if( db->aVTrans==0 ) return SQLITE_OK;
+  for(i=0; rc==SQLITE_OK && i<db->nVTrans; i++){
+    VTable *pVTab;
+    const char *zName;
+    int (*xSync)(sqlite3_vtab*);
+
+    pVTab = db->aVTrans[i];
+    if( pVTab==0 || pVTab->pMod==0 || pVTab->pVtab==0 ) continue;
+    if( pVTab->pVtab->pModule==0 ) continue;
+    zName = pVTab->pMod->zName;
+    if( zName==0 || sqlite3_stricmp(zName, "fts5")!=0 ) continue;
+    xSync = pVTab->pVtab->pModule->xSync;
+    if( xSync==0 ) continue;
+    rc = xSync(pVTab->pVtab);
+    sqlite3VtabImportErrmsg(p, pVTab->pVtab);
+  }
+  return rc;
+}
+#endif
 
 /*
 ** If the Vdbe passed as the first argument opened a statement-transaction,
@@ -3265,11 +3298,25 @@ static SQLITE_NOINLINE int vdbeCloseStatement(Vdbe *p, int eOp){
   int rc = SQLITE_OK;
   int i;
   const int iSavepoint = p->iStatement-1;
+#if defined(DOLTLITE_PROLLY) && !defined(SQLITE_OMIT_VIRTUALTABLE)
+  int rcSync = SQLITE_OK;
+#endif
 
   assert( eOp==SAVEPOINT_ROLLBACK || eOp==SAVEPOINT_RELEASE);
   assert( db->nStatement>0 );
   assert( p->iStatement==(db->nStatement+db->nSavepoint) );
 
+#if defined(DOLTLITE_PROLLY) && !defined(SQLITE_OMIT_VIRTUALTABLE)
+  /* Publish fts5 terms while this statement savepoint can still absorb
+  ** the flush. A failed flush rolls the statement back; the caller rolls
+  ** the whole transaction back because the hash cannot be retried. */
+  if( eOp==SAVEPOINT_RELEASE && p->hasVUpdate ){
+    rcSync = vdbeFlushFtsPending(p);
+    if( rcSync!=SQLITE_OK ){
+      eOp = SAVEPOINT_ROLLBACK;
+    }
+  }
+#endif
   for(i=0; i<db->nDb; i++){
     int rc2 = SQLITE_OK;
     Btree *pBt = db->aDb[i].pBt;
@@ -3304,6 +3351,9 @@ static SQLITE_NOINLINE int vdbeCloseStatement(Vdbe *p, int eOp){
     db->nDeferredCons = p->nStmtDefCons;
     db->nDeferredImmCons = p->nStmtDefImmCons;
   }
+#if defined(DOLTLITE_PROLLY) && !defined(SQLITE_OMIT_VIRTUALTABLE)
+  if( rc==SQLITE_OK ) rc = rcSync;
+#endif
   return rc;
 }
 int sqlite3VdbeCloseStatement(Vdbe *p, int eOp){
