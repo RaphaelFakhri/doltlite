@@ -3251,12 +3251,32 @@ static void checkActiveVdbeCnt(sqlite3 *db){
 #endif
 #if defined(DOLTLITE_PROLLY) && !defined(SQLITE_OMIT_VIRTUALTABLE)
 /*
+** True when this program deletes through a virtual table. P2==1 is the
+** delete form of OP_VUpdate: one argv entry, the rowid to remove.
+*/
+static int vdbeProgramDeletesVtab(Vdbe *p){
+  VdbeOp *pOp;
+  int i;
+
+  if( p->aOp==0 ) return 0;
+  for(i=0; i<p->nOp; i++){
+    pOp = &p->aOp[i];
+    if( pOp->opcode==OP_VUpdate && pOp->p2==1 ) return 1;
+  }
+  return 0;
+}
+
+/*
 ** Flush pending fts5 terms before a statement savepoint is released.
 ** The next statement's xSavepoint would otherwise be the first flush.
 ** If that flush runs out of memory, fts5 drops the hash and the index
 ** no longer matches rows this statement already wrote.
 **
-** Only fts5 is flushed here. Other modules run xSync at commit.
+** Only a delete is flushed, and only when no user savepoint is open.
+** An insert stays in the hash so later rows in the transaction still
+** share one segment. A delete inside a user savepoint stays in the
+** hash so a later read sees the pre-delete shadow tables and
+** ROLLBACK TO can discard it. Only fts5 is flushed here.
 */
 static int vdbeFlushFtsPending(Vdbe *p){
   sqlite3 *db = p->db;
@@ -3307,10 +3327,13 @@ static SQLITE_NOINLINE int vdbeCloseStatement(Vdbe *p, int eOp){
   assert( p->iStatement==(db->nStatement+db->nSavepoint) );
 
 #if defined(DOLTLITE_PROLLY) && !defined(SQLITE_OMIT_VIRTUALTABLE)
-  /* Publish fts5 terms while this statement savepoint can still absorb
-  ** the flush. A failed flush rolls the statement back; the caller rolls
-  ** the whole transaction back because the hash cannot be retried. */
-  if( eOp==SAVEPOINT_RELEASE && p->hasVUpdate ){
+  /* Publish an fts5 delete while this statement savepoint can still
+  ** absorb the flush. A failed flush rolls the statement back; the
+  ** caller rolls the whole transaction back because the hash cannot
+  ** be retried. Inserts, and deletes under a user savepoint, stay
+  ** pending until the next xSavepoint or commit. */
+  if( eOp==SAVEPOINT_RELEASE && p->hasVUpdate && db->nSavepoint==0
+   && vdbeProgramDeletesVtab(p) ){
     rcSync = vdbeFlushFtsPending(p);
     if( rcSync!=SQLITE_OK ){
       eOp = SAVEPOINT_ROLLBACK;
