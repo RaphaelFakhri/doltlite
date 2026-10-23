@@ -2018,9 +2018,10 @@ static int rollbackNamedSavepoint(Btree *p, BtShared *pBt, int iSavepoint){
   }
   if( bSchemaChangedRollback ){
     rollbackResetSchema(p, !bStatement);
-  }else{
-    invalidateSchema(p);
   }
+  /* Schema was not changed. Leave the cache in place. Clearing it drops an
+  ** in-transaction virtual table while that transaction is still open, and
+  ** the next use connects a second instance that never sees xRollback. */
   return SQLITE_OK;
 }
 

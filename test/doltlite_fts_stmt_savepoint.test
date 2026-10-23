@@ -99,4 +99,57 @@ do_execsql_test 3.13 { ROLLBACK }
 do_test 3.14 { sqlite3_get_autocommit db } {1}
 do_execsql_test 3.15 { SELECT a, b FROM keepme } {1 keep}
 
+# A failed statement rolls the btree back to the statement savepoint. The
+# open FTS5 transaction has to stay on that same instance: replacing it
+# leaves the new instance holding index segments the later rollback undoes.
+ifcapable fts5 {
+  reset_db
+  do_execsql_test 4.0 {
+    CREATE VIRTUAL TABLE f USING fts5(body);
+    CREATE TABLE t(id INTEGER PRIMARY KEY);
+    INSERT INTO t VALUES(1);
+    BEGIN;
+    INSERT INTO f(rowid, body) VALUES(1, 'seven');
+  }
+  do_catchsql_test 4.1 {
+    INSERT INTO t VALUES(5),(1);
+  } {1 {UNIQUE constraint failed: t.id}}
+  do_execsql_test 4.2 {
+    SELECT count(*) FROM f WHERE f MATCH 'seven';
+    ROLLBACK;
+    SELECT count(*) FROM f WHERE f MATCH 'seven';
+    INSERT INTO f(rowid, body) VALUES(2, 'eight');
+  } {1 0}
+  do_test 4.3 {
+    db close
+    sqlite3 db test.db
+    execsql {
+      PRAGMA integrity_check;
+      SELECT rowid FROM f WHERE f MATCH 'eight';
+    }
+  } {ok 2}
+
+  do_execsql_test 5.0 {
+    CREATE VIRTUAL TABLE g USING fts5(body);
+    BEGIN;
+    INSERT INTO g(rowid, body) VALUES(1, 'seven');
+    SAVEPOINT sp;
+    INSERT INTO g(rowid, body) VALUES(2, 'nine');
+    ROLLBACK TO sp;
+    SELECT rowid FROM g WHERE g MATCH 'seven';
+    ROLLBACK;
+    SELECT count(*) FROM g WHERE g MATCH 'seven OR nine';
+    INSERT INTO g(rowid, body) VALUES(3, 'eight');
+  } {1 0}
+  do_test 5.1 {
+    db close
+    sqlite3 db test.db
+    execsql {
+      PRAGMA integrity_check;
+      SELECT rowid FROM g WHERE g MATCH 'eight';
+      SELECT count(*) FROM g WHERE g MATCH 'nine';
+    }
+  } {ok 3 0}
+}
+
 finish_test
