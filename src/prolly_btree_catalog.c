@@ -173,7 +173,7 @@ void invalidateCursors(BtShared *pBt, Pgno iTable, int errCode){
 
 /* A successful catalog swap finishes the scan that invoked it.
 ** CURSOR_FAULT would abort that statement after the swap has applied. */
-void invalidateCursorsFinished(BtShared *pBt){
+static void invalidateCursorsFinished(BtShared *pBt){
   BtCursor *p;
   assert( pBt!=0 );
   for(p=pBt->pCursor; p; p=p->pNext){

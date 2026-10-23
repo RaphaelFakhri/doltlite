@@ -504,7 +504,6 @@ static inline void btreeFreeCatalogTables(Btree *p){
 }
 
 void invalidateCursors(BtShared *pBt, Pgno iTable, int errCode);
-void invalidateCursorsFinished(BtShared *pBt);
 void invalidateSchema(Btree *pBtree);
 void refreshCursorMutMapAliases(Btree *pBtree, BtShared *pBt,
                                         Pgno iTable, ProllyMutMap *pNewMap);
