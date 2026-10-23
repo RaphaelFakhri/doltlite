@@ -592,7 +592,7 @@ void btreeStoreCommittedFromCurrent(Btree *p, const ProllyHash *pCatHash){
   btreeCaptureCommittedCatalogShape(p);
 }
 
-static void btreeBumpExternalDataVersion(Btree *p){
+void btreeBumpExternalDataVersion(Btree *p){
   assert( p!=0 && p->pBt!=0 );
   if( p->pBt->pPagerShim ){
     p->pBt->pPagerShim->iDataVersion++;

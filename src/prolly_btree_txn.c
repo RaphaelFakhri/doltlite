@@ -788,23 +788,33 @@ int prollyBtreeBeginTrans(Btree *p, int wrFlag, int *pSchemaVersion){
       }
     }
 
-    /* bStoreChanged is consumed by any refresh, including a VC command's; the
-    ** basis still says whether a peer wrote the working set since we loaded. */
-    if( p->inTrans==TRANS_READ
-     || bStoreChanged
-     || chunkStoreWorkingSetMovedFromBasis(&pBt->store,
-                                           p->zBranch ? p->zBranch : "main")
-     || p->iLoadedWorkingStateVersion!=pBt->iWorkingStateVersion
-     || (prollyHashIsEmpty(&p->committedCatalogHash) && p->cat.n>1) ){
+    /* bStoreChanged is any refresh, including another branch. Only a peer
+    ** write to this branch's working set changes the data version: a cached
+    ** vtab index otherwise keeps the old cookie and writes into the new
+    ** catalog. The basis is captured before the reload, which adopts it. */
+    {
+      const char *zBranch = p->zBranch ? p->zBranch : "main";
+      int bPeerWrite;
       ProllyHash loadedCatHash;
-      memset(&loadedCatHash, 0, sizeof(loadedCatHash));
-      rc = btreeReloadBranchWorkingStateInto(p, 1, &loadedCatHash);
-      if( rc!=SQLITE_OK ){
-        chunkStoreUnlock(&pBt->store);
-        return rc;
+      bPeerWrite = chunkStoreWorkingSetMovedFromBasis(&pBt->store, zBranch);
+      if( p->inTrans==TRANS_READ
+       || bStoreChanged
+       || bPeerWrite
+       || (prollyHashIsEmpty(&p->committedCatalogHash) && p->cat.n>1) ){
+        memset(&loadedCatHash, 0, sizeof(loadedCatHash));
+        rc = btreeReloadBranchWorkingStateInto(p, 1, &loadedCatHash);
+        if( rc!=SQLITE_OK ){
+          chunkStoreUnlock(&pBt->store);
+          return rc;
+        }
+        btreeStoreCommittedFromCurrent(p, &loadedCatHash);
+        p->bCatalogDropped = 0;
+        if( bPeerWrite ){
+          p->bForceCatalogReload = 0;
+          p->iLoadedWorkingStateVersion = pBt->iWorkingStateVersion;
+          btreeBumpExternalDataVersion(p);
+        }
       }
-      btreeStoreCommittedFromCurrent(p, &loadedCatHash);
-      p->bCatalogDropped = 0;
     }
     btreeStoreCommittedFromCurrent(p, 0);
 
