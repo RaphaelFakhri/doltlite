@@ -20,7 +20,10 @@ static int hashofResolveRef(
   ChunkStore *cs = doltliteGetChunkStore(db);
   const BranchRef *aBranch;
   const TagRef *aTag;
+  const TrackingBranch *aTracking;
   const char *zName = 0;
+  const char *zPrefix = 0;
+  const char *zRemote = 0;
   char *zCanonical;
   int nBase = (int)strcspn(zRef, "~^");
   int nRef, i, rc;
@@ -38,9 +41,24 @@ static int hashofResolveRef(
        && sqlite3_strnicmp(zHave, zRef, nBase)==0 ){
         if( zName ) return SQLITE_NOTFOUND;
         zName = zHave;
+        zPrefix = "refs/heads/";
       }
     }
     if( !zName ){
+      refsTableGetTracking(&cs->refs, &nRef, &aTracking);
+      for(i=0; i<nRef; i++){
+        int nRemote = (int)strlen(aTracking[i].zRemote);
+        int nBranch = (int)strlen(aTracking[i].zBranch);
+        if( nRemote+1+nBranch==nBase
+         && sqlite3_strnicmp(aTracking[i].zRemote, zRef, nRemote)==0
+         && zRef[nRemote]=='/'
+         && sqlite3_strnicmp(aTracking[i].zBranch, zRef+nRemote+1, nBranch)==0 ){
+          if( zName ) return SQLITE_NOTFOUND;
+          zName = aTracking[i].zBranch;
+          zRemote = aTracking[i].zRemote;
+          zPrefix = "refs/remotes/";
+        }
+      }
       refsTableGetTags(&cs->refs, &nRef, &aTag);
       for(i=0; i<nRef; i++){
         const char *zHave = aTag[i].zName;
@@ -48,14 +66,16 @@ static int hashofResolveRef(
          && sqlite3_strnicmp(zHave, zRef, nBase)==0 ){
           if( zName ) return SQLITE_NOTFOUND;
           zName = zHave;
+          zPrefix = "refs/tags/";
         }
       }
     }
   }
-  if( !zName || strncmp(zName, zRef, nBase)==0 ){
+  if( !zName || !zPrefix ){
     return doltliteResolveRef(db, zRef, pCommit);
   }
-  zCanonical = sqlite3_mprintf("%s%s", zName, zRef+nBase);
+  zCanonical = sqlite3_mprintf("%s%s%s%s%s", zPrefix,
+      zRemote ? zRemote : "", zRemote ? "/" : "", zName, zRef+nBase);
   if( !zCanonical ) return SQLITE_NOMEM;
   rc = doltliteResolveRef(db, zCanonical, pCommit);
   sqlite3_free(zCanonical);

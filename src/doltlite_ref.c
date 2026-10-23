@@ -213,14 +213,46 @@ static int doltliteValidateCommitHash(
   return rc;
 }
 
+static int doltliteFindTrackingRef(
+  ChunkStore *cs,
+  const char *zRef,
+  ProllyHash *pCommit
+){
+  const char *zSlash = strchr(zRef, '/');
+  char *zRemote;
+  int rc;
+  if( !zSlash || zSlash==zRef || !zSlash[1] ) return SQLITE_NOTFOUND;
+  zRemote = sqlite3_mprintf("%.*s", (int)(zSlash-zRef), zRef);
+  if( !zRemote ) return SQLITE_NOMEM;
+  rc = chunkStoreFindTracking(cs, zRemote, zSlash+1, pCommit);
+  sqlite3_free(zRemote);
+  return rc;
+}
+
+static int doltliteFindRefInNamespace(
+  ChunkStore *cs,
+  const char *zPath,
+  ProllyHash *pCommit
+){
+  if( strncmp(zPath, "heads/", 6)==0 ){
+    return chunkStoreFindBranch(cs, zPath+6, pCommit);
+  }
+  if( strncmp(zPath, "tags/", 5)==0 ){
+    return chunkStoreFindTag(cs, zPath+5, pCommit);
+  }
+  if( strncmp(zPath, "remotes/", 8)==0 ){
+    return doltliteFindTrackingRef(cs, zPath+8, pCommit);
+  }
+  return SQLITE_NOTFOUND;
+}
+
 static int doltliteResolveBaseRef(
   sqlite3 *db,
   const char *zRef,
   ProllyHash *pCommit
 ){
   ChunkStore *cs = doltliteGetChunkStore(db);
-  static const char zTrackingPrefix[] = "refs/remotes/";
-  int rc;
+  int i, rc;
 
   if( sqlite3_stricmp(zRef, "HEAD")==0 ){
     doltliteGetSessionHead(db, pCommit);
@@ -237,43 +269,29 @@ static int doltliteResolveBaseRef(
     }
   }
 
-  rc = chunkStoreFindBranch(cs, zRef, pCommit);
-  if( rc==SQLITE_OK && !prollyHashIsEmpty(pCommit) ){
-    rc = doltliteValidateCommitHash(db, pCommit);
-    if( rc==SQLITE_OK ) return SQLITE_OK;
-    return rc;
-  }
-
-  {
-    const char *zTrackingRef = zRef;
-    const char *zSlash;
-    if( strncmp(zRef, zTrackingPrefix, sizeof(zTrackingPrefix)-1)==0 ){
-      zTrackingRef = zRef + sizeof(zTrackingPrefix)-1;
-    }else if( strncmp(zRef, "remotes/", 8)==0 ){
-      zTrackingRef = zRef + 8;
+  for(i=0; i<5; i++){
+    switch( i ){
+      case 0:
+        if( strncmp(zRef, "refs/", 5)!=0 ) continue;
+        rc = doltliteFindRefInNamespace(cs, zRef+5, pCommit);
+        break;
+      case 1:
+        rc = doltliteFindRefInNamespace(cs, zRef, pCommit);
+        break;
+      case 2:
+        rc = chunkStoreFindBranch(cs, zRef, pCommit);
+        break;
+      case 3:
+        rc = chunkStoreFindTag(cs, zRef, pCommit);
+        break;
+      default:
+        rc = doltliteFindTrackingRef(cs, zRef, pCommit);
+        break;
     }
-    zSlash = strchr(zTrackingRef, '/');
-    if( zSlash && zSlash!=zRef && zSlash[1] ){
-      char *zRemote = sqlite3_mprintf("%.*s",
-                                      (int)(zSlash - zTrackingRef),
-                                      zTrackingRef);
-      const char *zBranch = zSlash + 1;
-      if( !zRemote ) return SQLITE_NOMEM;
-      rc = chunkStoreFindTracking(cs, zRemote, zBranch, pCommit);
-      sqlite3_free(zRemote);
-      if( rc==SQLITE_OK && !prollyHashIsEmpty(pCommit) ){
-        rc = doltliteValidateCommitHash(db, pCommit);
-        if( rc==SQLITE_OK ) return SQLITE_OK;
-        return rc;
-      }
+    if( rc==SQLITE_OK && !prollyHashIsEmpty(pCommit) ){
+      return doltliteValidateCommitHash(db, pCommit);
     }
-  }
-
-  rc = chunkStoreFindTag(cs, zRef, pCommit);
-  if( rc==SQLITE_OK && !prollyHashIsEmpty(pCommit) ){
-    rc = doltliteValidateCommitHash(db, pCommit);
-    if( rc==SQLITE_OK ) return SQLITE_OK;
-    return rc;
+    if( rc!=SQLITE_OK && rc!=SQLITE_NOTFOUND ) return rc;
   }
 
   return SQLITE_NOTFOUND;
@@ -391,7 +409,8 @@ int doltliteResolveRefForMutation(
   if( db->autoCommit && sqlite3_txn_state(db, "main")==SQLITE_TXN_NONE
    && sqlite3_strnicmp(zRef, "HEAD", 4)==0
    && (zRef[4]==0 || zRef[4]=='~' || zRef[4]=='^') ){
-    zBranchRef = sqlite3_mprintf("%s%s", doltliteGetSessionBranch(db), zRef+4);
+    zBranchRef = sqlite3_mprintf("refs/heads/%s%s",
+                                doltliteGetSessionBranch(db), zRef+4);
     if( !zBranchRef ) return SQLITE_NOMEM;
     zRef = zBranchRef;
   }
