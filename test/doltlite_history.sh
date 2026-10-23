@@ -486,4 +486,24 @@ SELECT b FROM dolt_history_t('HEAD') WHERE id=1;" \
 
 rm -f "$DB"
 
+DB=/tmp/test_history_rolled_back_table_$$.db
+for mod in dolt_diff_z dolt_history_z dolt_workspace_z dolt_at_z; do
+  rm -f "$DB"
+  run_test_error_match "${mod}_gone_after_rollback_of_create" \
+    "BEGIN; CREATE TABLE z(id INT PRIMARY KEY); SELECT count(*) FROM $mod; ROLLBACK;
+SELECT count(*) FROM $mod;" \
+    "no such table: $mod" "$DB"
+done
+rm -f "$DB"
+run_test "dropped_table_history_survives" \
+  "CREATE TABLE z(id INT PRIMARY KEY); INSERT INTO z VALUES(1); SELECT dolt_commit('-Am','z') IS NOT NULL;
+SELECT count(*) FROM dolt_history_z; DROP TABLE z; SELECT dolt_commit('-Am','drop') IS NOT NULL;
+SELECT count(*) FROM dolt_history_z; SELECT count(*) FROM dolt_diff_z;" \
+  "1
+1
+1
+1
+2" "$DB"
+rm -f "$DB"
+
 dltest_finish
