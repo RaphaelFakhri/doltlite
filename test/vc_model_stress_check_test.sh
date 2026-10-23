@@ -22,7 +22,9 @@ check(){
   want_status=0
   if [ "$want" -ne 0 ]; then want_status=1; fi
   got=$(echo "$out" | grep -c '^VIOLATION')
-  if [ "$got" = "$want" ] && [ "$status" = "$want_status" ]; then
+  pattern_ok=1
+  if [ -n "${5:-}" ] && ! grep -Fq -- "$5" <<<"$out"; then pattern_ok=0; fi
+  if [ "$got" = "$want" ] && [ "$status" = "$want_status" ] && [ "$pattern_ok" -eq 1 ]; then
     echo "ok $name"
   else
     echo "FAIL $name: expected $want violations/status $want_status, got $got/status $status"
@@ -34,7 +36,7 @@ check(){
 newdir(){
   d="$TMP/$1"
   mkdir -p "$d"
-  "$DOLTLITE" "$d/db.db" "CREATE TABLE w(id INTEGER PRIMARY KEY, v TEXT);
+  "$DOLTLITE" "$d/db.db" "CREATE TABLE w(id ${2:-INTEGER} PRIMARY KEY, v TEXT);
 SELECT dolt_commit('-Am','base'); SELECT dolt_branch('b1'); SELECT dolt_branch('b2');" >/dev/null
   echo "$d"
 }
@@ -140,6 +142,59 @@ printf '%s\n' \
   $'S\t3000\t6000\tc0\tBEGIN IMMEDIATE' \
   $'X\t7\tmain\t3000\t9000\treset_hard_1\tm_other' > "$d/log.0"
 check commit_during_lock_wait_protects_row 1 "$d"
+
+for key in INTEGER INT; do
+  d=$(newdir "hard_reset_before_create_$key" "$key")
+  "$DOLTLITE" "$d/db.db" "INSERT INTO w VALUES(100000012,'acked');
+SELECT dolt_commit('-Am','m_victim');
+SELECT dolt_reset('--hard','HEAD~1'); SELECT dolt_reset('--hard','HEAD~1');" >/dev/null
+  printf '%s\n' \
+    $'I\t100000012\tmain\t1000\t1100' \
+    $'C\tm_victim\tmain\t2000\t2100\t1' \
+    $'X\t7\tmain\t3000\t3100\treset_hard_1\tm_victim' \
+    $'X\t7\tmain\t4000\t4100\treset_hard_1\tbase' > "$d/log.0"
+  check "hard_reset_before_create_$key" 0 "$d"
+  printf 'I\t100000013\tmain\t5000\t5100\n' >> "$d/log.0"
+  check "missing_table_still_checks_later_writes_$key" 1 "$d" 1 \
+    'LOST acked id 100000013'
+
+  d=$(newdir "soft_reset_before_create_$key" "$key")
+  "$DOLTLITE" "$d/db.db" "INSERT INTO w VALUES(100000012,'acked');
+SELECT dolt_commit('-Am','m_victim');
+SELECT dolt_reset('--soft','HEAD~1'); SELECT dolt_reset('--soft','HEAD~1');" >/dev/null
+  printf '%s\n' \
+    $'I\t100000012\tmain\t1000\t1100' \
+    $'C\tm_victim\tmain\t2000\t2100\t1' \
+    $'X\t6\tmain\t3000\t3100\treset_soft_1\tm_victim' \
+    $'X\t6\tmain\t4000\t4100\treset_soft_1\tbase' > "$d/log.0"
+  check "soft_reset_before_create_$key" 0 "$d"
+  printf 'C\tm_missing\tmain\t5000\t5100\t1\n' >> "$d/log.0"
+  check "missing_head_still_checks_commits_$key" 2 "$d" 1 \
+    "LOST acked commit 'm_missing'"
+
+  for missing in working both; do
+    d=$(newdir "unexplained_missing_${missing}_$key" "$key")
+    "$DOLTLITE" "$d/db.db" "INSERT INTO w VALUES(100000012,'acked');
+SELECT dolt_commit('-Am','m_victim');" >/dev/null
+    want=1
+    if [ "$missing" = working ]; then
+      "$DOLTLITE" "$d/db.db" 'DROP TABLE w;' >/dev/null
+    else
+      "$DOLTLITE" "$d/db.db" "SELECT dolt_reset('--hard','HEAD~2');" >/dev/null
+      want=3
+    fi
+    printf '%s\n' \
+      $'I\t100000012\tmain\t1000\t1100' \
+      $'C\tm_victim\tmain\t2000\t2100\t1' > "$d/log.0"
+    check "missing_${missing}_table_still_checks_acked_rows_$key" "$want" "$d" 1 \
+      'LOST acked id 100000012'
+  done
+
+  d=$(newdir "invalid_schema_$key" "$key")
+  "$DOLTLITE" "$d/db.db" 'ALTER TABLE w RENAME COLUMN id TO missing;' >/dev/null
+  : > "$d/log.0"
+  check "missing_column_still_fails_$key" 1 "$d" 1 'no such column: id'
+done
 
 if [ "$fails" -ne 0 ]; then
   echo "vc_model_stress_check: $fails failed"

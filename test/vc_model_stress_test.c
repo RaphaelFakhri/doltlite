@@ -1090,6 +1090,41 @@ static int readStrs(sqlite3 *db, const char *sql, StrSet *s){
   return 0;
 }
 
+static int readTableIds(sqlite3 *db, IdSet *s){
+  IdSet tables = {0};
+  int rc;
+  s->n = 0;
+  rc = readIds(db, "SELECT 1 FROM main.sqlite_schema "
+                   "WHERE type='table' AND name='w'", &tables);
+  if( rc==SQLITE_OK && tables.n ) rc = readIds(db, "SELECT id FROM w", s);
+  free(tables.a);
+  return rc;
+}
+
+static int readHeadIds(sqlite3 *db, const char *br, IdSet *s){
+  StrSet hash = {0};
+  sqlite3 *hd = 0;
+  char path[800];
+  int rc = readStrs(db, "SELECT dolt_hashof('HEAD')", &hash);
+  s->n = 0;
+  if( rc || hash.n!=1 ){
+    if( !rc ) viol("check HEAD of %s: expected one commit hash", br);
+    free(hash.a);
+    return rc ? rc : SQLITE_ERROR;
+  }
+  snprintf(path, sizeof(path), "%s@%s", zDb, hash.a[0]);
+  free(hash.a);
+  rc = sqlite3_open_v2(path, &hd, SQLITE_OPEN_READONLY, 0);
+  if( rc ){
+    viol("open HEAD of %s: %s", br, sqlite3_errmsg(hd));
+  }else{
+    sqlite3_busy_timeout(hd, 5000);
+    rc = readTableIds(hd, s);
+  }
+  sqlite3_close(hd);
+  return rc;
+}
+
 static void checkModel(int ph){
   sqlite3 *db = 0;
   StrSet branches = {0}, tags = {0}, logm = {0};
@@ -1121,9 +1156,10 @@ static void checkModel(int ph){
     snprintf(path, sizeof(path), "%s@%s", zDb, br);
     if( sqlite3_open(path, &bd) ){ viol("open %s: %s", path, sqlite3_errmsg(bd)); sqlite3_close(bd); continue; }
     sqlite3_busy_timeout(bd, 5000);
-    if( readIds(bd, "SELECT id FROM w", &ws) ){ sqlite3_close(bd); continue; }
-    snprintf(sql, sizeof(sql), "SELECT id FROM dolt_at_w('%s')", br);
-    readIds(bd, sql, &head);
+    if( readTableIds(bd, &ws) || readHeadIds(bd, br, &head) ){
+      sqlite3_close(bd);
+      continue;
+    }
     snprintf(sql, sizeof(sql), "SELECT message FROM dolt_log('%s')", br);
     readStrs(bd, sql, &logm);
     {
