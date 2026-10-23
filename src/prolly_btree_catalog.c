@@ -171,19 +171,30 @@ void invalidateCursors(BtShared *pBt, Pgno iTable, int errCode){
   }
 }
 
-/* A successful catalog swap finishes the scan that invoked it.
-** CURSOR_FAULT would abort that statement after the swap has applied. */
-static void invalidateCursorsFinished(BtShared *pBt){
-  BtCursor *p;
+/* Fault every cursor, then let the statement that performed the swap
+** end its own scan. Another statement's cursor stays faulted: stepping
+** it must not keep reading the catalog that was just replaced. */
+static void invalidateCursorsFinished(sqlite3 *db, BtShared *pBt){
+  Vdbe *pVdbe;
+  int i;
   assert( pBt!=0 );
-  for(p=pBt->pCursor; p; p=p->pNext){
-    p->eState = CURSOR_INVALID;
-    p->skipNext = 0;
-    p->mmActive = 0;
-    p->mmPhysActive = 0;
-    p->mmIdx = -1;
-    p->mmPhysIdx = -1;
-    prollyCursorReleaseAll(&p->pCur);
+  invalidateCursors(pBt, 0, SQLITE_ABORT);
+  pVdbe = db ? db->pVcCommand : 0;
+  if( !pVdbe ) return;
+  for(i=0; i<pVdbe->nCursor; i++){
+    VdbeCursor *pC;
+    BtCursor *pCur;
+    pC = pVdbe->apCsr[i];
+    if( !pC || pC->eCurType!=CURTYPE_BTREE ) continue;
+    pCur = pC->uc.pCursor;
+    if( !pCur || pCur->pBt!=pBt ) continue;
+    pCur->eState = CURSOR_INVALID;
+    pCur->skipNext = 0;
+    pCur->mmActive = 0;
+    pCur->mmPhysActive = 0;
+    pCur->mmIdx = -1;
+    pCur->mmPhysIdx = -1;
+    prollyCursorReleaseAll(&pCur->pCur);
   }
 }
 
@@ -2769,7 +2780,7 @@ static int hardReset(sqlite3 *db, const ProllyHash *catHash, int persist){
   oldMergeCommitHash = pBtree->vc.mergeCommitHash;
   oldConflictsCatalogHash = pBtree->vc.conflictsCatalogHash;
 
-  invalidateCursorsFinished(pBt);
+  invalidateCursorsFinished(db, pBt);
 
   rc = deserializeCatalog(pBtree, data, nData);
   sqlite3_free(data);

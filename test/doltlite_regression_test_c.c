@@ -8088,6 +8088,7 @@ static void run_deleted_branch_messages_and_reset_scan(void){
   char *zErr = 0;
   char dbpath[256];
   int rc;
+  int gcRc;
 
   printf("=== Deleted Branch Messages And Reset Scan Test ===\n\n");
   make_dbpath(dbpath, sizeof(dbpath), "test_deleted_branch_messages");
@@ -8120,9 +8121,18 @@ static void run_deleted_branch_messages_and_reset_scan(void){
     "BEGIN;"
     "SELECT count(*) FROM t;")==SQLITE_OK);
   check("dbm_open_B", open_db(dbpath, &dbB)==SQLITE_OK);
-  check("dbm_peer_delete", execSql(dbB,
-    "SELECT dolt_branch('-D','feat');"
-    "SELECT dolt_gc();")==SQLITE_OK);
+  check("dbm_peer_delete",
+        execSql(dbB, "SELECT dolt_branch('-D','feat');")==SQLITE_OK);
+  /* The sweep is what drops commits the session still names. Windows cannot
+  ** unlink a chunk file the other connection has mapped, so that sweep is
+  ** IOERR and status/log can still read those commits. */
+#ifdef _WIN32
+  gcRc = execSqlSilent(dbB, "SELECT dolt_gc();");
+  check("dbm_peer_gc", gcRc==SQLITE_OK || (gcRc&0xff)==SQLITE_IOERR);
+#else
+  gcRc = execSql(dbB, "SELECT dolt_gc();");
+  check("dbm_peer_gc", gcRc==SQLITE_OK);
+#endif
   check("dbm_commit_gone", execErrorHas(dbA,
     "SELECT dolt_commit('-A','-m','more');",
     "branch 'feat' no longer exists", "lazy_origin"));
@@ -8132,12 +8142,14 @@ static void run_deleted_branch_messages_and_reset_scan(void){
   check("dbm_merge_gone", execErrorHas(dbA,
     "SELECT dolt_merge('main');",
     "branch 'feat' no longer exists", "lazy_origin"));
-  check("dbm_status_gone", execErrorHas(dbA,
-    "SELECT count(*) FROM dolt_status;",
-    "branch 'feat' no longer exists", "lazy_origin"));
-  check("dbm_log_gone", execErrorHas(dbA,
-    "SELECT count(*) FROM dolt_log;",
-    "branch 'feat' no longer exists", "lazy_origin"));
+  if( gcRc==SQLITE_OK ){
+    check("dbm_status_gone", execErrorHas(dbA,
+      "SELECT count(*) FROM dolt_status;",
+      "branch 'feat' no longer exists", "lazy_origin"));
+    check("dbm_log_gone", execErrorHas(dbA,
+      "SELECT count(*) FROM dolt_log;",
+      "branch 'feat' no longer exists", "lazy_origin"));
+  }
   sqlite3_close(dbA);
   sqlite3_close(dbB);
   dbA = dbB = 0;
@@ -8153,9 +8165,15 @@ static void run_deleted_branch_messages_and_reset_scan(void){
     "INSERT INTO t VALUES(2,'dirty');"
     "SELECT dolt_remote('add','origin','file:///nonexistent/origin.db');")==SQLITE_OK);
   check("dbm_auto_open_B", open_db(dbpath, &dbB)==SQLITE_OK);
-  check("dbm_auto_delete", execSql(dbB,
-    "SELECT dolt_branch('-D','feat');"
-    "SELECT dolt_gc();")==SQLITE_OK);
+  check("dbm_auto_delete",
+        execSql(dbB, "SELECT dolt_branch('-D','feat');")==SQLITE_OK);
+#ifdef _WIN32
+  gcRc = execSqlSilent(dbB, "SELECT dolt_gc();");
+  check("dbm_auto_gc", gcRc==SQLITE_OK || (gcRc&0xff)==SQLITE_IOERR);
+#else
+  gcRc = execSql(dbB, "SELECT dolt_gc();");
+  check("dbm_auto_gc", gcRc==SQLITE_OK);
+#endif
   check("dbm_auto_merge_gone", execErrorHas(dbA,
     "SELECT dolt_merge('main');",
     "branch 'feat' no longer exists", "database is locked"));
