@@ -372,6 +372,22 @@ SELECT dolt_commit('-Am', 'rename');
 
 echo "--- ignored rename pairs ---"
 
+for stage in dot all commit; do
+  case "$stage" in
+    dot) sql="SELECT dolt_add('.');" ;;
+    all) sql="SELECT dolt_add('-A');" ;;
+    commit) sql="SELECT dolt_commit('-Am','rename');" ;;
+  esac
+  vc_oracle_error "rename_source_conflict_$stage" "
+CREATE TABLE ab(id INT PRIMARY KEY);
+INSERT INTO ab VALUES(1);
+SELECT dolt_commit('-Am','base');
+INSERT INTO dolt_ignore VALUES('a*',1),('*b',0);
+ALTER TABLE ab RENAME TO kept;
+$sql
+"
+done
+
 for stage in dot all force commit; do
   for pattern in working committed; do
     for variant in plain indexed modified empty staged; do

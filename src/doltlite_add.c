@@ -533,15 +533,14 @@ static int addStageAllTables(
     if( onPlan && sqlite3_stricmp(zName, "dolt_rebase")==0 ) continue;
     pWorking = addNameIndexFind(&workingIdx, zName);
     if( !pWorking ){
+      rc = addCheckIgnore(db, context, zName, &ignored);
+      if( rc!=SQLITE_OK ) goto stage_all_done;
       rc = doltliteCatalogRenameMate(db, aHead, nHead,
           aStaged, nStaged, aWorking, nWorking, &aStaged[k], 1, &pWorking);
       if( rc!=SQLITE_OK ) goto stage_all_done;
     }
     if( pWorking ){
       ignored = !aUseWorking[pWorking-aWorking];
-    }else{
-      rc = addCheckIgnore(db, context, zName, &ignored);
-      if( rc!=SQLITE_OK ) goto stage_all_done;
     }
     aKeepStaged[k] = ignored;
     if( ignored ) useWorkingHash = 0;

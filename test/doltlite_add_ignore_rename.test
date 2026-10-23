@@ -111,4 +111,35 @@ foreach stage {dot all commit} {
   }
 }
 
+foreach stage {dot all commit force} {
+  reset_db
+  execsql {
+    CREATE TABLE ab(id INT PRIMARY KEY);
+    INSERT INTO ab VALUES(1);
+    SELECT dolt_commit('-Am','base');
+    INSERT INTO dolt_ignore VALUES('a*',1),('*b',0);
+    ALTER TABLE ab RENAME TO kept;
+  }
+  switch $stage {
+    dot {set sql {SELECT dolt_add('.')}}
+    all {set sql {SELECT dolt_add('-A')}}
+    commit {set sql {SELECT dolt_commit('-Am','rename')}}
+    force {set sql {SELECT dolt_add('-A','-f')}}
+  }
+  if {$stage eq "force"} {
+    do_execsql_test add-ignore-rename-source-conflict-force $sql {0}
+    do_execsql_test add-ignore-rename-source-conflict-force-staged {
+      SELECT * FROM dolt_at_kept('STAGED');
+    } {1}
+  } else {
+    do_test add-ignore-rename-source-conflict-$stage {
+      set rc [catch {execsql $sql} msg]
+      list $rc [string match {*conflicting patterns*dolt_ignore*} $msg]
+    } {1 1}
+    do_execsql_test add-ignore-rename-source-conflict-$stage-unchanged {
+      SELECT * FROM dolt_at_ab('STAGED');
+    } {1}
+  }
+}
+
 finish_test
