@@ -3728,4 +3728,31 @@ EOF
   done
 done
 
+# Both branches add the same column with a different DEFAULT and no row
+# edits: a schema conflict, as in Dolt, not a silent pick of ours.
+for pk in "INTEGER PRIMARY KEY" "INT PRIMARY KEY"; do
+  DB=/tmp/test_dual_add_default_$$.db; rm -f "$DB"
+  cat <<EOF | $DOLTLITE "$DB" > /dev/null 2>&1
+CREATE TABLE t(id $pk, a INT);
+INSERT INTO t VALUES (1,1),(2,2);
+SELECT dolt_commit('-Am','base');
+SELECT dolt_branch('feat');
+ALTER TABLE t ADD COLUMN w INT DEFAULT 8;
+SELECT dolt_commit('-Am','ours');
+SELECT dolt_checkout('feat');
+ALTER TABLE t ADD COLUMN w INT DEFAULT 1;
+SELECT dolt_commit('-Am','theirs');
+SELECT dolt_checkout('main');
+EOF
+  run_test_error_lastline "dual_add_default_only_schema_conflict_${pk%% *}" \
+    "$(sc "SELECT table_name || '|' || description FROM dolt_schema_conflicts;")" \
+    "t|both branches add column 'w' with different definitions" "$DB" \
+    'Merge has [1-9][0-9]* conflict\(s\)'
+  run_test_error_match "dual_add_default_only_autocommit_refused_${pk%% *}" \
+    "SELECT dolt_merge('feat');" "conflicts detected" "$DB"
+  run_test "dual_add_default_only_head_unchanged_${pk%% *}" \
+    "SELECT message FROM dolt_log LIMIT 1;" "ours" "$DB"
+  rm -f "$DB"
+done
+
 dltest_finish
