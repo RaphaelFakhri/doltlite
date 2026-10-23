@@ -1,0 +1,115 @@
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+
+foreach switch {dolt_checkout dolt_connect_branch} {
+  foreach key {INTEGER INT} {
+    reset_db
+    execsql {
+      PRAGMA foreign_keys=ON;
+      CREATE TABLE p(id INTEGER PRIMARY KEY);
+      INSERT INTO p VALUES(1),(2);
+      SELECT dolt_commit('-Am','base');
+      SELECT dolt_checkout('-b','b');
+    }
+    execsql "CREATE TABLE c(id $key PRIMARY KEY, pid INT REFERENCES p(id))"
+    execsql {
+      INSERT INTO c VALUES(1,1);
+      SELECT dolt_commit('-Am','child');
+      SELECT dolt_checkout('-b','side');
+      INSERT INTO c VALUES(2,2);
+      SELECT dolt_commit('-Am','side');
+      SELECT dolt_checkout('b');
+      DELETE FROM p WHERE id=2;
+      SELECT dolt_commit('-Am','delete parent');
+      SELECT dolt_checkout('main');
+    }
+    db close
+    sqlite3 db test.db
+    set name checkout-system-tables-$switch-$key
+    do_execsql_test $name-start {
+      SELECT count(*) FROM dolt_constraint_violations_p;
+      SELECT count(*) FROM sqlite_schema WHERE name='c';
+    } {0 0}
+    execsql "SELECT ${switch}('b')"
+    do_execsql_test $name-before-merge {
+      SELECT count(*) FROM dolt_constraint_violations_c;
+      SELECT id,message FROM dolt_blame_c;
+    } {0 1 child}
+    execsql BEGIN
+    do_test $name-merge {
+      set result [catchsql {SELECT dolt_merge('side')}]
+      list [lindex $result 0] \
+           [string match {*constraint violations*} [lindex $result 1]]
+    } {1 1}
+    do_execsql_test $name-summary {
+      SELECT "table",num_violations FROM dolt_constraint_violations;
+    } {c 1}
+    do_execsql_test $name-detail {
+      SELECT violation_type,id,pid FROM dolt_constraint_violations_c;
+    } {{foreign key} 2 2}
+    do_execsql_test $name-repair {
+      INSERT INTO p VALUES(2);
+      SELECT dolt_verify_constraints('--all');
+      DELETE FROM dolt_constraint_violations_c;
+      SELECT count(*) FROM dolt_constraint_violations_c;
+      SELECT length(dolt_commit('-Am','resolved'));
+      COMMIT;
+      SELECT count(*) FROM dolt_constraint_violations_c;
+      PRAGMA integrity_check;
+    } {0 0 40 0 ok}
+    foreach phase {first repeated reopen} {
+      if {$phase eq "reopen"} {db close; sqlite3 db test.db}
+      execsql "SELECT ${switch}('main')"
+      do_catchsql_test $name-$phase-missing-blame {
+        SELECT * FROM dolt_blame_c;
+      } {1 {no such table: dolt_blame_c}}
+      do_catchsql_test $name-$phase-missing-violations {
+        SELECT * FROM dolt_constraint_violations_c;
+      } {1 {no such table: dolt_constraint_violations_c}}
+      execsql "SELECT ${switch}('b')"
+      do_execsql_test $name-$phase-back {
+        SELECT count(*) FROM dolt_constraint_violations_c;
+        SELECT id,message FROM dolt_blame_c ORDER BY id;
+      } {0 1 child 2 resolved}
+    }
+  }
+}
+
+reset_db
+execsql {
+  CREATE TABLE t(id INT PRIMARY KEY,v INT);
+  INSERT INTO t VALUES(1,10);
+  SELECT dolt_commit('-Am','base');
+  SELECT dolt_checkout('-b','alternate');
+  ALTER TABLE t RENAME COLUMN id TO code;
+  ALTER TABLE t ADD COLUMN label TEXT;
+  SELECT dolt_commit('-Am','alternate');
+}
+foreach phase {first repeated reopen} {
+  if {$phase eq "reopen"} {db close; sqlite3 db test.db}
+  foreach branch {main alternate} {
+    execsql "SELECT dolt_checkout('$branch')"
+    set key [expr {$branch eq "main" ? "id" : "code"}]
+    set cols "violation_type $key v"
+    if {$branch eq "alternate"} {lappend cols label}
+    lappend cols violation_info
+    do_execsql_test checkout-system-tables-$phase-$branch-columns {
+      SELECT name FROM pragma_table_info('dolt_constraint_violations_t');
+    } $cols
+    do_execsql_test checkout-system-tables-$phase-$branch-rows "
+      SELECT $key FROM dolt_blame_t;
+      SELECT count(*) FROM dolt_constraint_violations_t;
+    " {1 0}
+  }
+}
+
+reset_db
+execsql {
+  CREATE TABLE t(id INT);
+  SELECT dolt_commit('-Am','keyless');
+}
+do_catchsql_test checkout-system-tables-keyless-blame {
+  SELECT * FROM dolt_blame_t;
+} {1 {dolt_blame_t: table has no primary key}}
+
+finish_test
