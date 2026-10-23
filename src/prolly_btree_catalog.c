@@ -171,6 +171,22 @@ void invalidateCursors(BtShared *pBt, Pgno iTable, int errCode){
   }
 }
 
+/* A successful catalog swap finishes the scan that invoked it.
+** CURSOR_FAULT would abort that statement after the swap has applied. */
+void invalidateCursorsFinished(BtShared *pBt){
+  BtCursor *p;
+  assert( pBt!=0 );
+  for(p=pBt->pCursor; p; p=p->pNext){
+    p->eState = CURSOR_INVALID;
+    p->skipNext = 0;
+    p->mmActive = 0;
+    p->mmPhysActive = 0;
+    p->mmIdx = -1;
+    p->mmPhysIdx = -1;
+    prollyCursorReleaseAll(&p->pCur);
+  }
+}
+
 static void faultIncrblobCursor(BtCursor *p){
   p->eState = CURSOR_FAULT;
   p->skipNext = SQLITE_ABORT;
@@ -2587,7 +2603,11 @@ int doltliteGetHeadCatalogHash(sqlite3 *db, ProllyHash *pCatHash){
     rc = chunkStoreEnsureRefsFresh(cs);
     if( rc!=SQLITE_OK ) return rc;
     if( chunkStoreFindBranch(cs, p->zBranch ? p->zBranch : "main", 0)
-        ==SQLITE_NOTFOUND ) return SQLITE_BUSY;
+        ==SQLITE_NOTFOUND ){
+      sqlite3_free(chunkStoreSourceTakeError(cs, 0));
+      doltliteBtreeNoteMissingWriteBranch(p);
+      return SQLITE_BUSY;
+    }
     return SQLITE_NOTFOUND;
   }
   if( rc!=SQLITE_OK ) return rc;
@@ -2749,7 +2769,7 @@ static int hardReset(sqlite3 *db, const ProllyHash *catHash, int persist){
   oldMergeCommitHash = pBtree->vc.mergeCommitHash;
   oldConflictsCatalogHash = pBtree->vc.conflictsCatalogHash;
 
-  invalidateCursors(pBt, 0, SQLITE_ABORT);
+  invalidateCursorsFinished(pBt);
 
   rc = deserializeCatalog(pBtree, data, nData);
   sqlite3_free(data);

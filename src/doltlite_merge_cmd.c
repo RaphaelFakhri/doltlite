@@ -1025,7 +1025,9 @@ static int mergeFastForward(
   }
   if( rc!=SQLITE_OK ){
     doltliteCommitClear(&theirCommit);
-    if( rc==SQLITE_BUSY ) doltliteCmdResultPeerBranchBusy(context, "merge");
+    if( rc==SQLITE_BUSY ){
+      doltliteCmdResultBranchBusyOrGone(context, db, "merge");
+    }
     sqlite3_result_error_code(context,
         doltliteRestoreTxnStateOnFailure(db, &savedState, rc));
     if( zErr ) sqlite3_result_error(context, zErr, -1);
@@ -1510,7 +1512,7 @@ static int mergeRefLeaveUncommitted(
 
   rc = doltliteRefreshAndConfirmHead(db, cs, pOurHead);
   if( rc==SQLITE_BUSY ){
-    doltliteCmdResultPeerBranchBusy(context, "merge");
+    doltliteCmdResultBranchBusyOrGone(context, db, "merge");
     doltliteRestoreTxnStateOnFailure(db, pSaved, rc);
     return SQLITE_ERROR;
   }
@@ -1547,7 +1549,7 @@ static int mergeRefAbortAfterWriteTxn(
   if( zMsg ){
     doltliteVcResultErrorCode(context, db, zMsg, rc);
   }else{
-    sqlite3_result_error_code(context, rc);
+    doltliteCmdResultWriteTxnError(context, db, rc);
   }
   return SQLITE_ERROR;
 }
@@ -1880,7 +1882,7 @@ merge_fail:
     }
   }
   if( bPeerBusy ){
-    doltliteCmdResultPeerBranchBusy(context, "merge");
+    doltliteCmdResultBranchBusyOrGone(context, db, "merge");
   }else if( zOwnedErr ){
     doltliteVcResultErrorCode(context, db, zOwnedErr, rc);
   }else if( zFail ){

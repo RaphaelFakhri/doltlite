@@ -5548,6 +5548,8 @@ void doltliteNestedTxnDrop(sqlite3*);
 void doltliteFinishOwnSchemaReload(sqlite3*);
 int sqlite3BtreeIsDeferred(Btree*);
 const char *doltliteBtreeMissingWriteBranch(Btree*);
+void doltliteBtreeNoteMissingWriteBranch(Btree*);
+void doltliteBtreeClearMissingWriteBranch(Btree*);
 int doltliteBtreeRunDeferredWork(sqlite3*);
 void doltliteBtreeRegistrationDone(sqlite3*);
 Module *doltliteHistoricalModuleRegister(sqlite3*,const char*);

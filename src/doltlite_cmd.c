@@ -953,6 +953,31 @@ void doltliteCmdResultWriteTxnError(sqlite3_context *ctx, sqlite3 *db, int rc){
   sqlite3_result_error_code(ctx, rc);
 }
 
+void doltliteCmdResultBranchBusyOrGone(
+  sqlite3_context *ctx, sqlite3 *db, const char *zOp
+){
+  ChunkStore *cs;
+  const char *zCurrent;
+  int gone = 0;
+  if( db && db->nDb>0
+   && doltliteBtreeMissingWriteBranch(db->aDb[0].pBt) ){
+    gone = 1;
+  }
+  if( !gone && db && !doltliteIsDetached(db) ){
+    cs = doltliteGetChunkStore(db);
+    zCurrent = doltliteGetSessionBranch(db);
+    if( cs && cs->refs.nBranches>0
+     && chunkStoreFindBranch(cs, zCurrent, 0)==SQLITE_NOTFOUND ){
+      gone = 1;
+    }
+  }
+  if( gone ){
+    doltliteCmdResultWriteTxnError(ctx, db, SQLITE_BUSY);
+  }else{
+    doltliteCmdResultPeerBranchBusy(ctx, zOp);
+  }
+}
+
 void doltliteCmdResultPeerBranchBusy(sqlite3_context *ctx, const char *zOp){
   char *zErr = sqlite3_mprintf(
     "%s conflict: another connection committed to this branch. "

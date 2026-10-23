@@ -1366,6 +1366,9 @@ int doltliteCmdParseAuthor(
 );
 void doltliteCmdResultPeerBranchBusy(sqlite3_context *ctx, const char *zOp);
 void doltliteCmdResultWriteTxnError(sqlite3_context *ctx, sqlite3 *db, int rc);
+void doltliteCmdResultBranchBusyOrGone(
+  sqlite3_context *ctx, sqlite3 *db, const char *zOp
+);
 int doltliteCmdSourceResultError(
   sqlite3_context *ctx, ChunkStore *cs, int *pRc
 );

@@ -8066,6 +8066,158 @@ static void run_vc_persist_does_not_resurrect_deleted_branch(void){
   }
 }
 
+static int execErrorHas(sqlite3 *db, const char *sql,
+                         const char *zNeed, const char *zForbid){
+  char *zErr = 0;
+  int rc = sqlite3_exec(db, sql, 0, 0, &zErr);
+  int ok = rc!=SQLITE_OK && zErr && strstr(zErr, zNeed)
+        && (zForbid==0 || strstr(zErr, zForbid)==0);
+  if( !ok ){
+    fprintf(stderr, "  execErrorHas rc=%d err=%s\n  SQL: %s\n",
+            rc, zErr ? zErr : "(null)", sql);
+  }
+  sqlite3_free(zErr);
+  return ok;
+}
+
+/* A peer-deleted branch must not be described as a lazy clone, a lock, or
+** a commit to retry. A hard reset invoked from a table scan must finish. */
+static void run_deleted_branch_messages_and_reset_scan(void){
+  sqlite3 *dbA = 0;
+  sqlite3 *dbB = 0;
+  char *zErr = 0;
+  char dbpath[256];
+  int rc;
+
+  printf("=== Deleted Branch Messages And Reset Scan Test ===\n\n");
+  make_dbpath(dbpath, sizeof(dbpath), "test_deleted_branch_messages");
+  removeDbFiles(dbpath);
+
+  check("dbm_open_A", open_db(dbpath, &dbA)==SQLITE_OK);
+  check("dbm_seed", execSql(dbA,
+    "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);"
+    "INSERT INTO t VALUES(1,'one');"
+    "SELECT dolt_commit('-A','-m','base');")==SQLITE_OK);
+  check("dbm_reset_scan",
+        execSql(dbA, "INSERT INTO t VALUES(2,'dirty');"
+                     "SELECT dolt_reset('--hard') FROM t;")==SQLITE_OK);
+  check("dbm_reset_scan_restored",
+        strcmp(queryScalarText(dbA, "SELECT count(*) FROM t"), "1")==0);
+  check("dbm_reset_scan_in_txn", execSql(dbA,
+    "BEGIN;"
+    "INSERT INTO t VALUES(2,'dirty');"
+    "SELECT id, dolt_reset('--hard') FROM t;"
+    "COMMIT;")==SQLITE_OK);
+  check("dbm_reset_scan_in_txn_restored",
+        strcmp(queryScalarText(dbA, "SELECT count(*) FROM t"), "1")==0);
+
+  check("dbm_feat", execSql(dbA,
+    "SELECT dolt_branch('feat');"
+    "SELECT dolt_checkout('feat');"
+    "INSERT INTO t VALUES(2,'feat');"
+    "SELECT dolt_commit('-A','-m','feat work');"
+    "SELECT dolt_remote('add','origin','file:///nonexistent/origin.db');"
+    "BEGIN;"
+    "SELECT count(*) FROM t;")==SQLITE_OK);
+  check("dbm_open_B", open_db(dbpath, &dbB)==SQLITE_OK);
+  check("dbm_peer_delete", execSql(dbB,
+    "SELECT dolt_branch('-D','feat');"
+    "SELECT dolt_gc();")==SQLITE_OK);
+  check("dbm_commit_gone", execErrorHas(dbA,
+    "SELECT dolt_commit('-A','-m','more');",
+    "branch 'feat' no longer exists", "lazy_origin"));
+  check("dbm_amend_gone", execErrorHas(dbA,
+    "SELECT dolt_commit('--amend','-m','amended');",
+    "branch 'feat' no longer exists", "lazy_origin"));
+  check("dbm_merge_gone", execErrorHas(dbA,
+    "SELECT dolt_merge('main');",
+    "branch 'feat' no longer exists", "lazy_origin"));
+  check("dbm_status_gone", execErrorHas(dbA,
+    "SELECT count(*) FROM dolt_status;",
+    "branch 'feat' no longer exists", "lazy_origin"));
+  check("dbm_log_gone", execErrorHas(dbA,
+    "SELECT count(*) FROM dolt_log;",
+    "branch 'feat' no longer exists", "lazy_origin"));
+  sqlite3_close(dbA);
+  sqlite3_close(dbB);
+  dbA = dbB = 0;
+  removeDbFiles(dbpath);
+
+  check("dbm_auto_open", open_db(dbpath, &dbA)==SQLITE_OK);
+  check("dbm_auto_seed", execSql(dbA,
+    "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);"
+    "INSERT INTO t VALUES(1,'one');"
+    "SELECT dolt_commit('-A','-m','base');"
+    "SELECT dolt_branch('feat');"
+    "SELECT dolt_checkout('feat');"
+    "INSERT INTO t VALUES(2,'dirty');"
+    "SELECT dolt_remote('add','origin','file:///nonexistent/origin.db');")==SQLITE_OK);
+  check("dbm_auto_open_B", open_db(dbpath, &dbB)==SQLITE_OK);
+  check("dbm_auto_delete", execSql(dbB,
+    "SELECT dolt_branch('-D','feat');"
+    "SELECT dolt_gc();")==SQLITE_OK);
+  check("dbm_auto_merge_gone", execErrorHas(dbA,
+    "SELECT dolt_merge('main');",
+    "branch 'feat' no longer exists", "database is locked"));
+  check("dbm_auto_add_gone", execErrorHas(dbA,
+    "SELECT dolt_add('-A');",
+    "branch 'feat' no longer exists", "database is locked"));
+  sqlite3_close(dbA);
+  sqlite3_close(dbB);
+  dbA = dbB = 0;
+  removeDbFiles(dbpath);
+
+  check("dbm_peer_open", open_db(dbpath, &dbA)==SQLITE_OK);
+  check("dbm_peer_seed", execSql(dbA,
+    "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);"
+    "INSERT INTO t VALUES(1,'one');"
+    "SELECT dolt_commit('-A','-m','base');"
+    "BEGIN;"
+    "SELECT count(*) FROM t;")==SQLITE_OK);
+  check("dbm_peer_open_B", open_db(dbpath, &dbB)==SQLITE_OK);
+  check("dbm_peer_commit", execSql(dbB,
+    "INSERT INTO t VALUES(2,'two');"
+    "SELECT dolt_commit('-A','-m','peer');")==SQLITE_OK);
+  check("dbm_peer_retry", execErrorHas(dbA,
+    "SELECT dolt_commit('-A','-m','local');",
+    "Please retry your transaction.", "no longer exists"));
+  check("dbm_missing_source", execErrorHas(dbB,
+    "SELECT dolt_merge('nosuch');",
+    "merge source not found", "no longer exists"));
+  sqlite3_close(dbA);
+  sqlite3_close(dbB);
+  dbA = dbB = 0;
+  removeDbFiles(dbpath);
+
+  check("dbm_rebase_open", open_db(dbpath, &dbA)==SQLITE_OK);
+  check("dbm_rebase_seed", execSql(dbA,
+    "CREATE TABLE t(id INTEGER PRIMARY KEY, v INT);"
+    "INSERT INTO t VALUES(1,1);"
+    "SELECT dolt_commit('-A','-m','base');"
+    "SELECT dolt_branch('other');"
+    "SELECT dolt_checkout('other');"
+    "UPDATE t SET v=7;"
+    "SELECT dolt_commit('-a','-m','other');"
+    "SELECT dolt_checkout('main');"
+    "UPDATE t SET v=5;"
+    "SELECT dolt_commit('-a','-m','main');"
+    "BEGIN;")==SQLITE_OK);
+  rc = sqlite3_exec(dbA, "SELECT dolt_merge('other');", 0, 0, &zErr);
+  check("dbm_rebase_conflicted", rc!=SQLITE_OK);
+  sqlite3_free(zErr);
+  zErr = 0;
+  check("dbm_rebase_interactive", execErrorHas(dbA,
+    "SELECT dolt_rebase('-i','other');",
+    "unable to start rebase while a merge is in progress",
+    "rebase working branch already exists"));
+  check("dbm_rebase_linear", execErrorHas(dbA,
+    "SELECT dolt_rebase('other');",
+    "unable to start rebase while a merge is in progress",
+    "rebase working branch already exists"));
+  sqlite3_close(dbA);
+  removeDbFiles(dbpath);
+}
+
 static void run_peer_commit_keeps_local_row_durable(void){
   sqlite3 *dbA = 0;
   sqlite3 *dbB = 0;
@@ -18664,6 +18816,7 @@ static const RegressionCase aCases[] = {
   { "prepared_stmt_reuse_after_schema_checkout", "Prepared Statement Reuse After Schema Checkout Test", run_prepared_stmt_reuse_after_schema_checkout },
   { "persist_does_not_resurrect_deleted_branch", "Persist Does Not Resurrect Deleted Branch Test", run_persist_does_not_resurrect_deleted_branch },
   { "vc_persist_does_not_resurrect_deleted_branch", "VC Persist Does Not Resurrect Deleted Branch Test", run_vc_persist_does_not_resurrect_deleted_branch },
+  { "deleted_branch_messages_and_reset_scan", "Deleted Branch Messages And Reset Scan Test", run_deleted_branch_messages_and_reset_scan },
   { "peer_commit_keeps_local_row_durable", "Peer Commit Keeps Local Row Durable Test", run_peer_commit_keeps_local_row_durable },
   { "commit_recovers_after_peer_commit", "Commit Recovers After Peer Commit Test", run_commit_recovers_after_peer_commit },
   { "working_set_refreshes_staged_across_connections", "Working Set Refreshes Staged Across Connections Test", run_working_set_refreshes_staged_across_connections },

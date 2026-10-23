@@ -877,6 +877,14 @@ const char *doltliteBtreeMissingWriteBranch(Btree *p){
   return p->zBranch ? p->zBranch : "main";
 }
 
+void doltliteBtreeNoteMissingWriteBranch(Btree *p){
+  if( p ) p->bBeginTransBranchMissing = 1;
+}
+
+void doltliteBtreeClearMissingWriteBranch(Btree *p){
+  if( p ) p->bBeginTransBranchMissing = 0;
+}
+
 int sqlite3BtreeBeginTrans(Btree *p, int wrFlag, int *pSchemaVersion){
   if( wrFlag && p && p->db && p->db->nDb>0 && p->db->aDb[0].pBt
    && p->db->aDb[0].pBt->isDetached ){

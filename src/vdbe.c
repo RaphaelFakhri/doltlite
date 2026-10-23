@@ -10321,11 +10321,19 @@ abort_due_to_error:
     int chunkSourceRc = SQLITE_OK;
     char *zChunkSourceErr = doltliteTakeChunkSourceError(
         db, &chunkSourceRc);
-    if( zChunkSourceErr ){
+    const char *zMissing = 0;
+    if( db->nDb>0 ){
+      zMissing = doltliteBtreeMissingWriteBranch(db->aDb[0].pBt);
+    }
+    if( zMissing ){
+      sqlite3_free(zChunkSourceErr);
+      sqlite3VdbeError(p, "cannot write: branch '%s' no longer exists",
+                       zMissing);
+    }else if( zChunkSourceErr ){
       sqlite3VdbeError(p, "%s", zChunkSourceErr);
       sqlite3_free(zChunkSourceErr);
     }
-    if( chunkSourceRc!=SQLITE_OK && !db->mallocFailed ){
+    if( chunkSourceRc!=SQLITE_OK && !db->mallocFailed && !zMissing ){
       rc = chunkSourceRc;
     }
   }
