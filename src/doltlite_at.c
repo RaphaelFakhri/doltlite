@@ -1080,12 +1080,16 @@ int doltliteHistoricalModuleStale(sqlite3 *db, Module *pMod){
   char *zErr = 0;
   const char *zName;
   int i, differ, rc;
+  int bLive = 0;
 
   if( !db || !pMod || !pMod->pEpoTab || db->bDoltliteHistoricalCheck ) return 0;
   zName = pMod->zName;
   if( !zName ) return 0;
   if( sqlite3_strnicmp(zName, "dolt_at_", 8)==0 ){
     if( zName[8]==0 ) return 0;
+  }else if( sqlite3_strnicmp(zName, "dolt_workspace_", 15)==0 ){
+    if( zName[15]==0 ) return 0;
+    bLive = 1;
   }else if( sqlite3_strnicmp(zName, "dolt_history_", 13)==0 ){
     if( zName[13]==0 ) return 0;
   }else if( sqlite3_strnicmp(zName, "dolt_diff_", 10)==0 ){
@@ -1106,8 +1110,12 @@ int doltliteHistoricalModuleStale(sqlite3 *db, Module *pMod){
   memset(&want, 0, sizeof(want));
   want.iPkCol = -1;
   db->bDoltliteHistoricalCheck = 1;
-  rc = doltliteLoadHistoricalTableColumns(
-      db, zName, v->zTableName, &want, &zErr);
+  if( bLive ){
+    rc = doltliteLoadUserTableColumns(db, v->zTableName, &want, &zErr);
+  }else{
+    rc = doltliteLoadHistoricalTableColumns(
+        db, zName, v->zTableName, &want, &zErr);
+  }
   db->bDoltliteHistoricalCheck = 0;
   sqlite3_free(zErr);
   /* A snapshot that never contained the table leaves the cached

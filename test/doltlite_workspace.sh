@@ -511,4 +511,18 @@ run_test "workspace_pkonly_index_undo_integrity" \
   "PRAGMA integrity_check;" "ok" "$IX_DB"
 rm -f "$IX_DB"
 
+STALE_DB=/tmp/test_workspace_stale_cols_$$.db; rm -f "$STALE_DB"
+echo "CREATE TABLE t(id INT PRIMARY KEY, v INT); INSERT INTO t VALUES(1,1); SELECT dolt_commit('-Am','c');" | $DOLTLITE "$STALE_DB" > /dev/null 2>&1
+run_test "workspace_columns_follow_add_column" \
+  "SELECT count(*) FROM dolt_workspace_t; ALTER TABLE t ADD COLUMN w INT DEFAULT 5; UPDATE t SET w=9; SELECT to_w FROM dolt_workspace_t;" \
+  "0
+9" "$STALE_DB"
+rm -f "$STALE_DB"
+echo "CREATE TABLE t(id INT PRIMARY KEY, v INT); INSERT INTO t VALUES(1,1); SELECT dolt_commit('-Am','c'); UPDATE t SET v=7;" | $DOLTLITE "$STALE_DB" > /dev/null 2>&1
+run_test "workspace_columns_follow_rolled_back_drop" \
+  "BEGIN; ALTER TABLE t DROP COLUMN v; SELECT count(*) FROM dolt_workspace_t; ROLLBACK; SELECT to_v FROM dolt_workspace_t;" \
+  "1
+7" "$STALE_DB"
+rm -f "$STALE_DB"
+
 dltest_finish
