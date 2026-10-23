@@ -3249,6 +3249,59 @@ static void checkActiveVdbeCnt(sqlite3 *db){
 #else
 #define checkActiveVdbeCnt(x)
 #endif
+#if defined(DOLTLITE_PROLLY) && !defined(SQLITE_OMIT_VIRTUALTABLE)
+/*
+** True when this program deletes through a virtual table. P2==1 is the
+** delete form of OP_VUpdate: one argv entry, the rowid to remove.
+*/
+static int vdbeProgramDeletesVtab(Vdbe *p){
+  VdbeOp *pOp;
+  int i;
+
+  if( p->aOp==0 ) return 0;
+  for(i=0; i<p->nOp; i++){
+    pOp = &p->aOp[i];
+    if( pOp->opcode==OP_VUpdate && pOp->p2==1 ) return 1;
+  }
+  return 0;
+}
+
+/*
+** Flush pending fts5 terms before a statement savepoint is released.
+** The next statement's xSavepoint would otherwise be the first flush.
+** If that flush runs out of memory, fts5 drops the hash and the index
+** no longer matches rows this statement already wrote.
+**
+** Only a delete is flushed, and only when no user savepoint is open.
+** An insert stays in the hash so later rows in the transaction still
+** share one segment. A delete inside a user savepoint stays in the
+** hash so a later read sees the pre-delete shadow tables and
+** ROLLBACK TO can discard it. Only fts5 is flushed here.
+*/
+static int vdbeFlushFtsPending(Vdbe *p){
+  sqlite3 *db = p->db;
+  int rc = SQLITE_OK;
+  int i;
+
+  if( db->aVTrans==0 ) return SQLITE_OK;
+  for(i=0; rc==SQLITE_OK && i<db->nVTrans; i++){
+    VTable *pVTab;
+    const char *zName;
+    int (*xSync)(sqlite3_vtab*);
+
+    pVTab = db->aVTrans[i];
+    if( pVTab==0 || pVTab->pMod==0 || pVTab->pVtab==0 ) continue;
+    if( pVTab->pVtab->pModule==0 ) continue;
+    zName = pVTab->pMod->zName;
+    if( zName==0 || sqlite3_stricmp(zName, "fts5")!=0 ) continue;
+    xSync = pVTab->pVtab->pModule->xSync;
+    if( xSync==0 ) continue;
+    rc = xSync(pVTab->pVtab);
+    sqlite3VtabImportErrmsg(p, pVTab->pVtab);
+  }
+  return rc;
+}
+#endif
 
 /*
 ** If the Vdbe passed as the first argument opened a statement-transaction,
@@ -3265,11 +3318,28 @@ static SQLITE_NOINLINE int vdbeCloseStatement(Vdbe *p, int eOp){
   int rc = SQLITE_OK;
   int i;
   const int iSavepoint = p->iStatement-1;
+#if defined(DOLTLITE_PROLLY) && !defined(SQLITE_OMIT_VIRTUALTABLE)
+  int rcSync = SQLITE_OK;
+#endif
 
   assert( eOp==SAVEPOINT_ROLLBACK || eOp==SAVEPOINT_RELEASE);
   assert( db->nStatement>0 );
   assert( p->iStatement==(db->nStatement+db->nSavepoint) );
 
+#if defined(DOLTLITE_PROLLY) && !defined(SQLITE_OMIT_VIRTUALTABLE)
+  /* Publish an fts5 delete while this statement savepoint can still
+  ** absorb the flush. A failed flush rolls the statement back; the
+  ** caller rolls the whole transaction back because the hash cannot
+  ** be retried. Inserts, and deletes under a user savepoint, stay
+  ** pending until the next xSavepoint or commit. */
+  if( eOp==SAVEPOINT_RELEASE && p->hasVUpdate && db->nSavepoint==0
+   && vdbeProgramDeletesVtab(p) ){
+    rcSync = vdbeFlushFtsPending(p);
+    if( rcSync!=SQLITE_OK ){
+      eOp = SAVEPOINT_ROLLBACK;
+    }
+  }
+#endif
   for(i=0; i<db->nDb; i++){
     int rc2 = SQLITE_OK;
     Btree *pBt = db->aDb[i].pBt;
@@ -3304,6 +3374,9 @@ static SQLITE_NOINLINE int vdbeCloseStatement(Vdbe *p, int eOp){
     db->nDeferredCons = p->nStmtDefCons;
     db->nDeferredImmCons = p->nStmtDefImmCons;
   }
+#if defined(DOLTLITE_PROLLY) && !defined(SQLITE_OMIT_VIRTUALTABLE)
+  if( rc==SQLITE_OK ) rc = rcSync;
+#endif
   return rc;
 }
 int sqlite3VdbeCloseStatement(Vdbe *p, int eOp){
