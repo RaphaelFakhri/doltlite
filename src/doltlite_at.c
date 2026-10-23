@@ -1126,10 +1126,15 @@ int doltliteHistoricalModuleStale(sqlite3 *db, Module *pMod){
   sqlite3_free(zErr);
   /* A snapshot that never contained the table leaves the cached
   ** declaration in place. The cursor then reports the table absent
-  ** at that ref. Dropping it here makes the module disappear. */
+  ** at that ref. Dropping it here makes the module disappear. A table
+  ** found nowhere, as after the rollback that created it, is gone. */
   if( rc!=SQLITE_OK ){
+    int bGone = bLive
+        || (rc==SQLITE_NOTFOUND
+            && !(db->pDoltliteHistoricalArgs
+                 && db->pDoltliteHistoricalArgs->nExpr>0));
     doltliteFreeColInfo(&want);
-    return 0;
+    return bGone;
   }
   differ = want.nCol!=v->cols.nCol;
   for(i=0; !differ && i<want.nCol; i++){
