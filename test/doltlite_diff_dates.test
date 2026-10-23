@@ -1,0 +1,56 @@
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+
+foreach key {INTEGER INT} {
+  reset_db
+  execsql "CREATE TABLE t(id $key PRIMARY KEY,v INT)"
+  execsql {
+    INSERT INTO t VALUES(1,10),(2,20);
+    SELECT dolt_commit('-Am','epoch','--date','1970-01-01T00:00:00Z');
+    UPDATE t SET v=11 WHERE id=1;
+    DELETE FROM t WHERE id=2;
+    INSERT INTO t VALUES(3,30);
+    SELECT dolt_add('t');
+    UPDATE t SET v=12 WHERE id=1;
+    INSERT INTO t VALUES(4,40);
+  }
+  foreach phase {live reopen} {
+    if {$phase eq "reopen"} {db close; sqlite3 db test.db}
+    set name diff-dates-$key-$phase
+    do_execsql_test $name-history {
+      SELECT count(*),min(to_commit_date IS NULL),
+             min(from_commit_date='1970-01-01 00:00:00')
+        FROM dolt_diff_t WHERE to_commit='WORKING';
+      SELECT date IS NULL FROM dolt_diff
+        WHERE commit_hash='WORKING' AND table_name='t';
+      SELECT count(*) FROM dolt_diff_t
+        WHERE to_commit='WORKING' AND to_commit_date IS NOT NULL;
+    } {4 1 1 1 0}
+  }
+
+  execsql {
+    SELECT dolt_commit('-am','next','--date','2001-02-03T04:05:06Z');
+  }
+  do_execsql_test diff-dates-$key-committed {
+    SELECT count(*),min(from_commit_date='1970-01-01 00:00:00'),
+           min(to_commit_date='2001-02-03 04:05:06')
+      FROM dolt_diff_t WHERE to_commit=dolt_hashof('HEAD');
+    SELECT min(from_commit_date='2001-02-03 04:05:06'),
+           min(to_commit_date='1970-01-01 00:00:00')
+      FROM dolt_diff_t('HEAD','HEAD~1');
+  } {4 1 1 1 1}
+  execsql {UPDATE t SET v=13 WHERE id=1}
+  do_execsql_test diff-dates-$key-nonzero-parent {
+    SELECT to_commit_date IS NULL,from_commit_date
+      FROM dolt_diff_t WHERE to_commit='WORKING';
+  } {1 {2001-02-03 04:05:06}}
+  execsql {
+    SELECT dolt_commit('-am','epoch-again','--date','1970-01-01T00:00:00Z');
+  }
+  do_execsql_test diff-dates-$key-epoch-again {
+    SELECT to_commit_date,from_commit_date FROM dolt_diff_t
+      WHERE to_commit=dolt_hashof('HEAD');
+  } {{1970-01-01 00:00:00} {2001-02-03 04:05:06}}
+}
+
+finish_test

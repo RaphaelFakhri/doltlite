@@ -184,6 +184,48 @@ SELECT dolt_add('-A');
 INSERT INTO t VALUES (2, 2);
 " "SELECT CONCAT('R|', IFNULL(to_id,''), '|', IFNULL(to_v,''), '|', IFNULL(from_id,''), '|', IFNULL(from_v,''), '|', diff_type) FROM dolt_diff_t('STAGED', 'WORKING');"
 
+echo "--- audit commit dates ---"
+
+DATE_SETUP="
+CREATE TABLE t(id INT PRIMARY KEY,v INT);
+INSERT INTO t VALUES(1,10),(2,20);
+SELECT dolt_commit('-Am','epoch','--date','1970-01-01T00:00:00Z');
+UPDATE t SET v=11 WHERE id=1;
+DELETE FROM t WHERE id=2;
+INSERT INTO t VALUES(3,30);
+SELECT dolt_add('t');
+UPDATE t SET v=12 WHERE id=1;
+INSERT INTO t VALUES(4,40);
+"
+DATE_QUERY="SELECT CONCAT('R|',count(*),'|',
+count(CASE WHEN to_commit_date IS NULL THEN 1 END),'|',
+count(CASE WHEN from_commit_date IS NULL THEN 1 END),'|',
+count(CASE WHEN to_commit_date='1970-01-01 00:00:00' THEN 1 END),'|',
+count(CASE WHEN from_commit_date='1970-01-01 00:00:00' THEN 1 END),'|',
+count(CASE WHEN to_commit_date='2001-02-03 04:05:06' THEN 1 END),'|',
+count(CASE WHEN from_commit_date='2001-02-03 04:05:06' THEN 1 END))"
+
+oracle "history_working_dates" "$DATE_SETUP" \
+  "$DATE_QUERY FROM dolt_diff_t WHERE to_commit='WORKING';"
+oracle_reopen "history_working_dates_reopen" "$DATE_SETUP" \
+  "$DATE_QUERY FROM dolt_diff_t WHERE to_commit='WORKING';"
+oracle "committed_epoch_date" "$DATE_SETUP" \
+  "$DATE_QUERY FROM dolt_diff_t WHERE to_commit=dolt_hashof('HEAD');"
+
+DATE_COMMITTED="$DATE_SETUP
+SELECT dolt_commit('-am','next','--date','2001-02-03T04:05:06Z');"
+oracle "committed_nonzero_date" "$DATE_COMMITTED" \
+  "$DATE_QUERY FROM dolt_diff_t WHERE to_commit=dolt_hashof('HEAD');"
+oracle "committed_reverse_dates" "$DATE_COMMITTED" \
+  "$DATE_QUERY FROM dolt_diff_t('HEAD','HEAD~1');"
+oracle "working_nonzero_parent_date" "$DATE_COMMITTED
+UPDATE t SET v=13 WHERE id=1;" \
+  "$DATE_QUERY FROM dolt_diff_t WHERE to_commit='WORKING';"
+oracle "committed_epoch_after_nonzero_date" "$DATE_COMMITTED
+UPDATE t SET v=13 WHERE id=1;
+SELECT dolt_commit('-am','epoch-again','--date','1970-01-01T00:00:00Z');" \
+  "$DATE_QUERY FROM dolt_diff_t WHERE to_commit=dolt_hashof('HEAD');"
+
 echo "--- no diff (same ref both sides) ---"
 
 oracle "slice_no_change" "$SETUP_LINEAR" \

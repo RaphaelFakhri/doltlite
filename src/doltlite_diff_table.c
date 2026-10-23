@@ -109,6 +109,7 @@ struct DiffTblCursor {
   int nPairsAlloc;
   int iPair;
   int pairsDone;
+  int isHistory;
 
   int walkActive;
   CmTblInfo *aWalkStack;
@@ -979,6 +980,7 @@ static int dtFilter(sqlite3_vtab_cursor *cur,
   c->sourceError = 0;
   c->zFromFilter[0] = 0;
   c->zToFilter[0] = 0;
+  c->isHistory = (idxNum & (DT_IDX_SLICE|DT_IDX_RANGE_SPEC))==0;
 
   {
     ChunkStore *cs = doltliteGetChunkStore(db);
@@ -1069,7 +1071,11 @@ static int dtColumn(sqlite3_vtab_cursor *cur, sqlite3_context *ctx, int col){
 
     sqlite3_result_text(ctx, r->zToCommit, -1, SQLITE_TRANSIENT);
   }else if( nCols > 0 && col == nCols+1 ){
-    doltliteResultTimestamp(ctx, r->toDate);
+    if( c->isHistory && doltliteRefIsWorking(r->zToCommit) ){
+      sqlite3_result_null(ctx);
+    }else{
+      doltliteResultTimestamp(ctx, r->toDate);
+    }
   }else if( nCols > 0 && col < 2*nCols+2 ){
     int colIdx = col - nCols - 2;
     doltliteResultSideCol(ctx, &c->fromSide, &pVtab->cols,
