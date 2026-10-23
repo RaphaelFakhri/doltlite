@@ -367,6 +367,11 @@ oracle_with_query "detached_read_surfaces" \
   "v1" \
   "SELECT IFNULL(active_branch(),'NULL') AS value UNION ALL SELECT CAST(COUNT(*) AS CHAR) FROM dolt_status UNION ALL SELECT CAST(COUNT(*) AS CHAR) FROM dolt_log UNION ALL SELECT CAST(COUNT(*) AS CHAR) FROM dolt_tags;"
 
+oracle_with_query "detached_working_staged_are_head" \
+  "$TMPROOT/detached_working_staged_are_head/dl/db.sqlite/v1" \
+  "v1" \
+  "SELECT CAST(dolt_hashof_db('WORKING')=dolt_hashof_db('HEAD') AS CHAR) AS value UNION ALL SELECT CAST(dolt_hashof_db('STAGED')=dolt_hashof_db('HEAD') AS CHAR);"
+
 oracle_with_mutation "branch_wins_over_tag" \
   "SELECT dolt_branch('same'); SELECT dolt_tag('same','v1');" \
   "$TMPROOT/branch_wins_over_tag/dl/db.sqlite/same" \
