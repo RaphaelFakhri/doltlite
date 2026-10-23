@@ -170,3 +170,4 @@ doltlite_reset_collected_catalog
 doltlite_vc_deferred_snapshot
 doltlite_replay_schema_conflict
 doltlite_bind_length
+doltlite_rowid_full

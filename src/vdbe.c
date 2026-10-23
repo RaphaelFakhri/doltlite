@@ -6408,6 +6408,21 @@ case OP_NewRowid: {           /* out2 */
       REGISTER_TRACE(pOp->p3, pMem);
       sqlite3VdbeMemIntegerify(pMem);
       assert( (pMem->flags & MEM_Int)!=0 );  /* mem(P3) holds an integer */
+#ifdef DOLTLITE_PROLLY
+      if( pOp->p5 ){
+        /* The branch-shared counter does not rewind. Once it has reached
+        ** the maximum positive rowid, pick a free id instead of failing. */
+        if( pMem->u.i>=MAX_ROWID ){
+          pC->useRandomRowid = 1;
+        }else{
+          if( pC->useRandomRowid || v<pMem->u.i+1 ){
+            pC->useRandomRowid = 0;
+            v = pMem->u.i + 1;
+          }
+          pMem->u.i = v;
+        }
+      }else{
+#endif
       if( pMem->u.i==MAX_ROWID || pC->useRandomRowid ){
         rc = SQLITE_FULL;   /* IMP: R-17817-00630 */
         goto abort_due_to_error;
@@ -6416,6 +6431,9 @@ case OP_NewRowid: {           /* out2 */
         v = pMem->u.i + 1;
       }
       pMem->u.i = v;
+#ifdef DOLTLITE_PROLLY
+      }
+#endif
     }
 #endif
     if( pC->useRandomRowid ){
@@ -6423,8 +6441,12 @@ case OP_NewRowid: {           /* out2 */
       ** largest possible integer (9223372036854775807) then the database
       ** engine starts picking positive candidate ROWIDs at random until
       ** it finds one that is not previously used. */
+#ifdef DOLTLITE_PROLLY
+      assert( pOp->p3==0 || pOp->p5 );
+#else
       assert( pOp->p3==0 );  /* We cannot be in random rowid mode if this is
                              ** an AUTOINCREMENT table. */
+#endif
       cnt = 0;
       do{
         sqlite3_randomness(sizeof(v), &v);

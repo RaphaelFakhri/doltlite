@@ -421,6 +421,18 @@ static int rowidTableUsesSharedSeq(Parse *pParse, int iDb, Table *pTab){
       && sqlite3StrNICmp(pTab->zName, "sqlite_", 7)!=0
       && (db->mDbFlags & DBFLAG_Vacuum)==0;
 }
+/* P5 on OP_NewRowid: P3 is this counter, not AUTOINCREMENT. */
+static void markSharedSeqNewRowid(Parse *pParse, Table *pTab){
+  AutoincInfo *p;
+  Parse *pTop = sqlite3ParseToplevel(pParse);
+  if( pTop->usesAinc==0 ) return;
+  for(p=pTop->pAinc; p; p=p->pNext){
+    if( p->pTab==pTab && p->bSeqOnly ){
+      sqlite3VdbeChangeP5(pParse->pVdbe, 1);
+      return;
+    }
+  }
+}
 #endif
 static int autoIncBegin(
   Parse *pParse,      /* Parsing context */
@@ -1600,6 +1612,9 @@ void sqlite3Insert(
         Expr *pIpk = pList->a[ipkColumn].pExpr;
         if( pIpk->op==TK_NULL && !IsVirtual(pTab) ){
           sqlite3VdbeAddOp3(v, OP_NewRowid, iDataCur, regRowid, regAutoinc);
+#ifdef DOLTLITE_PROLLY
+          markSharedSeqNewRowid(pParse, pTab);
+#endif
           appendFlag = 1;
         }else{
           sqlite3ExprCode(pParse, pList->a[ipkColumn].pExpr, regRowid);
@@ -1613,6 +1628,9 @@ void sqlite3Insert(
         if( !IsVirtual(pTab) ){
           addr1 = sqlite3VdbeAddOp1(v, OP_NotNull, regRowid); VdbeCoverage(v);
           sqlite3VdbeAddOp3(v, OP_NewRowid, iDataCur, regRowid, regAutoinc);
+#ifdef DOLTLITE_PROLLY
+          markSharedSeqNewRowid(pParse, pTab);
+#endif
           sqlite3VdbeJumpHere(v, addr1);
         }else{
           addr1 = sqlite3VdbeCurrentAddr(v);
@@ -1624,6 +1642,9 @@ void sqlite3Insert(
       sqlite3VdbeAddOp2(v, OP_Null, 0, regRowid);
     }else{
       sqlite3VdbeAddOp3(v, OP_NewRowid, iDataCur, regRowid, regAutoinc);
+#ifdef DOLTLITE_PROLLY
+      markSharedSeqNewRowid(pParse, pTab);
+#endif
       appendFlag = 1;
     }
     autoIncStep(pParse, regAutoinc, regRowid);
