@@ -1,0 +1,125 @@
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+
+foreach key {INTEGER INT} {
+  foreach action {fixup squash} {
+    foreach changes {clean amend staged} {
+      foreach reopen {0 1} {
+        reset_db
+        execsql "CREATE TABLE t(id $key PRIMARY KEY,a INT)"
+        execsql {
+          INSERT INTO t VALUES(1,1),(2,2);
+          SELECT dolt_commit('-Am','base');
+          SELECT dolt_checkout('-b','f');
+          INSERT INTO t VALUES(3,3);
+          SELECT dolt_commit('-am','f1');
+          UPDATE t SET a=30 WHERE id=3;
+          SELECT dolt_commit('-am','f2');
+          INSERT INTO t VALUES(4,4);
+          SELECT dolt_commit('-am','f3');
+        }
+        if {$changes eq "staged"} {
+          execsql {
+            INSERT INTO t VALUES(5,5);
+            SELECT dolt_commit('-am','dropped');
+          }
+        }
+        set original [execsql {SELECT id,a FROM t ORDER BY id}]
+        execsql {
+          SELECT dolt_rebase('-i','main');
+          UPDATE dolt_rebase SET rebase_order=0.5 WHERE commit_message='f3';
+          UPDATE dolt_rebase SET action='edit' WHERE commit_message='f1';
+          UPDATE dolt_rebase SET action=$action WHERE commit_message='f2';
+        }
+        if {$changes eq "staged"} {
+          execsql {
+            UPDATE dolt_rebase SET action='drop',rebase_order=1.5
+              WHERE commit_message='dropped';
+          }
+        }
+        set prefix rebase-edit-fold-$key-$action-$changes-$reopen
+        do_test $prefix.pause {
+          string match {*edit action paused*} [execsql {SELECT dolt_rebase('--continue')}]
+        } 1
+        do_execsql_test $prefix.original {
+          SELECT id,a FROM dolt_at_t('f') ORDER BY id;
+        } $original
+        if {$reopen} {
+          db close
+          sqlite3 db test.db/dolt_rebase_f
+        }
+        set tail [list $action]
+        if {$changes eq "staged"} {set tail [list drop $action]}
+        do_execsql_test $prefix.tail {
+          SELECT action FROM dolt_rebase ORDER BY rebase_order;
+        } $tail
+        set value 1
+        set message f1
+        if {$changes ne "clean"} {
+          execsql {UPDATE t SET a=100 WHERE id=1}
+          set value 100
+          if {$changes eq "amend"} {
+            execsql {SELECT dolt_commit('--amend','-am','f1 edited')}
+            set message {f1 edited}
+          } else {
+            execsql {SELECT dolt_add('t')}
+          }
+        }
+        do_test $prefix.continue {
+          lindex [catchsql {SELECT dolt_rebase('--continue')}] 0
+        } 0
+        do_execsql_test $prefix.rows {
+          SELECT id,a FROM t ORDER BY id;
+        } [list 1 $value 2 2 3 30 4 4]
+        if {$action eq "squash"} {append message "\n\nf2"}
+        set messages [list $message f3 base]
+        if {$changes eq "staged"} {set messages [list $message f1 f3 base]}
+        do_execsql_test $prefix.log {
+          SELECT message FROM dolt_log WHERE message NOT LIKE 'Initialize%';
+        } $messages
+        do_execsql_test $prefix.cleaned {
+          SELECT active_branch();
+          SELECT count(*) FROM dolt_status;
+          SELECT count(*) FROM dolt_branches WHERE name='dolt_rebase_f';
+          SELECT count(*) FROM sqlite_schema WHERE name='dolt_rebase';
+          PRAGMA integrity_check;
+        } {f 0 0 0 ok}
+        db close
+        sqlite3 db test.db/f
+        do_execsql_test $prefix.reopen {
+          SELECT id,a FROM t ORDER BY id;
+          PRAGMA integrity_check;
+        } [list 1 $value 2 2 3 30 4 4 ok]
+      }
+    }
+  }
+}
+
+foreach action {fixup squash} {
+  foreach first {fold drop edit} {
+    reset_db
+    execsql {
+      CREATE TABLE t(id INTEGER PRIMARY KEY);
+      SELECT dolt_commit('-Am','base');
+      SELECT dolt_checkout('-b','f');
+      INSERT INTO t VALUES(1);
+      SELECT dolt_commit('-am','f1');
+      INSERT INTO t VALUES(2);
+      SELECT dolt_commit('-am','f2');
+      SELECT dolt_rebase('-i','main');
+      UPDATE dolt_rebase SET action=$action;
+    }
+    if {$first ne "fold"} {
+      execsql {UPDATE dolt_rebase SET action=$first WHERE rebase_order=1}
+    }
+    do_catchsql_test rebase-edit-fold-initial-$action-$first {
+      SELECT dolt_rebase('--continue');
+    } {1 {first non-drop action must be pick or reword}}
+    do_execsql_test rebase-edit-fold-initial-retained-$action-$first {
+      SELECT count(*) FROM dolt_rebase;
+      SELECT active_branch();
+    } {2 dolt_rebase_f}
+    execsql {SELECT dolt_rebase('--abort')}
+  }
+}
+finish_test

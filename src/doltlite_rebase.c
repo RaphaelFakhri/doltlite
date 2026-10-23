@@ -3152,7 +3152,7 @@ static void doltliteRebaseInteractiveContinue(
   /* Squash and fixup amend the commit before them, so a pick or reword
   ** has to come first. edit applies its own commit and may lead the plan. */
   {
-    int seenAnchor = 0;
+    int seenAnchor = (doltliteGetSessionRebaseFlags(db) & WS_REBASE_FLAG_EDIT)!=0;
     for(i=0; i<nPlan; i++){
       const char *zAct = aPlan[i].zAction;
       if( strcmp(zAct, "pick")==0 || strcmp(zAct, "reword")==0 ){

@@ -687,6 +687,53 @@ UPDATE dolt_rebase SET action = 'fixup' WHERE commit_message = 'f3';
 SELECT dolt_rebase('--continue');
 " "SELECT CONCAT('LOG|', message) FROM dolt_log;"
 
+for keymode in integer text; do
+  key='id INTEGER PRIMARY KEY'
+  if [ "$keymode" = text ]; then key='id VARCHAR(32) PRIMARY KEY'; fi
+  for action in fixup squash; do
+    for changes in clean amend staged; do
+      dropped=''
+      drop_plan=''
+      edit_sql=''
+      case "$changes" in
+        amend) edit_sql="UPDATE t SET a=100 WHERE id=1;
+SELECT dolt_commit('--amend','-am','f1 edited');" ;;
+        staged)
+          dropped="INSERT INTO t VALUES(5,5); SELECT dolt_commit('-am','dropped');"
+          drop_plan="UPDATE dolt_rebase SET action='drop',rebase_order=1.5 WHERE commit_message='dropped';"
+          edit_sql="UPDATE t SET a=100 WHERE id=1; SELECT dolt_add('t');" ;;
+      esac
+      oracle "interactive_edit_${action}_${changes}_${keymode}" "
+CREATE TABLE t($key,a INT);
+INSERT INTO t VALUES(1,1),(2,2);
+SELECT dolt_commit('-Am','base');
+SELECT dolt_checkout('-b','feat');
+INSERT INTO t VALUES(3,3);
+SELECT dolt_commit('-am','f1');
+UPDATE t SET a=30 WHERE id=3;
+SELECT dolt_commit('-am','f2');
+INSERT INTO t VALUES(4,4);
+SELECT dolt_commit('-am','f3');
+$dropped
+SELECT dolt_rebase('-i','main');
+UPDATE dolt_rebase SET rebase_order=0.5 WHERE commit_message='f3';
+UPDATE dolt_rebase SET action='edit' WHERE commit_message='f1';
+UPDATE dolt_rebase SET action='$action' WHERE commit_message='f2';
+$drop_plan
+SELECT dolt_rebase('--continue');
+$edit_sql
+SELECT dolt_rebase('--continue');
+" "
+SELECT CONCAT('LOG|ROW|',id,'|',a) FROM t ORDER BY id;
+SELECT CONCAT('LOG|MSG|',REPLACE(message,CHAR(10),' ~ ')) FROM dolt_log WHERE message NOT LIKE 'Initialize%';
+SELECT CONCAT('LOG|BRANCH|',active_branch());
+SELECT CONCAT('LOG|WORKING|',count(*)) FROM dolt_branches WHERE name='dolt_rebase_feat';
+SELECT CONCAT('LOG|STATUS|',count(*)) FROM dolt_status;
+"
+    done
+  done
+done
+
 for action in pick reword squash fixup; do
   oracle "interactive_${action}_edited_plan_message" "
 $INTERACTIVE_SETUP
