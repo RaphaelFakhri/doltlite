@@ -833,6 +833,12 @@ static int atFilter(sqlite3_vtab_cursor *cur,
   }
   zRef=(const char*)sqlite3_value_text(argv[0]);
   if(!zRef) return SQLITE_NOMEM;
+  if( doltliteValueHasNul(argv[0]) ){
+    sqlite3_free(cur->pVtab->zErrMsg);
+    cur->pVtab->zErrMsg = sqlite3_mprintf(
+        "dolt_at_%s: invalid argument: contains a NUL byte", v->zTableName);
+    return cur->pVtab->zErrMsg ? SQLITE_ERROR : SQLITE_NOMEM;
+  }
   c->zCommitRef = sqlite3_mprintf("%s", zRef);
   if( !c->zCommitRef ) return SQLITE_NOMEM;
 

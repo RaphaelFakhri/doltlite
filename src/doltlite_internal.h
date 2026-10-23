@@ -78,6 +78,13 @@ int doltliteCreateShieldedModule(
   void *pAux
 );
 
+/* Refs and table names are C strings; text past an embedded NUL would be
+** silently dropped and the value read as its prefix. */
+static SQLITE_INLINE int doltliteValueHasNul(sqlite3_value *pValue){
+  const char *z = (const char*)sqlite3_value_text(pValue);
+  return z && memchr(z, 0, (size_t)sqlite3_value_bytes(pValue))!=0;
+}
+
 static SQLITE_INLINE int doltliteSplitRevisionRange(
   const char *zSpec,
   char **pzLeft,

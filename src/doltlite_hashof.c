@@ -102,6 +102,10 @@ static void doltliteHashofFunc(sqlite3_context *ctx, int argc, sqlite3_value **a
     sqlite3_result_null(ctx);
     return;
   }
+  if( doltliteValueHasNul(argv[0]) ){
+    sqlite3_result_error(ctx, "dolt_hashof: invalid ref spec", -1);
+    return;
+  }
   db = sqlite3_context_db_handle(ctx);
   rc = doltliteRefreshAutocommitWorkingState(db);
   if( rc!=SQLITE_OK ){
@@ -877,6 +881,11 @@ static int hashofResolveRefCatalog(
     sqlite3_result_null(ctx);
     return 1;
   }
+  if( doltliteValueHasNul(pRefArg) ){
+    sqlite3_result_error(ctx,
+        "dolt_hashof_db: invalid argument: contains a NUL byte", -1);
+    return 1;
+  }
   rc = doltliteRefreshAutocommitWorkingState(db);
   if( rc!=SQLITE_OK ){
     sqlite3_result_error_code(ctx, rc);
@@ -941,7 +950,7 @@ static void hashofNamedObjectFunc(
     return;
   }
   zName = (const char*)sqlite3_value_text(argv[0]);
-  if( !zName || !*zName ){
+  if( !zName || !*zName || doltliteValueHasNul(argv[0]) ){
     sqlite3_snprintf(sizeof(zErr), zErr, "%s: %s not found", zFn, zKind);
     sqlite3_result_error(ctx, zErr, -1);
     return;

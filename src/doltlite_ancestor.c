@@ -373,6 +373,11 @@ static void doltMergeBaseFunc(
     sqlite3_result_error(ctx, "invalid arguments", -1);
     return;
   }
+  if( doltliteValueHasNul(argv[0]) || doltliteValueHasNul(argv[1]) ){
+    sqlite3_result_error(ctx,
+        "dolt_merge_base: invalid argument: contains a NUL byte", -1);
+    return;
+  }
 
   rc = doltliteResolveRef(db,zRef1, &hash1);
   if( rc!=SQLITE_OK ){

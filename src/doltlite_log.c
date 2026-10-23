@@ -522,7 +522,8 @@ static int doltliteLogFilter(
 
   if( (idxNum & LOG_IDX_HASH_EQ) && argc>0 ){
     const char *z = (const char*)sqlite3_value_text(argv[0]);
-    if( z && doltliteHexToHash(z, &startHash)==SQLITE_OK
+    if( z && !doltliteValueHasNul(argv[0])
+        && doltliteHexToHash(z, &startHash)==SQLITE_OK
         && !prollyHashIsEmpty(&startHash) ){
       useStart = 1;
     }else{
@@ -537,6 +538,12 @@ static int doltliteLogFilter(
     /* NULL is an empty log. Joining dolt_log(parent_hash) walks a root's
     ** NULL parent without failing the rest of the query. */
     if( sqlite3_value_type(argv[0])==SQLITE_NULL ) return SQLITE_OK;
+    if( doltliteValueHasNul(argv[0]) ){
+      sqlite3_free(pCursor->pVtab->zErrMsg);
+      pCursor->pVtab->zErrMsg = sqlite3_mprintf(
+          "dolt_log: invalid argument: contains a NUL byte");
+      return pCursor->pVtab->zErrMsg ? SQLITE_ERROR : SQLITE_NOMEM;
+    }
     zSpec = (const char*)sqlite3_value_text(argv[0]);
 
     rc = doltliteSplitRevisionRange(zSpec, &zLeft, &zRight, &rangeType);
