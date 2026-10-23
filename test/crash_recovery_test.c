@@ -1656,6 +1656,8 @@ static int gDuraRootsSeen = 0;
 static int gDuraCrashAt = 0;
 static int gDuraSyncCount = 0;
 static int gDuraCrashBefore = 0;
+static int gDuraWriteCount = 0;
+static int gDuraFailWriteAt = 0;
 
 static int duraClose(sqlite3_file *pFile){
   DuraFile *p = (DuraFile*)pFile;
@@ -1672,7 +1674,11 @@ static int duraRead(sqlite3_file *pFile, void *zBuf, int iAmt, sqlite3_int64 iOf
 static int duraWrite(sqlite3_file *pFile, const void *zBuf, int iAmt,
                      sqlite3_int64 iOfst){
   DuraFile *p = (DuraFile*)pFile;
-  int rc = p->pReal->pMethods->xWrite(p->pReal, zBuf, iAmt, iOfst);
+  int rc;
+  if( p->isMain && ++gDuraWriteCount==gDuraFailWriteAt ){
+    return SQLITE_IOERR_WRITE;
+  }
+  rc = p->pReal->pMethods->xWrite(p->pReal, zBuf, iAmt, iOfst);
   if( rc!=SQLITE_OK || !p->isMain ) return rc;
   if( iAmt==1+CHUNK_MANIFEST_SIZE
    && ((const unsigned char*)zBuf)[0]==CS_WAL_TAG_ROOT
@@ -1847,6 +1853,111 @@ static int duraRegister(void){
   gDuraVfs.szOsFile = (int)sizeof(DuraFile) + gDuraBase->szOsFile;
   gDuraVfs.xOpen = duraOpen;
   return sqlite3_vfs_register(&gDuraVfs, 0);
+}
+
+static void test_pending_drain_batch(void){
+  int sparse, outcome;
+  printf("--- Pending chunk drain batching ---\n");
+  check("drain_batch_vfs", duraRegister()==SQLITE_OK);
+  for(sparse=0; sparse<2; sparse++){
+    for(outcome=0; outcome<3; outcome++){
+      const char *zPath = fresh_db();
+      ChunkStore cs;
+      ProllyHash base, sparseHash;
+      ProllyHash *aHash = sqlite3_malloc(4096*sizeof(ProllyHash));
+      unsigned char *pData = sqlite3_malloc(16384);
+      char zLabel[100];
+      int i, rc, valid = 1, has = 0;
+      snprintf(zLabel, sizeof(zLabel), "drain_batch_%d_%d", sparse, outcome);
+      check("drain_batch_alloc", aHash!=0 && pData!=0);
+      if( !aHash || !pData ){
+        sqlite3_free(aHash);
+        sqlite3_free(pData);
+        continue;
+      }
+      memset(pData, 0x5a, 16384);
+      rc = chunkStoreOpen(&cs, &gDuraVfs, zPath, SQLITE_OPEN_CREATE);
+      if( rc==SQLITE_OK ) rc = chunkStoreLockAndRefresh(&cs);
+      if( rc==SQLITE_OK ) rc = chunkStorePut(&cs, (const u8*)"base", 4, &base);
+      if( rc==SQLITE_OK ) rc = chunkStoreCommit(&cs);
+      chunkStoreUnlock(&cs);
+      if( rc==SQLITE_OK ) rc = chunkStoreLockAndRefresh(&cs);
+      if( rc==SQLITE_OK && sparse ){
+        rc = chunkStorePutSparse(&cs, (const u8*)"prefix", 6, 100000,
+                                 &sparseHash);
+      }
+      check(zLabel, rc==SQLITE_OK);
+      if( rc!=SQLITE_OK ){
+        chunkStoreClose(&cs);
+        sqlite3_free(aHash);
+        sqlite3_free(pData);
+        removeDbFiles(zPath);
+        continue;
+      }
+      gDuraWriteCount = 0;
+      gDuraFailWriteAt = outcome==2 ? 2 : 0;
+      for(i=0; i<4096 && rc==SQLITE_OK; i++){
+        pData[0] = (u8)i;
+        pData[1] = (u8)(i>>8);
+        rc = chunkStorePut(&cs, pData, 16384, &aHash[i]);
+      }
+      gDuraFailWriteAt = 0;
+      if( outcome==2 ){
+        check("drain_batch_write_error", rc==SQLITE_IOERR_WRITE);
+        check("drain_batch_error_not_published", cs.staging.nRecentUncommitted==0);
+      }else{
+        check("drain_batch_put", rc==SQLITE_OK);
+        check("drain_batch_spilled", cs.staging.nRecentUncommitted>0);
+        printf("  %s: %d drained chunks, %d writes\n", zLabel,
+               cs.staging.nRecentUncommitted, gDuraWriteCount);
+        if( !sparse ){
+          check("drain_batch_fewer_writes_than_chunks",
+                gDuraWriteCount<cs.staging.nRecentUncommitted);
+        }
+        for(i=0; i<4096 && valid; i++){
+          u8 *pRead = 0;
+          int nRead = 0;
+          pData[0] = (u8)i;
+          pData[1] = (u8)(i>>8);
+          rc = chunkStoreGet(&cs, &aHash[i], &pRead, &nRead);
+          valid = rc==SQLITE_OK && nRead==16384
+               && memcmp(pRead, pData, 16384)==0;
+          sqlite3_free(pRead);
+        }
+        check("drain_batch_read_spilled_chunks", valid);
+      }
+      if( outcome==0 ){
+        check("drain_batch_commit", chunkStoreCommit(&cs)==SQLITE_OK);
+      }else{
+        chunkStoreRollback(&cs);
+      }
+      chunkStoreUnlock(&cs);
+      chunkStoreClose(&cs);
+      rc = chunkStoreOpen(&cs, &gDuraVfs, zPath, SQLITE_OPEN_READWRITE);
+      check("drain_batch_reopen", rc==SQLITE_OK);
+      if( rc==SQLITE_OK ){
+        rc = chunkStoreHas(&cs, &base, &has);
+        check("drain_batch_base_kept", rc==SQLITE_OK && has);
+        rc = chunkStoreHas(&cs, &aHash[0], &has);
+        check("drain_batch_reopen_visibility",
+              rc==SQLITE_OK && has==(outcome==0));
+        if( sparse && outcome==0 ){
+          u8 *pRead = 0;
+          int nRead = 0;
+          rc = chunkStoreGet(&cs, &sparseHash, &pRead, &nRead);
+          valid = rc==SQLITE_OK && nRead==100006
+               && memcmp(pRead, "prefix", 6)==0;
+          for(i=6; i<nRead && valid; i++) if( pRead[i]!=0 ) valid = 0;
+          check("drain_batch_sparse_content", valid);
+          sqlite3_free(pRead);
+        }
+        chunkStoreClose(&cs);
+      }
+      sqlite3_free(aHash);
+      sqlite3_free(pData);
+      removeDbFiles(zPath);
+    }
+  }
 }
 
 static void test_31_drain_durability_watermark(void){
@@ -2341,6 +2452,7 @@ int main(void){
   test_29_gc_after_many_commits();
   test_30_crash_on_open();
   test_31_drain_durability_watermark();
+  test_pending_drain_batch();
   test_32_merge_abort_atomic_sync();
   test_33_cv_rollback_atomic_sync();
   test_34_rebase_start_crash();
