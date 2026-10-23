@@ -786,27 +786,31 @@ static int rowMergeCallback(void *pCtx, const ThreeWayChange *pChange){
   return rc;
 }
 
-static int layoutCellsMatch(const u8 *pRec, const RecField *aF, int nF,
-                            int iA, int iB){
-  if( iA<0 || iB<0 || iA>=nF || iB>=nF ) return 1;
-  return fieldEquals(pRec, &aF[iA], pRec, &aF[iB])==0;
+static int layoutCellsMatch(
+  const u8 *pRec, int nRec, const RecField *aF, int nF, int iA,
+  const u8 *pAnc, int nAnc, const RecField *aAnc, int nAncF, int iB
+){
+  if( iA<0 || iB<0 || iA>=nF || iB>=nAncF ) return 1;
+  return doltliteFieldValuesEqual(aF[iA].st, pRec, nRec, aF[iA].off,
+                                  aAnc[iB].st, pAnc, nAnc, aAnc[iB].off);
 }
 
-/* Could drops, re-adds and renames to fresh names have produced the side's
-** layout while leaving this row's bytes as they are? Drops keep the
-** survivors' order and cells, and ADD COLUMN appends, so the side must be
-** an in-order run of surviving ancestor columns holding their own cells,
-** followed by added columns holding their default or no cell. A column
-** whose default is not NULL, or whose cell is not stored, is taken to match. */
+/* Drops preserve the order and cells of surviving columns. Added columns
+** form a tail; omitted cells and non-NULL defaults do not disprove it. */
 static int layoutFitsRow(
   const u8 *pRec, int nRec,
+  const u8 *pAnc, int nAnc,
   const MergeLayout *pL,
   u8 *aTailOk
 ){
-  RecField *aF = 0;
-  int nF = 0, p, last = -1, bFits = 0;
+  RecField *aF = 0, *aAnc = 0;
+  int nF = 0, nAncF = 0, p, last = -1, bFits = 0;
 
   if( parseRecordFields(pRec, nRec, &aF, &nF)<0 ) return 1;
+  if( parseRecordFields(pAnc, nAnc, &aAnc, &nAncF)<0 ){
+    sqlite3_free(aF);
+    return 1;
+  }
   aTailOk[pL->nCol] = 1;
   for(p=pL->nCol-1; p>=0; p--){
     const MergeLayoutCol *pC = &pL->aCol[p];
@@ -826,12 +830,14 @@ static int layoutFitsRow(
     if( pC->iSrcSlot>=0 ){
       s = pC->iSrcSlot;
       if( s<=last
-       || !layoutCellsMatch(pRec, aF, nF, pC->iField, pL->aAncField[s]) ){
+       || (s!=p && !layoutCellsMatch(pRec, nRec, aF, nF, pC->iField,
+                             pAnc, nAnc, aAnc, nAncF, pL->aAncField[s])) ){
         break;
       }
     }else{
       for(s=last+1; s<pL->nAnc; s++){
-        if( layoutCellsMatch(pRec, aF, nF, pC->iField, pL->aAncField[s]) ){
+        if( layoutCellsMatch(pRec, nRec, aF, nF, pC->iField,
+                             pAnc, nAnc, aAnc, nAncF, pL->aAncField[s]) ){
           break;
         }
       }
@@ -840,6 +846,7 @@ static int layoutFitsRow(
     last = s;
   }
   sqlite3_free(aF);
+  sqlite3_free(aAnc);
   return bFits;
 }
 
@@ -859,11 +866,8 @@ static int mergeSideKeptAncestorRow(
 ){
   ChunkStore *cs = doltliteGetChunkStore(db);
   ProllyCache *pCache = doltliteGetCache(db);
-  ProllyDiffIter iter;
-  ProllyDiffChange *pChange = 0;
-  ProllyCursor cur;
+  ProllyCursor ancCur, sideCur;
   u8 *aTailOk = 0;
-  u64 nAnc = 0, nTouched = 0;
   int res = 0;
   int rc;
 
@@ -872,41 +876,85 @@ static int mergeSideKeptAncestorRow(
   if( prollyHashIsEmpty(pSideRoot) ) return SQLITE_OK;
   aTailOk = sqlite3_malloc64((u64)pLayout->nCol + 1);
   if( !aTailOk ) return SQLITE_NOMEM;
-  prollyCursorInit(&cur, cs, pCache, pAncRoot, ancFlags);
-  rc = prollyCursorFirst(&cur, &res);
-  while( rc==SQLITE_OK && !res && prollyCursorIsValid(&cur) ){
-    const u8 *pVal = 0;
-    int nVal = 0;
-    prollyCursorValue(&cur, &pVal, &nVal);
-    if( !layoutFitsRow(pVal, nVal, pLayout, aTailOk) ) nAnc++;
-    rc = prollyCursorNext(&cur);
-  }
-  prollyCursorClose(&cur);
-  if( rc!=SQLITE_OK || nAnc==0 ) goto done;
-  if( prollyHashCompare(pAncRoot, pSideRoot)==0 || bOtherUnchanged ){
-    *pbKept = 1;
-    goto done;
-  }
-  memset(&iter, 0, sizeof(iter));
-  rc = prollyDiffIterOpen(&iter, cs, pCache, pAncRoot, pSideRoot,
-                          ancFlags, sideFlags);
-  if( rc!=SQLITE_OK ) goto done;
-  while( nTouched<nAnc
-      && (rc = prollyDiffIterStep(&iter, &pChange))==SQLITE_ROW ){
-    if( (pChange->type==PROLLY_DIFF_MODIFY
-      || pChange->type==PROLLY_DIFF_DELETE)
-     && !layoutFitsRow(pChange->pOldVal, pChange->nOldVal, pLayout,
-                       aTailOk) ){
-      nTouched++;
+  prollyCursorInit(&ancCur, cs, pCache, pAncRoot, ancFlags);
+  prollyCursorInit(&sideCur, cs, pCache, pSideRoot, sideFlags);
+  rc = prollyCursorFirst(&ancCur, &res);
+  while( rc==SQLITE_OK && !res && prollyCursorIsValid(&ancCur) ){
+    const u8 *pAncVal = 0, *pSideVal = 0, *pKey = 0;
+    int nAncVal = 0, nSideVal = 0, nKey = 0, sideRes = 0;
+    if( ancFlags & PROLLY_NODE_INTKEY ){
+      rc = prollyCursorSeekInt(&sideCur, prollyCursorIntKey(&ancCur), &sideRes);
+    }else{
+      prollyCursorKey(&ancCur, &pKey, &nKey);
+      rc = prollyCursorSeekBlob(&sideCur, pKey, nKey, &sideRes);
     }
+    if( rc!=SQLITE_OK ) break;
+    if( sideRes==0 && prollyCursorIsValid(&sideCur) ){
+      prollyCursorValue(&ancCur, &pAncVal, &nAncVal);
+      prollyCursorValue(&sideCur, &pSideVal, &nSideVal);
+      if( (bOtherUnchanged || (nSideVal==nAncVal
+                              && memcmp(pSideVal, pAncVal, nAncVal)==0))
+       && !layoutFitsRow(pSideVal, nSideVal, pAncVal, nAncVal,
+                          pLayout, aTailOk) ){
+        *pbKept = 1;
+        break;
+      }
+    }
+    rc = prollyCursorNext(&ancCur);
   }
-  prollyDiffIterClose(&iter);
-  if( rc==SQLITE_ROW || rc==SQLITE_DONE ){
-    rc = SQLITE_OK;
-    *pbKept = nTouched<nAnc;
-  }
-done:
+  prollyCursorClose(&ancCur);
+  prollyCursorClose(&sideCur);
   sqlite3_free(aTailOk);
+  return rc;
+}
+
+int mergeSchemaReusesColumnSlots(
+  sqlite3 *db,
+  const ProllyHash *pAncRoot,
+  const ProllyHash *pSideRoot,
+  u8 ancFlags, u8 sideFlags,
+  const char *zAncSql, const char *zSideSql, const char *zTable,
+  int bOtherUnchanged,
+  int *pbReuses
+){
+  ParsedColumn *aAnc = 0, *aSide = 0;
+  int nAnc = 0, nSide = 0, j, rc;
+  MergeLayoutCol *aCol = 0;
+  int *aAncField = 0;
+  DoltliteColInfo ancCi, sideCi;
+  MergeLayout layout;
+
+  *pbReuses = 0;
+  memset(&ancCi, 0, sizeof(ancCi));
+  memset(&sideCi, 0, sizeof(sideCi));
+  rc = parseColumns(zAncSql, &aAnc, &nAnc);
+  if( rc==SQLITE_OK ) rc = parseColumns(zSideSql, &aSide, &nSide);
+  if( rc!=SQLITE_OK ) goto done;
+  aCol = sqlite3_malloc64(sizeof(*aCol)*(u64)nSide);
+  aAncField = sqlite3_malloc64(sizeof(*aAncField)*(u64)nAnc);
+  if( !aCol || !aAncField ){ rc = SQLITE_NOMEM; goto done; }
+  rc = mergeLoadReaderColumns(zAncSql, zTable, &ancCi);
+  if( rc==SQLITE_OK ) rc = mergeLoadReaderColumns(zSideSql, zTable, &sideCi);
+  if( rc!=SQLITE_OK ) goto done;
+  for(j=0; j<nAnc; j++) aAncField[j] = mergeReaderRecordSlot(&ancCi, j);
+  for(j=0; j<nSide; j++){
+    aCol[j].iField = mergeReaderRecordSlot(&sideCi, j);
+    aCol[j].iSrcSlot = parsedColumnIndexByName(aAnc, nAnc, aSide[j].zName);
+    aCol[j].bAddsAsNull = (u8)parsedColumnAddsAsNull(&aSide[j]);
+  }
+  layout.aCol = aCol;
+  layout.nCol = nSide;
+  layout.aAncField = aAncField;
+  layout.nAnc = nAnc;
+  rc = mergeSideKeptAncestorRow(db, pAncRoot, pSideRoot, ancFlags, sideFlags,
+                                &layout, bOtherUnchanged, pbReuses);
+done:
+  doltliteFreeColInfo(&ancCi);
+  doltliteFreeColInfo(&sideCi);
+  sqlite3_free(aCol);
+  sqlite3_free(aAncField);
+  freeColumns(aAnc, nAnc);
+  freeColumns(aSide, nSide);
   return rc;
 }
 
@@ -1145,8 +1193,6 @@ int mergePass1CheckRenameReusingColumnName(MergePass1Ctx *c){
       ParsedColumn *aAncCols = 0, *aRenCols = 0;
       int nAncCols = 0, nRenCols = 0;
       const char *zMoved = 0;
-      MergeLayoutCol *aLayoutCol = 0;
-      int *aAncField = 0;
       int bKept = 0;
       int bReuseDecided = 0;
       int rc;
@@ -1204,30 +1250,13 @@ int mergePass1CheckRenameReusingColumnName(MergePass1Ctx *c){
       }
       rc = SQLITE_OK;
       if( zMoved && !bReuseDecided ){
-        aLayoutCol = sqlite3_malloc64(sizeof(MergeLayoutCol)*(u64)nRenCols);
-        aAncField = sqlite3_malloc64(sizeof(int)*(u64)nAncCols);
-        if( !aLayoutCol || !aAncField ) rc = SQLITE_NOMEM;
+        rc = mergeSchemaReusesColumnSlots(c->db,
+            &pAncCat->root, &pRenCatEnt->root,
+            pAncCat->flags, pRenCatEnt->flags,
+            c->aAncSchema[i].zSql, pRenSe->zSql, zTable,
+            strcmp(pOthSe->zSql, c->aAncSchema[i].zSql)==0, &bKept);
       }
-      if( rc==SQLITE_OK && zMoved && !bReuseDecided ){
-        MergeLayout layout;
-        for(j=0; j<nAncCols; j++){
-          aAncField[j] = mergeStoredFieldIndex(aAncCols, j);
-        }
-        for(j=0; j<nRenCols; j++){
-          aLayoutCol[j].iField = mergeStoredFieldIndex(aRenCols, j);
-          aLayoutCol[j].iSrcSlot =
-              parsedColumnIndexByName(aAncCols, nAncCols, aRenCols[j].zName);
-          aLayoutCol[j].bAddsAsNull = (u8)parsedColumnAddsAsNull(&aRenCols[j]);
-        }
-        layout.aCol = aLayoutCol;
-        layout.nCol = nRenCols;
-        layout.aAncField = aAncField;
-        layout.nAnc = nAncCols;
-        rc = mergeSideKeptAncestorRow(c->db, &pAncCat->root, &pRenCatEnt->root,
-                                      pAncCat->flags, pRenCatEnt->flags, &layout,
-                                      strcmp(pOthSe->zSql, c->aAncSchema[i].zSql)==0,
-                                      &bKept);
-      }
+
       if( rc==SQLITE_OK && zMoved && c->pzErrMsg && bKept ){
         sqlite3_free(*c->pzErrMsg);
         *c->pzErrMsg = sqlite3_mprintf(
@@ -1236,8 +1265,6 @@ int mergePass1CheckRenameReusingColumnName(MergePass1Ctx *c){
             "ambiguous; make the same renames on both branches first",
             c->bBranchMerge ? "merge" : "apply", zTable, zMoved);
       }
-      sqlite3_free(aLayoutCol);
-      sqlite3_free(aAncField);
       freeColumns(aAncCols, nAncCols);
       freeColumns(aRenCols, nRenCols);
       if( rc!=SQLITE_OK ) return rc;

@@ -1,0 +1,114 @@
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+
+foreach {layout definition} {
+  rowid {id INTEGER PRIMARY KEY,a INT,b INT,c INT}
+  clustered {id INT PRIMARY KEY,a INT,b INT,c INT}
+  nonleading {b INT,id INT PRIMARY KEY,a INT,c INT}
+} {
+  foreach {default column value} {
+    none {x INT} {}
+    numeric {x INT DEFAULT 9} 9
+    text {x TEXT DEFAULT 'new'} new
+  } {
+    foreach order {add-drop drop-add} {
+      foreach edit {delete update} {
+        foreach schema_side {main feature} {
+          foreach operation {merge cherry_pick} {
+            reset_db
+            execsql "CREATE TABLE t($definition)"
+            execsql {
+              CREATE INDEX ia ON t(a);
+              CREATE INDEX ic ON t(c);
+              INSERT INTO t(id,a,b,c) VALUES(1,11,101,1001),(2,22,202,2002);
+              SELECT dolt_commit('-Am','base');
+              SELECT dolt_branch('feature');
+            }
+            execsql "SELECT dolt_checkout('$schema_side')"
+            if {$order eq "add-drop"} {execsql "ALTER TABLE t ADD COLUMN $column"}
+            execsql {ALTER TABLE t DROP COLUMN b}
+            if {$order eq "drop-add"} {execsql "ALTER TABLE t ADD COLUMN $column"}
+            execsql {
+              CREATE INDEX ix ON t(x);
+              SELECT dolt_commit('-Am','drop and add');
+            }
+            set edited [expr {$schema_side eq "main" ? "feature" : "main"}]
+            execsql "SELECT dolt_checkout('$edited')"
+            if {$edit eq "delete"} {
+              execsql {DELETE FROM t WHERE id=1}
+              set rows [list 2 22 2002 $value]
+              set ids {2}
+            } else {
+              execsql {UPDATE t SET a=83 WHERE id=1}
+              set rows [list 1 83 1001 $value 2 22 2002 $value]
+              set ids {1 2}
+            }
+            execsql {
+              SELECT dolt_commit('-Am','edit');
+              SELECT dolt_checkout('main');
+            }
+            set prefix drop-add-$layout-$default-$order-$edit-$schema_side-$operation
+            do_test $prefix-apply {
+              set result [catchsql "SELECT dolt_${operation}('feature')"]
+              list [lindex $result 0] [string length [lindex $result 1]]
+            } {0 40}
+            do_test $prefix-rows {
+              catchsql {
+                SELECT id,a,c,x FROM t ORDER BY id;
+                SELECT count(*) FROM dolt_conflicts;
+                SELECT count(*) FROM dolt_schema_conflicts;
+                SELECT count(*) FROM dolt_status;
+                PRAGMA integrity_check;
+              }
+            } [list 0 [concat $rows {0 0 0 ok}]]
+            do_test $prefix-index {
+              catchsql {
+                SELECT id FROM t INDEXED BY ix WHERE x IS NULL OR x IS NOT NULL ORDER BY id;
+                SELECT id FROM t INDEXED BY ic WHERE c>0 ORDER BY id;
+                SELECT sql FROM sqlite_schema WHERE name='ic';
+              }
+            } [list 0 [concat $ids $ids [list {CREATE INDEX ic ON t(c)}]]]
+            if {![sqlite3_get_autocommit db]} {catchsql ROLLBACK}
+            db close
+            sqlite3 db test.db
+            do_test $prefix-reopen {
+              catchsql {SELECT id,a,c,x FROM t ORDER BY id; PRAGMA integrity_check}
+            } [list 0 [concat $rows ok]]
+          }
+        }
+      }
+    }
+  }
+}
+foreach {column value} {{x INT} {} {x INT DEFAULT 9} 9} {
+  reset_db
+  execsql {
+    CREATE TABLE t(id INTEGER PRIMARY KEY,a INT,b INT,c INT);
+    INSERT INTO t VALUES(1,1,1,1),(2,2,2,2);
+    SELECT dolt_commit('-Am','base');
+    SELECT dolt_branch('feature');
+  }
+  execsql "ALTER TABLE t ADD COLUMN $column"
+  execsql {
+    ALTER TABLE t DROP COLUMN b;
+    SELECT dolt_commit('-Am','schema');
+    SELECT dolt_checkout('feature');
+    DELETE FROM t WHERE id=1;
+    SELECT dolt_commit('-Am','delete');
+    SELECT dolt_checkout('main');
+  }
+  set prefix drop-add-compact-$value
+  do_test $prefix-merge {
+    set result [catchsql {SELECT dolt_merge('feature')}]
+    list [lindex $result 0] [string length [lindex $result 1]]
+  } {0 40}
+  do_test $prefix-rows {
+    catchsql {SELECT id,a,c,x FROM t; PRAGMA integrity_check}
+  } [list 0 [list 2 2 2 $value ok]]
+  db close
+  sqlite3 db test.db
+  do_test $prefix-reopen {
+    catchsql {SELECT id,a,c,x FROM t; PRAGMA integrity_check}
+  } [list 0 [list 2 2 2 $value ok]]
+}
+finish_test

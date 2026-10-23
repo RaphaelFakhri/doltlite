@@ -183,6 +183,14 @@ int mergeMapUnmatchedColumns(
   int *aSideAnc, int nSide, char **pzErrMsg
 );
 
+int mergeSchemaReusesColumnSlots(
+  sqlite3 *db,
+  const ProllyHash *pAncRoot, const ProllyHash *pSideRoot,
+  u8 ancFlags, u8 sideFlags,
+  const char *zAncSql, const char *zSideSql, const char *zTable,
+  int bOtherUnchanged, int *pbReuses
+);
+
 int mergePass1CheckRenameReusingColumnName(MergePass1Ctx *c);
 
 int mergeRowEditsColumn(
