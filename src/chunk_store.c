@@ -1305,6 +1305,8 @@ void csFillChunkHdr(u8 *p, const ProllyHash *pHash, u32 size){
 static int csDrainPendingToWal(ChunkStore *cs){
   int rc;
   int i;
+  int dense;
+  i64 nDense = 0;
   i64 writeOff;
 
   if( cs->isMemory || cs->readOnly || cs->corruptMidStream ){
@@ -1353,6 +1355,26 @@ static int csDrainPendingToWal(ChunkStore *cs){
   rc = csGrowRecent(cs, cs->staging.nPending);
   if( rc!=SQLITE_OK ) return rc;
 
+  for(i=0; i<cs->staging.nPending; i++){
+    ChunkIndexEntry *pe = &cs->staging.aPending[i];
+    if( cs->staging.aPendingZeroTail[i]!=0
+     || pe->offset!=nDense+CS_WAL_CHUNK_LEN_OFF ) break;
+    nDense += CS_WAL_CHUNK_HDR_SIZE+(i64)pe->size;
+  }
+  dense = i==cs->staging.nPending && nDense==cs->staging.nWriteBuf;
+  if( dense ){
+    int pos = 0;
+    if( writeOff>LARGEST_INT64-nDense ) return SQLITE_TOOBIG;
+    while( pos<cs->staging.nWriteBuf ){
+      int n = cs->staging.nWriteBuf-pos;
+      if( n>65536 ) n = 65536;
+      rc = sqlite3OsWrite(cs->file.pFile, cs->staging.pWriteBuf+pos,
+                          n, writeOff+pos);
+      if( rc!=SQLITE_OK ) return rc;
+      pos += n;
+    }
+  }
+
   for( i=0; i<cs->staging.nPending; i++ ){
     ChunkIndexEntry *pe = &cs->staging.aPending[i];
     ChunkIndexEntry *pr = &cs->staging.aRecent[cs->staging.nRecent+i];
@@ -1370,6 +1392,11 @@ static int csDrainPendingToWal(ChunkStore *cs){
     pr->offset = writeOff + CS_WAL_CHUNK_LEN_OFF;
     cs->staging.aRecentZeroTail[cs->staging.nRecent+i] =
       cs->staging.aPendingZeroTail[i];
+
+    if( dense ){
+      writeOff += CS_WAL_CHUNK_HDR_SIZE+(i64)pe->size;
+      continue;
+    }
 
     csFillChunkHdr(recHdr, &pe->hash, (u32)pe->size);
 
