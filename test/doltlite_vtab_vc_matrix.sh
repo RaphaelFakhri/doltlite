@@ -177,6 +177,91 @@ run_sql "$FIXTURE SELECT dolt_commit('-Am','base');" "$DB" > /dev/null
 run_sql "INSERT INTO f5(rowid, body) VALUES(9,'delta niner'); SELECT dolt_checkout('f5');" "$DB" > /dev/null
 verify "table_checkout_discard" "$DB" "$BASE_STATE"
 
+# An in-transaction insert leaves FTS terms in the module hash until commit.
+# reset and checkout replace the catalog first; the hash must not flush later.
+scenario "in-transaction reset and checkout keep fts indexes consistent"
+for mod in fts5 fts4 fts3; do
+  newdb
+  run_sql "CREATE VIRTUAL TABLE f USING $mod(body);
+INSERT INTO f(rowid,body) VALUES(1,'alpha seven');
+SELECT dolt_commit('-Am','base');
+SELECT dolt_branch('feat');" "$DB" > /dev/null
+  run_sql "BEGIN;
+INSERT INTO f(rowid,body) VALUES(6,'six seven');
+SELECT dolt_reset('--hard');
+COMMIT;" "$DB" > /dev/null
+  result=$(run_sql "SELECT coalesce(group_concat(rowid),'-') FROM (SELECT rowid FROM f WHERE f MATCH 'seven' ORDER BY rowid);
+SELECT count(*) FROM f;
+PRAGMA integrity_check;" "$DB")
+  check "${mod}_txn_reset_hard" "1
+1
+ok" "$result"
+
+  newdb
+  run_sql "CREATE VIRTUAL TABLE f USING $mod(body);
+INSERT INTO f(rowid,body) VALUES(1,'alpha seven');
+SELECT dolt_commit('-Am','base');
+SELECT dolt_branch('feat');" "$DB" > /dev/null
+  run_sql "BEGIN;
+INSERT INTO f(rowid,body) VALUES(6,'six seven');
+SELECT dolt_checkout('feat');
+COMMIT;" "$DB" > /dev/null
+  result=$(run_sql "SELECT coalesce(group_concat(rowid),'-') FROM (SELECT rowid FROM f WHERE f MATCH 'seven' ORDER BY rowid);
+SELECT count(*) FROM f;
+PRAGMA integrity_check;" "$DB/feat")
+  check "${mod}_txn_checkout_dest" "1
+1
+ok" "$result"
+  result=$(run_sql "SELECT coalesce(group_concat(rowid),'-') FROM (SELECT rowid FROM f WHERE f MATCH 'seven' ORDER BY rowid);
+SELECT count(*) FROM f;
+PRAGMA integrity_check;" "$DB/main")
+  check "${mod}_txn_checkout_src" "1,6
+2
+ok" "$result"
+
+  newdb
+  run_sql "CREATE VIRTUAL TABLE f USING $mod(body);
+INSERT INTO f(rowid,body) VALUES(1,'alpha seven');
+SELECT dolt_commit('-Am','base');" "$DB" > /dev/null
+  run_sql "BEGIN;
+INSERT INTO f(rowid,body) VALUES(6,'six seven');
+SELECT dolt_checkout('f');
+COMMIT;" "$DB" > /dev/null
+  result=$(run_sql "SELECT coalesce(group_concat(rowid),'-') FROM (SELECT rowid FROM f WHERE f MATCH 'seven' ORDER BY rowid);
+SELECT count(*) FROM f;
+PRAGMA integrity_check;" "$DB")
+  check "${mod}_txn_table_checkout" "1
+1
+ok" "$result"
+
+  newdb
+  run_sql "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);
+CREATE VIRTUAL TABLE f USING $mod(body);
+INSERT INTO t VALUES(1,'base');
+INSERT INTO f(rowid,body) VALUES(1,'alpha seven');
+SELECT dolt_commit('-Am','base');
+SELECT dolt_branch('other');
+SELECT dolt_checkout('other');
+UPDATE t SET v='other' WHERE id=1;
+SELECT dolt_commit('-Am','other');
+SELECT dolt_checkout('main');
+UPDATE t SET v='main' WHERE id=1;
+SELECT dolt_commit('-Am','main');
+BEGIN;
+INSERT INTO f(rowid,body) VALUES(6,'six seven');
+SELECT dolt_merge('other');
+SELECT dolt_merge('--abort');
+COMMIT;" "$DB" > /dev/null
+  result=$(run_sql "SELECT coalesce(group_concat(rowid),'-') FROM (SELECT rowid FROM f WHERE f MATCH 'seven' ORDER BY rowid);
+SELECT count(*) FROM f;
+PRAGMA integrity_check;
+SELECT v FROM t;" "$DB")
+  check "${mod}_txn_merge_abort" "1,6
+2
+ok
+main" "$result"
+done
+
 scenario "tag and hash checkout"
 newdb
 run_sql "$FIXTURE SELECT dolt_commit('-Am','base'); SELECT dolt_tag('v1');" "$DB" > /dev/null

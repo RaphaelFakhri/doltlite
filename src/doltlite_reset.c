@@ -779,6 +779,19 @@ static void doltliteResetFunc(
     }
   }
 
+  /* Terms still in a vtab hash are part of this working tree. Flush
+  ** them before the snapshot so a preserved untracked table keeps its
+  ** index, and a failed reset restores the row and the index together.
+  ** The successful --hard path drops that vtab transaction later: the
+  ** replacement catalog does not contain the uncommitted rows. */
+  if( isHard ){
+    rc = sqlite3VtabSync(db, db->pVcCommand);
+    if( rc!=SQLITE_OK ){
+      sqlite3_result_error_code(context, rc);
+      goto reset_cleanup;
+    }
+  }
+
   rc = doltliteSaveTxnState(db, &saved);
   if( rc!=SQLITE_OK ){
     sqlite3_result_error_code(context, rc);
@@ -1029,6 +1042,13 @@ reset_cleanup:
   }
   doltliteFinishAutocommitWrite(db);
   if( reloadWorking ) doltliteInvalidateSessionWorkingState(db);
+  if( bSucceeded && isHard ){
+    /* Invalidate the open vtab against the replacement catalog. Its
+    ** pending terms must not flush at the commit below. Merge abort
+    ** uses the same catalog swap and must not do this: it copies local
+    ** tables back, and those terms still have to land. */
+    sqlite3VtabRollback(db);
+  }
   if( bSucceeded ){
     /* Dolt ends the SQL txn on dolt_reset; COMMIT then BEGIN so a
     ** following ROLLBACK does not undo the reset or prior row writes. */

@@ -162,6 +162,9 @@ static int checkoutLoadAndApply(
       cs, zBranch, pCommitHash, &committedCatHash, pCatHash);
   if( rc==SQLITE_OK ) rc = doltliteMaterializeEmptyCatalog(db, pCatHash);
   if( rc==SQLITE_OK ) rc = doltliteSwitchCatalog(db, pCatHash);
+  /* The target catalog was loaded from the branch, not from this
+  ** transaction. Pending vtab terms must not flush into it at commit. */
+  if( rc==SQLITE_OK ) sqlite3VtabRollback(db);
   return rc;
 }
 
@@ -210,6 +213,36 @@ struct CheckoutMutationCtx {
   int bPersistUnderSavepoint;
 };
 
+/* Write open vtab transactions into the live catalog. A null command
+** Vdbe still runs the sync; only the error-text import needs it. */
+static int checkoutSyncOpenVtabs(sqlite3 *db){
+#ifndef SQLITE_OMIT_VIRTUALTABLE
+  int i;
+  int rc = SQLITE_OK;
+  VTable **aVTrans;
+  if( !db->aVTrans || db->nVTrans<=0 ) return SQLITE_OK;
+  aVTrans = db->aVTrans;
+  db->aVTrans = 0;
+  for(i=0; rc==SQLITE_OK && i<db->nVTrans; i++){
+    int (*x)(sqlite3_vtab *);
+    sqlite3_vtab *pVtab = aVTrans[i]->pVtab;
+    if( pVtab && (x = pVtab->pModule->xSync)!=0 ){
+      rc = x(pVtab);
+      if( db->pVcCommand ) sqlite3VtabImportErrmsg(db->pVcCommand, pVtab);
+      else if( pVtab->zErrMsg ){
+        sqlite3_free(pVtab->zErrMsg);
+        pVtab->zErrMsg = 0;
+      }
+    }
+  }
+  db->aVTrans = aVTrans;
+  return rc;
+#else
+  (void)db;
+  return SQLITE_OK;
+#endif
+}
+
 /* Snapshot the current working catalog into *pOldCatHash: serialize
 ** uncommitted changes, else the persisted working hash (else HEAD). */
 static int checkoutCaptureOldCatalog(sqlite3 *db, ChunkStore *cs,
@@ -217,6 +250,11 @@ static int checkoutCaptureOldCatalog(sqlite3 *db, ChunkStore *cs,
                                      u8 *pMissing){
   int dirty;
   int rc;
+  /* Terms still in a vtab hash are part of the branch being left. Flush
+  ** them before the snapshot, or that branch keeps the content row and
+  ** loses the index. */
+  rc = checkoutSyncOpenVtabs(db);
+  if( rc!=SQLITE_OK ) return rc;
   doltliteGetSessionWorkingSetBasis(db, pWs);
   if( doltliteIsDetached(db) ){
     ProllyHash head;
@@ -933,6 +971,70 @@ static int checkoutAdoptVtabShadows(
   return SQLITE_OK;
 }
 
+/* Remember vtabs named by this checkout. Called before the catalog
+** swap, while sqlite_master still names them. */
+static int vtabCollectNamed(
+  sqlite3 *db,
+  sqlite3_value **argv,
+  int iFirst,
+  int nNames,
+  VTable ***pap,
+  int *pn
+){
+  int i;
+  VTable **ap = 0;
+  *pap = 0;
+  *pn = 0;
+#ifndef SQLITE_OMIT_VIRTUALTABLE
+  if( nNames<=0 || db->nVTrans<=0 ) return SQLITE_OK;
+  ap = sqlite3_malloc64((sqlite3_int64)nNames * (sqlite3_int64)sizeof(VTable *));
+  if( !ap ) return SQLITE_NOMEM;
+  for(i=0; i<nNames; i++){
+    const char *zName = (const char *)sqlite3_value_text(argv[iFirst + i]);
+    Table *pTab;
+    VTable *pVTab;
+    if( !zName ) continue;
+    pTab = sqlite3FindTable(db, zName, "main");
+    if( !pTab || !IsVirtual(pTab) ) continue;
+    pVTab = sqlite3GetVTable(db, pTab);
+    if( pVTab ) ap[(*pn)++] = pVTab;
+  }
+  *pap = ap;
+#else
+  (void)db; (void)argv; (void)iFirst; (void)nNames; (void)i; (void)ap;
+#endif
+  return SQLITE_OK;
+}
+
+/* Drop one open vtab transaction so commit cannot flush it. */
+static void vtabRollbackInstance(sqlite3 *db, VTable *pVTab){
+#ifndef SQLITE_OMIT_VIRTUALTABLE
+  int i;
+  sqlite3_vtab *p;
+  if( !pVTab || !db->aVTrans ) return;
+  for(i=0; i<db->nVTrans; i++){
+    if( db->aVTrans[i]==pVTab ) break;
+  }
+  if( i>=db->nVTrans ) return;
+  p = pVTab->pVtab;
+  if( p && p->pModule->xRollback ) (void)p->pModule->xRollback(p);
+  pVTab->iSavepoint = 0;
+  db->nVTrans--;
+  if( i<db->nVTrans ){
+    memmove(&db->aVTrans[i], &db->aVTrans[i+1],
+            (size_t)(db->nVTrans - i) * sizeof(db->aVTrans[0]));
+  }
+  sqlite3VtabUnlock(pVTab);
+#else
+  (void)db; (void)pVTab;
+#endif
+}
+
+static void vtabRollbackNamed(sqlite3 *db, VTable **ap, int n){
+  int i;
+  for(i=0; i<n; i++) vtabRollbackInstance(db, ap[i]);
+}
+
 static int checkoutTablesInTxn(
   sqlite3 *db,
   sqlite3_context *context,
@@ -1239,7 +1341,12 @@ static int checkoutTablesInTxn(
     sqlite3_free(buf);
     if( rc==SQLITE_OK ){
       DoltliteTxnState savedState;
+      VTable **apRb = 0;
+      int nRb = 0;
       rc = doltliteSaveTxnState(db, &savedState);
+      if( rc==SQLITE_OK ){
+        rc = vtabCollectNamed(db, argv, iFirstName, nNames, &apRb, &nRb);
+      }
       if( rc==SQLITE_OK ){
         rc = doltliteSwitchCatalog(db, &newWorkingHash);
         if( rc==SQLITE_OK && zSourceRef ){
@@ -1250,9 +1357,13 @@ static int checkoutTablesInTxn(
         if( rc!=SQLITE_OK ){
           rc = doltliteRestoreTxnStateOnFailure(db, &savedState, rc);
         }else{
+          /* Adopted shadows replace this table's storage. Pending terms
+          ** from before the swap must not be written into them. */
+          vtabRollbackNamed(db, apRb, nRb);
           doltliteTxnStateClear(&savedState);
         }
       }
+      sqlite3_free(apRb);
     }
   }
 
