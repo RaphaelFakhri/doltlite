@@ -2391,4 +2391,61 @@ SELECT dolt_merge('feature');"
   done
 done
 
+for index_change in unchanged added; do
+  case "$index_change" in
+    unchanged) index_sql="" ;;
+    added) index_sql="CREATE INDEX ix ON t(a,id);" ;;
+  esac
+  for direction in forward reverse; do
+    checkout="SELECT dolt_checkout('main');"
+    target=feature
+    if [ "$direction" = reverse ]; then checkout=""; target=main; fi
+    VC_ORACLE_EXPECTATION=allow-error oracle_same_session "schema_conflict_index_${index_change}_${direction}" "
+CREATE TABLE t(id INTEGER PRIMARY KEY,a INT,b INT);
+CREATE INDEX ia ON t(a);
+INSERT INTO t VALUES(1,11,101),(2,22,202),(3,33,303);
+SELECT dolt_commit('-Am','base');
+SELECT dolt_branch('feature');
+ALTER TABLE t ADD COLUMN w TEXT DEFAULT 'ours';
+UPDATE t SET a=44 WHERE id=3;
+SELECT dolt_commit('-Am','ours');
+SELECT dolt_checkout('feature');
+UPDATE t SET a=83 WHERE id=2;
+DELETE FROM t WHERE id=3;
+INSERT INTO t VALUES(4,55,404);
+ALTER TABLE t ADD COLUMN w INT DEFAULT 0;
+$index_sql
+SELECT dolt_commit('-Am','theirs');
+$checkout
+BEGIN;
+SELECT dolt_merge('$target');
+" "SELECT 'Q' || char(9) || (SELECT count(*) FROM dolt_schema_conflicts) || char(9) ||
+ (SELECT group_concat(id || ':' || a || ':' || b || ':' || w, ',') FROM (SELECT * FROM t ORDER BY id)) || char(9) ||
+ (SELECT group_concat(id || ':' || a, ',') FROM (SELECT id,a FROM t INDEXED BY ia WHERE a>0 ORDER BY a,id));" \
+"SELECT CONCAT('Q',char(9),(SELECT COUNT(*) FROM dolt_schema_conflicts),char(9),
+ (SELECT GROUP_CONCAT(CONCAT(id,':',a,':',b,':',w) ORDER BY id SEPARATOR ',') FROM t),char(9),
+ (SELECT GROUP_CONCAT(CONCAT(id,':',a) ORDER BY a,id SEPARATOR ',') FROM t WHERE a>0));"
+  done
+done
+
+VC_ORACLE_EXPECTATION=allow-error oracle_same_session "schema_conflict_index_preserves_column_layout" "
+CREATE TABLE t(id INTEGER PRIMARY KEY,a INT,b INT,c VARCHAR(30));
+INSERT INTO t VALUES(1,11,101,'base');
+SELECT dolt_commit('-Am','base');
+SELECT dolt_branch('feature');
+CREATE INDEX ia ON t(a DESC);
+UPDATE t SET c='ours';
+SELECT dolt_commit('-Am','ours');
+SELECT dolt_checkout('feature');
+ALTER TABLE t DROP COLUMN b;
+CREATE INDEX ia ON t(c);
+UPDATE t SET c='theirs';
+SELECT dolt_commit('-Am','theirs');
+SELECT dolt_checkout('main');
+BEGIN;
+SELECT dolt_merge('feature');
+" "SELECT 'Q' || char(9) || (SELECT count(*) FROM dolt_schema_conflicts) || char(9) ||
+ id || ':' || a || ':' || b || ':' || c FROM t INDEXED BY ia WHERE a>0;" \
+"SELECT CONCAT('Q',char(9),(SELECT COUNT(*) FROM dolt_schema_conflicts),char(9),id,':',a,':',b,':',c) FROM t WHERE a>0;"
+
 vc_oracle_finish
