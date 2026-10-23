@@ -4406,6 +4406,124 @@ static void run_fetch_gc_sees_peer_commit(void){
   staleCloseSession(db, zDb, zRemote);
 }
 
+static void checkRefreshVc(int iBefore, int iAfter, int pinned,
+                           const char *zSuffix, int ok){
+  char zName[128];
+  sqlite3_snprintf(sizeof(zName), zName, "refresh_vc_%d_%d_%d_%s",
+                   iBefore, iAfter, pinned, zSuffix);
+  check(zName, ok);
+}
+
+static int refreshVcPeerCommit(const char *zDb){
+#if !SQLITE_OS_WIN
+  int status = 0;
+  pid_t pid = fork();
+  if( pid<0 ) return SQLITE_ERROR;
+  if( pid==0 ) _exit(stalePeerCommit(zDb)==SQLITE_OK ? 0 : 1);
+  if( waitpid(pid, &status, 0)!=pid ) return SQLITE_ERROR;
+  return WIFEXITED(status) && WEXITSTATUS(status)==0 ? SQLITE_OK : SQLITE_ERROR;
+#else
+  return stalePeerCommit(zDb);
+#endif
+}
+
+static void run_refresh_then_vc(void){
+  static const char *const azBefore[] = {
+    "SELECT dolt_fetch('origin')",
+    "SELECT dolt_gc()",
+    "SELECT dolt_branch('probe')",
+    "SELECT 1"
+  };
+  static const char *const azAfter[] = {
+    "SELECT dolt_reset('--soft')",
+    "SELECT dolt_reset('--soft','HEAD')",
+    "SELECT dolt_pull('origin')"
+  };
+  int i, j, pinned, advance;
+
+  printf("=== Refresh Then VC Test ===\n\n");
+  for(i=0; i<4; i++){
+    for(j=0; j<3; j++){
+      for(pinned=0; pinned<2; pinned++){
+        if( pinned && (i==1 || i==2) ) continue;
+        for(advance=0; advance<(i==0 ? 2 : 1); advance++){
+          sqlite3 *db = 0;
+          char zDb[256], zRemote[256], zTag[64];
+          int before = i==0 ? advance : i+1;
+          int rc;
+          if( pinned && (j==0 || (j==2 && !advance)) ) continue;
+          sqlite3_snprintf(sizeof(zTag), zTag, "refresh_vc_%d_%d_%d",
+                           before, j, pinned);
+          rc = staleOpenSession(zTag, 1, advance, &db,
+                                zDb, sizeof(zDb), zRemote, sizeof(zRemote));
+          checkRefreshVc(before, j, pinned, "open", rc==SQLITE_OK);
+          if( rc!=SQLITE_OK ) continue;
+          if( pinned ){
+            checkRefreshVc(before, j, pinned, "begin",
+                            execSql(db, "BEGIN")==SQLITE_OK);
+          }
+          checkRefreshVc(before, j, pinned, "warm",
+              strcmp(queryScalarText(db, "SELECT count(*) FROM t"), "0")==0);
+          checkRefreshVc(before, j, pinned, "peer",
+                          refreshVcPeerCommit(zDb)==SQLITE_OK);
+          if( j==0 ){
+            sqlite3 *peer = 0;
+            rc = open_db(zDb, &peer);
+            if( rc==SQLITE_OK ){
+              rc = execSql(peer,
+                  "INSERT INTO t VALUES(901); SELECT dolt_add('t');");
+            }
+            checkRefreshVc(before, j, pinned, "peer_stage", rc==SQLITE_OK);
+            sqlite3_close(peer);
+          }
+          checkRefreshVc(before, j, pinned, "refresh",
+                          execSql(db, azBefore[i])==SQLITE_OK);
+          rc = sqlite3_exec(db, azAfter[j], 0, 0, 0);
+          if( pinned ){
+            checkRefreshVc(before, j, pinned, "refused",
+                            (rc&0xff)==SQLITE_BUSY);
+            checkRefreshVc(before, j, pinned, "snapshot",
+                strcmp(queryScalarText(db, "SELECT count(*) FROM t"), "0")==0);
+            checkRefreshVc(before, j, pinned, "snapshot_head",
+                strcmp(queryScalarText(db,
+                    "SELECT message FROM dolt_log LIMIT 1"), "init")==0);
+            checkRefreshVc(before, j, pinned, "rollback",
+                            execSql(db, "ROLLBACK")==SQLITE_OK);
+            checkRefreshVc(before, j, pinned, "retry",
+                            execSql(db, azAfter[j])==SQLITE_OK);
+          }else{
+            checkRefreshVc(before, j, pinned, "success", rc==SQLITE_OK);
+          }
+          checkRefreshVc(before, j, pinned, "peer_row",
+              strcmp(queryScalarText(db,
+                  "SELECT count(*) FROM t WHERE id=900"), "1")==0);
+          checkRefreshVc(before, j, pinned, "peer_head",
+              strcmp(queryScalarText(db,
+                  "SELECT count(*) FROM dolt_log WHERE message='peer'"), "1")==0);
+          if( j==0 ){
+            checkRefreshVc(before, j, pinned, "working_kept",
+                strcmp(queryScalarText(db,
+                    "SELECT count(*) FROM t WHERE id=901"), "1")==0);
+            checkRefreshVc(before, j, pinned, "staged_kept",
+                strcmp(queryScalarText(db,
+                    "SELECT count(*) FROM dolt_status WHERE staged=1"), "1")==0);
+          }
+          sqlite3_close(db);
+          db = 0;
+          rc = open_db(zDb, &db);
+          checkRefreshVc(before, j, pinned, "reopen", rc==SQLITE_OK);
+          checkRefreshVc(before, j, pinned, "durable",
+              strcmp(queryScalarText(db,
+                  "SELECT count(*) FROM t WHERE id=900"), "1")==0);
+          checkRefreshVc(before, j, pinned, "integrity",
+              strcmp(queryScalarText(db, "PRAGMA integrity_check"), "ok")==0);
+          staleCloseSession(db, zDb, zRemote);
+        }
+      }
+    }
+  }
+}
+
 static void run_chunk_walk_corruption(void){
   static const u8 badCatalog[] = {
     'D','L','C','T',
@@ -18767,6 +18885,7 @@ static const RegressionCase aCases[] = {
   { "fetch_preserves_concurrent_local_refs", "Fetch Preserves Concurrent Local Refs Test", run_fetch_preserves_concurrent_local_refs },
   { "file_remote_url_absolute", "File Remote URL Absolute Test", run_file_remote_url_absolute },
   { "fetch_gc_sees_peer_commit", "Fetch GC Sees Peer Commit Test", run_fetch_gc_sees_peer_commit },
+  { "refresh_then_vc", "Refresh Then VC Test", run_refresh_then_vc },
   { "chunk_walk_corruption", "Chunk Walk Corruption Test", run_chunk_walk_corruption },
   { "catalog_deserialize_corruption", "Catalog Deserialize Corruption Test", run_catalog_deserialize_corruption },
   { "schema_loader_missing_master", "Schema Loader Missing Master Test", run_schema_loader_missing_master },
