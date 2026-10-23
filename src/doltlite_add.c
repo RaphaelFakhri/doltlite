@@ -230,11 +230,12 @@ static int addWriteStagedCatalog(
 
 static int addComposeStageAllMaster(
   sqlite3 *db,
-  sqlite3_context *context,
   struct TableEntry *aWorking,
   int nWorking,
+  const u8 *aUseWorking,
   struct TableEntry *aStaged,
   int nStaged,
+  const u8 *aKeepStaged,
   struct TableEntry *aNew,
   int nNew
 ){
@@ -247,23 +248,20 @@ static int addComposeStageAllMaster(
   int i;
   int rc = SQLITE_OK;
 
-  if( nWorking>0 ){
-    azTouched = sqlite3_malloc64((sqlite3_uint64)nWorking * sizeof(*azTouched));
-    if( !azTouched ){
-      sqlite3_result_error_nomem(context);
-      return SQLITE_NOMEM;
-    }
+  if( nWorking+nStaged>0 ){
+    azTouched = sqlite3_malloc64(
+        ((sqlite3_uint64)nWorking+nStaged) * sizeof(*azTouched));
+    if( !azTouched ) return SQLITE_NOMEM;
   }
   for(i=0; i<nWorking; i++){
-    int ignored = 0;
-    if( aWorking[i].iTable<=1 || !aWorking[i].zName ) continue;
-    if( sqlite3_stricmp(aWorking[i].zName, "dolt_rebase")==0
-     && doltliteSessionOnRebasePlan(db) ){
-      continue;
+    if( aWorking[i].iTable>1 && aWorking[i].zName && aUseWorking[i] ){
+      azTouched[nTouched++] = aWorking[i].zName;
     }
-    rc = addCheckIgnore(db, context, aWorking[i].zName, &ignored);
-    if( rc!=SQLITE_OK ) break;
-    if( !ignored ) azTouched[nTouched++] = aWorking[i].zName;
+  }
+  for(i=0; i<nStaged; i++){
+    if( aStaged[i].iTable>1 && aStaged[i].zName && !aKeepStaged[i] ){
+      azTouched[nTouched++] = aStaged[i].zName;
+    }
   }
   pWorkingMaster = doltliteFindTableByNumber(aWorking, nWorking, 1);
   pStagedMaster = doltliteFindTableByNumber(aStaged, nStaged, 1);
@@ -428,6 +426,30 @@ int amTableStagedByName(struct TableEntry *aStaged, int nStaged,
   return 0;
 }
 
+static int addAppendSelectedTables(
+  sqlite3_context *context,
+  struct TableEntry **paNew,
+  int *pnNew,
+  struct TableEntry *aEntries,
+  int nEntries,
+  const u8 *aSelected,
+  SchemaEntry *aSchema,
+  int nSchema
+){
+  int i, rc;
+  for(i=0; i<nEntries; i++){
+    if( !aSelected[i] ) continue;
+    rc = addAppendTableEntry(context, paNew, pnNew, &aEntries[i]);
+    if( rc!=SQLITE_OK ) return rc;
+    if( aEntries[i].iTable>1 && aEntries[i].zName ){
+      rc = addAppendIndexEntriesOfTable(context, paNew, pnNew,
+          aEntries, nEntries, aSchema, nSchema, aEntries[i].zName);
+      if( rc!=SQLITE_OK ) return rc;
+    }
+  }
+  return SQLITE_OK;
+}
+
 static int addStageAllTables(
   sqlite3 *db,
   sqlite3_context *context,
@@ -437,22 +459,27 @@ static int addStageAllTables(
 ){
   struct TableEntry *aWorking = 0;
   struct TableEntry *aStaged = 0;
+  struct TableEntry *aHead = 0;
   struct TableEntry *aNew = 0;
+  SchemaEntry *aWorkSchema = 0;
+  SchemaEntry *aStagedSchema = 0;
+  u8 *aUseWorking = 0;
+  u8 *aKeepStaged = 0;
   int nWorking = 0;
   int nStaged = 0;
+  int nHead = 0;
   int nNew = 0;
+  int nWorkSchema = 0;
+  int nStagedSchema = 0;
   int k;
   int useWorkingHash = 1;
   int rc;
-  AddNameIndex stagedIdx;
   AddNameIndex workingIdx;
-  int stagedIdxInit = 0;
   int workingIdxInit = 0;
-  int onPlan;
+  int onPlan = doltliteSessionOnRebasePlan(db);
   int skippedPlan = 0;
-  struct TableEntry *aHead = 0;
-  int nHead = 0;
-  int headLoaded = 0;
+  ProllyHash stagedHash;
+  ProllyHash headHash;
 
   rc = addLoadWorkingAndStagedCatalogs(db, pWorkingHash,
                                        &aWorking, &nWorking,
@@ -461,153 +488,131 @@ static int addStageAllTables(
     doltliteVcResultErrorCode(context, db, "failed to load staged catalog", rc);
     return rc;
   }
-  rc = addNameIndexInit(&stagedIdx, aStaged, nStaged);
-  if( rc!=SQLITE_OK ){
-    addFreeEntries(aWorking, nWorking, aStaged, nStaged, aNew, nNew);
-    sqlite3_result_error_nomem(context);
-    return rc;
+  rc = doltliteGetHeadCatalogHash(db, &headHash);
+  if( rc!=SQLITE_OK ) goto stage_all_done;
+  doltliteGetSessionStaged(db, &stagedHash);
+  if( prollyHashIsEmpty(&stagedHash) ) stagedHash = headHash;
+  if( !bForce && !prollyHashIsEmpty(&headHash) ){
+    rc = doltliteLoadCatalog(db, &headHash, &aHead, &nHead, 0);
+    if( rc!=SQLITE_OK ) goto stage_all_done;
   }
-  stagedIdxInit = 1;
+  aUseWorking = sqlite3_malloc64((sqlite3_uint64)nWorking+1);
+  aKeepStaged = sqlite3_malloc64((sqlite3_uint64)nStaged+1);
+  if( !aUseWorking || !aKeepStaged ){
+    rc = SQLITE_NOMEM;
+    goto stage_all_done;
+  }
+  memset(aUseWorking, 0, nWorking);
+  memset(aKeepStaged, 0, nStaged);
   rc = addNameIndexInit(&workingIdx, aWorking, nWorking);
-  if( rc!=SQLITE_OK ){
-    addNameIndexFree(&stagedIdx);
-    addFreeEntries(aWorking, nWorking, aStaged, nStaged, aNew, nNew);
-    sqlite3_result_error_nomem(context);
-    return rc;
-  }
+  if( rc!=SQLITE_OK ) goto stage_all_done;
   workingIdxInit = 1;
-
-  onPlan = doltliteSessionOnRebasePlan(db);
 
   for(k=0; k<nWorking; k++){
     const char *zName = aWorking[k].zName;
-    struct TableEntry *pUse = &aWorking[k];
+    int ignored = 0;
+    if( aWorking[k].iTable>1 && !zName ) continue;
     if( onPlan && zName && sqlite3_stricmp(zName, "dolt_rebase")==0 ){
       useWorkingHash = 0;
       skippedPlan = 1;
       continue;
     }
     if( aWorking[k].iTable>1 && zName && !bForce ){
-      int ignored = 0;
       rc = addCheckIgnore(db, context, zName, &ignored);
-      if( rc!=SQLITE_OK ){
-        if( workingIdxInit ) addNameIndexFree(&workingIdx);
-        if( stagedIdxInit ) addNameIndexFree(&stagedIdx);
-        addFreeEntries(aWorking, nWorking, aStaged, nStaged, aNew, nNew);
-        return rc;
-      }
-      if( ignored ){
-        useWorkingHash = 0;
-        pUse = addNameIndexFind(&stagedIdx, zName);
-        if( !pUse ) continue;
-      }
+      if( rc!=SQLITE_OK ) goto stage_all_done;
     }
-    rc = addAppendTableEntry(context, &aNew, &nNew, pUse);
-    if( rc!=SQLITE_OK ){
-      if( workingIdxInit ) addNameIndexFree(&workingIdx);
-      if( stagedIdxInit ) addNameIndexFree(&stagedIdx);
-      addFreeEntries(aWorking, nWorking, aStaged, nStaged, aNew, nNew);
-      return rc;
-    }
+    aUseWorking[k] = !ignored;
+    if( ignored ) useWorkingHash = 0;
   }
 
-  for(k=0; k<nStaged; k++){
+  for(k=0; k<nStaged && !bForce; k++){
     const char *zName = aStaged[k].zName;
-    struct TableEntry *pMate = 0;
+    struct TableEntry *pWorking;
+    int ignored = 0;
     if( aStaged[k].iTable<=1 || !zName ) continue;
-    if( addNameIndexFind(&workingIdx, zName) ) continue;
-    /* Force stages the deletion of an ignored table like any other. */
-    if( bForce ) continue;
-    /* A renamed table is staged or left by its new name, as Dolt does. */
-    if( !headLoaded ){
-      ProllyHash headCat;
-      headLoaded = 1;
-      rc = doltliteGetHeadCatalogHash(db, &headCat);
-      if( rc==SQLITE_OK && !prollyHashIsEmpty(&headCat) ){
-        rc = doltliteLoadCatalog(db, &headCat, &aHead, &nHead, 0);
-      }
+    if( onPlan && sqlite3_stricmp(zName, "dolt_rebase")==0 ) continue;
+    pWorking = addNameIndexFind(&workingIdx, zName);
+    if( !pWorking ){
+      rc = doltliteCatalogRenameMate(db, aHead, nHead,
+          aStaged, nStaged, aWorking, nWorking, &aStaged[k], 1, &pWorking);
+      if( rc!=SQLITE_OK ) goto stage_all_done;
     }
-    if( rc==SQLITE_OK ){
-      rc = doltliteCatalogRenameMate(db, aHead, nHead, aStaged, nStaged,
-                                     aWorking, nWorking, &aStaged[k], 1,
-                                     &pMate);
+    if( pWorking ){
+      ignored = !aUseWorking[pWorking-aWorking];
+    }else{
+      rc = addCheckIgnore(db, context, zName, &ignored);
+      if( rc!=SQLITE_OK ) goto stage_all_done;
     }
-    {
-      int ignored = 0;
-      if( rc==SQLITE_OK ){
-        rc = addCheckIgnore(db, context, pMate ? pMate->zName : zName,
-                            &ignored);
-      }
-      if( rc!=SQLITE_OK ){
-        if( workingIdxInit ) addNameIndexFree(&workingIdx);
-        if( stagedIdxInit ) addNameIndexFree(&stagedIdx);
-        addFreeEntries(aWorking, nWorking, aStaged, nStaged, aNew, nNew);
-        doltliteFreeCatalog(aHead, nHead);
-        return rc;
-      }
-      if( !ignored ) continue;
-    }
-    useWorkingHash = 0;
-    rc = addAppendTableEntry(context, &aNew, &nNew, &aStaged[k]);
-    if( rc!=SQLITE_OK ){
-      if( workingIdxInit ) addNameIndexFree(&workingIdx);
-      if( stagedIdxInit ) addNameIndexFree(&stagedIdx);
-      addFreeEntries(aWorking, nWorking, aStaged, nStaged, aNew, nNew);
-      doltliteFreeCatalog(aHead, nHead);
-      return rc;
-    }
-  }
-  doltliteFreeCatalog(aHead, nHead);
-
-  /* Plan-only edits match the staged catalog once that table is omitted.
-  ** Rebuilding sqlite_master would still be a different hash and -A would
-  ** commit the plan. Keep the staged catalog instead. */
-  if( skippedPlan && addNonMasterEqual(aNew, nNew, aStaged, nStaged) ){
-    ProllyHash baseHash;
-    int schemaMatch = 0;
-    memset(&baseHash, 0, sizeof(baseHash));
-    doltliteGetSessionStaged(db, &baseHash);
-    if( prollyHashIsEmpty(&baseHash) ){
-      rc = doltliteGetHeadCatalogHash(db, &baseHash);
-    }
-    if( rc==SQLITE_OK ){
-      rc = addSchemasMatchExceptPlan(db, pWorkingHash, &baseHash, &schemaMatch);
-    }
-    if( rc==SQLITE_OK && schemaMatch ){
-      rc = doltliteSetSessionStaged(db, &baseHash);
-      if( workingIdxInit ) addNameIndexFree(&workingIdx);
-      if( stagedIdxInit ) addNameIndexFree(&stagedIdx);
-      addFreeEntries(aWorking, nWorking, aStaged, nStaged, aNew, nNew);
-      if( rc!=SQLITE_OK ) sqlite3_result_error_code(context, rc);
-      return rc;
-    }
-    if( rc!=SQLITE_OK ){
-      if( workingIdxInit ) addNameIndexFree(&workingIdx);
-      if( stagedIdxInit ) addNameIndexFree(&stagedIdx);
-      addFreeEntries(aWorking, nWorking, aStaged, nStaged, aNew, nNew);
-      sqlite3_result_error_code(context, rc);
-      return rc;
-    }
+    aKeepStaged[k] = ignored;
+    if( ignored ) useWorkingHash = 0;
   }
 
   if( useWorkingHash ){
     rc = doltliteSetSessionStaged(db, pWorkingHash);
-  }else{
-    doltliteAlignStagedEntriesToWorking(aWorking, nWorking, aNew, nNew);
-    doltliteRenumberStaleStagedEntries(aNew, nNew, aWorking, nWorking);
-    rc = addComposeStageAllMaster(db, context,
-                                  aWorking, nWorking, aStaged, nStaged,
-                                  aNew, nNew);
+    goto stage_all_done;
+  }
+  rc = loadSchemaFromCatalog(db, cs, doltliteGetCache(db), pWorkingHash,
+                             &aWorkSchema, &nWorkSchema);
+  if( rc==SQLITE_OK && !prollyHashIsEmpty(&stagedHash) ){
+    rc = loadSchemaFromCatalog(db, cs, doltliteGetCache(db), &stagedHash,
+                               &aStagedSchema, &nStagedSchema);
+  }
+  if( rc!=SQLITE_OK ) goto stage_all_done;
+
+  /* Plan-only edits must retain the staged hash, including its master. */
+  if( skippedPlan ){
+    int schemaMatch = 0;
+    rc = addAppendSelectedTables(context, &aNew, &nNew,
+        aWorking, nWorking, aUseWorking, aWorkSchema, nWorkSchema);
     if( rc==SQLITE_OK ){
-      rc = addWriteStagedCatalog(db, cs, aNew, nNew);
+      rc = addAppendSelectedTables(context, &aNew, &nNew,
+          aStaged, nStaged, aKeepStaged, aStagedSchema, nStagedSchema);
+    }
+    if( rc!=SQLITE_OK ) goto stage_all_done;
+    if( addNonMasterEqual(aNew, nNew, aStaged, nStaged) ){
+      rc = addSchemasMatchExceptPlan(db, pWorkingHash, &stagedHash, &schemaMatch);
+      if( rc!=SQLITE_OK ) goto stage_all_done;
+      if( schemaMatch ){
+        rc = doltliteSetSessionStaged(db, &stagedHash);
+        goto stage_all_done;
+      }
+    }
+    doltliteFreeCatalog(aNew, nNew);
+    aNew = 0;
+    nNew = 0;
+  }
+
+  {
+    Pgno offset;
+    rc = doltliteDisjoinCatalogEntries(db, aWorking, nWorking,
+                                       aStaged, nStaged, &offset);
+    if( rc!=SQLITE_OK ) goto stage_all_done;
+    for(k=0; k<nStagedSchema; k++){
+      if( aStagedSchema[k].iRootpage>1 ) aStagedSchema[k].iRootpage += offset;
     }
   }
-  if( workingIdxInit ) addNameIndexFree(&workingIdx);
-  if( stagedIdxInit ) addNameIndexFree(&stagedIdx);
-  addFreeEntries(aWorking, nWorking, aStaged, nStaged, aNew, nNew);
-  if( rc!=SQLITE_OK ){
-    sqlite3_result_error_code(context, rc);
+  rc = addAppendSelectedTables(context, &aNew, &nNew,
+      aWorking, nWorking, aUseWorking, aWorkSchema, nWorkSchema);
+  if( rc==SQLITE_OK ){
+    rc = addAppendSelectedTables(context, &aNew, &nNew,
+        aStaged, nStaged, aKeepStaged, aStagedSchema, nStagedSchema);
   }
+  if( rc!=SQLITE_OK ) goto stage_all_done;
+  doltliteAlignStagedEntriesToWorking(aWorking, nWorking, aNew, nNew);
+  rc = addComposeStageAllMaster(db,
+      aWorking, nWorking, aUseWorking, aStaged, nStaged, aKeepStaged,
+      aNew, nNew);
+  if( rc==SQLITE_OK ) rc = addWriteStagedCatalog(db, cs, aNew, nNew);
+
+stage_all_done:
+  if( workingIdxInit ) addNameIndexFree(&workingIdx);
+  sqlite3_free(aUseWorking);
+  sqlite3_free(aKeepStaged);
+  freeSchemaEntries(aWorkSchema, nWorkSchema);
+  freeSchemaEntries(aStagedSchema, nStagedSchema);
+  doltliteFreeCatalog(aHead, nHead);
+  addFreeEntries(aWorking, nWorking, aStaged, nStaged, aNew, nNew);
+  if( rc!=SQLITE_OK ) sqlite3_result_error_code(context, rc);
   return rc;
 }
 

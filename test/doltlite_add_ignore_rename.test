@@ -1,0 +1,114 @@
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+
+foreach variant {plain indexed modified indexed-modified empty order-shift staged staged-indexed} {
+  foreach stage {dot all commit force} {
+    reset_db
+    execsql {
+      CREATE TABLE t(id INT PRIMARY KEY, v INT);
+      CREATE TABLE tmp_old(id INT PRIMARY KEY, w INT);
+    }
+    if {$variant ne "empty"} {
+      execsql {INSERT INTO t VALUES(1,10); INSERT INTO tmp_old VALUES(5,50)}
+    }
+    if {$variant in {indexed indexed-modified order-shift staged-indexed}} {
+      execsql {CREATE INDEX t_v ON t(v); CREATE INDEX old_v ON tmp_old(w)}
+    }
+    if {$variant eq "order-shift"} {
+      execsql {CREATE TABLE a(id INT PRIMARY KEY); INSERT INTO a VALUES(9)}
+    }
+    execsql {SELECT dolt_commit('-Am','base')}
+    if {$variant in {staged staged-indexed}} {
+      execsql {UPDATE t SET v=11; SELECT dolt_add('t'); UPDATE t SET v=12}
+    }
+    execsql {
+      INSERT INTO dolt_ignore VALUES('tmp_*',1);
+      ALTER TABLE t RENAME TO tmp_t;
+      ALTER TABLE tmp_old RENAME TO kept;
+    }
+    if {$variant in {modified indexed-modified}} {
+      execsql {INSERT INTO tmp_t VALUES(2,20); INSERT INTO kept VALUES(6,60)}
+    }
+    switch $stage {
+      dot {execsql {SELECT dolt_add('.')}}
+      all {execsql {SELECT dolt_add('-A')}}
+      commit {execsql {SELECT dolt_commit('-Am','renames')}}
+      force {execsql {SELECT dolt_add('-A','-f')}}
+    }
+    set old t
+    if {$stage eq "force"} {set old tmp_t}
+    set ref STAGED
+    if {$stage eq "commit"} {set ref HEAD}
+    set retained {1 10}
+    set moved {5 50}
+    if {$variant eq "empty"} {set retained {}; set moved {}}
+    if {$variant in {modified indexed-modified}} {
+      set moved {5 50 6 60}
+      if {$stage eq "force"} {set retained {1 10 2 20}}
+    }
+    if {$variant in {staged staged-indexed}} {
+      set retained {1 11}
+      if {$stage eq "force"} {set retained {1 12}}
+    }
+    foreach phase {first repeated reopen} {
+      if {$phase eq "repeated" && $stage ne "commit"} {
+        if {$stage eq "force"} {
+          execsql {SELECT dolt_add('-A','-f')}
+        } else {
+          execsql {SELECT dolt_add('-A')}
+        }
+      }
+      if {$phase eq "reopen"} {db close; sqlite3 db test.db}
+      do_execsql_test add-ignore-rename-$variant-$stage-$phase-retained \
+        "SELECT * FROM dolt_at_${old}('$ref') ORDER BY id" $retained
+      do_execsql_test add-ignore-rename-$variant-$stage-$phase-moved \
+        "SELECT * FROM dolt_at_kept('$ref') ORDER BY id" $moved
+      do_catchsql_test add-ignore-rename-$variant-$stage-$phase-no-duplicate \
+        "SELECT * FROM dolt_at_tmp_old('$ref')" \
+        [list 1 "table not found: tmp_old at $ref"]
+    }
+    if {$stage ne "commit"} {execsql {SELECT dolt_commit('-m','renames')}}
+    execsql {SELECT dolt_branch('verify'); SELECT dolt_checkout('verify')}
+    do_execsql_test add-ignore-rename-$variant-$stage-integrity {
+      PRAGMA integrity_check;
+    } {ok}
+    if {$variant in {indexed indexed-modified order-shift staged-indexed}} {
+      do_execsql_test add-ignore-rename-$variant-$stage-indexes "
+        SELECT * FROM $old INDEXED BY t_v ORDER BY v;
+        SELECT * FROM kept INDEXED BY old_v ORDER BY w;
+      " [concat $retained $moved]
+    }
+  }
+}
+
+foreach stage {dot all commit} {
+  reset_db
+  execsql {
+    CREATE TABLE t(id INT PRIMARY KEY, v INT);
+    CREATE INDEX t_v ON t(v);
+    INSERT INTO t VALUES(1,10);
+    INSERT INTO dolt_ignore VALUES('tmp_*',1);
+    SELECT dolt_commit('-Am','base');
+    ALTER TABLE t RENAME TO tmp_t;
+    INSERT INTO tmp_t VALUES(2,20);
+  }
+  foreach phase {first repeated reopen} {
+    if {$phase eq "reopen"} {db close; sqlite3 db test.db}
+    switch $stage {
+      dot {execsql {SELECT dolt_add('.')}}
+      all {execsql {SELECT dolt_add('-A')}}
+      commit {
+        do_catchsql_test add-ignore-only-$stage-$phase-commit {
+          SELECT dolt_commit('-Am','ignored');
+        } {1 {nothing to commit, working tree clean (use dolt_add to stage changes)}}
+      }
+    }
+    do_execsql_test add-ignore-only-$stage-$phase {
+      SELECT count(*) FROM dolt_status WHERE staged=1;
+      SELECT * FROM dolt_at_t('STAGED');
+      SELECT * FROM dolt_at_t('HEAD');
+    } {0 1 10 1 10}
+  }
+}
+
+finish_test

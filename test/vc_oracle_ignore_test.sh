@@ -370,6 +370,46 @@ ALTER TABLE t RENAME TO tmp_t;
 SELECT dolt_commit('-Am', 'rename');
 " --expect-error
 
+echo "--- ignored rename pairs ---"
+
+for stage in dot all force commit; do
+  for pattern in working committed; do
+    for variant in plain indexed modified empty staged; do
+      setup="CREATE TABLE t(id INT PRIMARY KEY, v INT);
+CREATE TABLE tmp_old(id INT PRIMARY KEY, w INT);"
+      if [ "$variant" != empty ]; then
+        setup+="INSERT INTO t VALUES(1,10); INSERT INTO tmp_old VALUES(5,50);"
+      fi
+      if [ "$variant" = indexed ]; then
+        setup+="CREATE INDEX t_v ON t(v); CREATE INDEX old_w ON tmp_old(w);"
+      fi
+      setup+="SELECT dolt_commit('-Am','base');"
+      if [ "$variant" = staged ]; then
+        setup+="UPDATE t SET v=11; SELECT dolt_add('t'); UPDATE t SET v=12;"
+      fi
+      setup+="INSERT INTO dolt_ignore VALUES('tmp_*',1);"
+      if [ "$pattern" = committed ]; then
+        setup+="SELECT dolt_add('dolt_ignore'); SELECT dolt_commit('-m','pattern');"
+      fi
+      setup+="ALTER TABLE t RENAME TO tmp_t; ALTER TABLE tmp_old RENAME TO kept;"
+      if [ "$variant" = modified ]; then
+        setup+="INSERT INTO tmp_t VALUES(2,20); INSERT INTO kept VALUES(6,60);"
+      fi
+      case "$stage" in
+        dot) setup+="SELECT dolt_add('.');" ;;
+        all) setup+="SELECT dolt_add('-A');" ;;
+        force) setup+="SELECT dolt_add('-A','-f');" ;;
+        commit) setup+="SELECT dolt_commit('-Am','renames');" ;;
+      esac
+      if [ "$stage" != commit ]; then
+        oracle "rename_${stage}_${pattern}_${variant}_status" "$setup"
+        setup+="SELECT dolt_commit('-m','renames');"
+      fi
+      oracle_head_commit "rename_${stage}_${pattern}_${variant}_head" "$setup"
+    done
+  done
+done
+
 echo "--- scope: only gates new tables ---"
 
 oracle "already_tracked_still_shows" "
