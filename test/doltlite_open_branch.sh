@@ -116,6 +116,8 @@ check_match "deleted_branch_open_errors" 'branch or revision "copy" not found' "
 res=$("$DOLTLITE" "$DB/v1" "SELECT IFNULL(active_branch(),'NULL'); SELECT group_concat(id || ':' || v, ',') FROM t;" | normalize_output)
 check_eq "tag_open_is_detached" $'NULL\n1:main' "$res"
 
+res=$("$DOLTLITE" "$DB/v1" "SELECT group_concat(id, ',') FROM dolt_at_t('WORKING'); SELECT group_concat(id, ',') FROM dolt_at_t('STAGED'); SELECT dolt_hashof_db('WORKING') = dolt_hashof_db('HEAD');" 2>&1 | normalize_output)
+check_eq "detached_working_and_staged_are_head" $'1\n1\n1' "$res"
 res=$("$DOLTLITE" "$DB@v1" "SELECT IFNULL(active_branch(),'NULL'); SELECT dolt_hashof('HEAD') = (SELECT commit_hash FROM dolt_log WHERE message='init');" | normalize_output)
 check_eq "at_tag_open_is_detached" $'NULL\n1' "$res"
 
