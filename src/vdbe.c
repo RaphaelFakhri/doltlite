@@ -10322,13 +10322,19 @@ abort_due_to_error:
     char *zChunkSourceErr = doltliteTakeChunkSourceError(
         db, &chunkSourceRc);
     const char *zMissing = 0;
+    const char *zBusy = sqlite3ErrStr(SQLITE_BUSY);
     if( db->nDb>0 ){
       zMissing = doltliteBtreeMissingWriteBranch(db->aDb[0].pBt);
     }
     if( zMissing ){
       sqlite3_free(zChunkSourceErr);
-      sqlite3VdbeError(p, "cannot write: branch '%s' no longer exists",
-                       zMissing);
+      /* A command that already explained this failure keeps its message.
+      ** A bare miss, or the generic lock string, still says the branch
+      ** is gone. */
+      if( p->zErrMsg==0 || (zBusy && sqlite3_stricmp(p->zErrMsg, zBusy)==0) ){
+        sqlite3VdbeError(p, "cannot write: branch '%s' no longer exists",
+                         zMissing);
+      }
     }else if( zChunkSourceErr ){
       sqlite3VdbeError(p, "%s", zChunkSourceErr);
       sqlite3_free(zChunkSourceErr);
