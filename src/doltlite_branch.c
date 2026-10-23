@@ -211,6 +211,7 @@ struct BranchDeleteCtx {
   int force;
   int notMerged;
   int isDefault;
+  int isDirty;
 };
 
 static int mutateBranchDelete(sqlite3 *db, ChunkStore *cs, void *pArg){
@@ -230,6 +231,20 @@ static int mutateBranchDelete(sqlite3 *db, ChunkStore *cs, void *pArg){
     rc = chunkStoreFindBranch(cs, p->azName[i], &branchHead);
     if( rc!=SQLITE_OK ) return rc;
     if( !p->force ){
+      /* Another connection may be working on it; deleting the branch
+      ** discards its uncommitted rows. */
+      int iRef = csFindNamedRef(cs->refs.aBranches, cs->refs.nBranches,
+                                (int)sizeof(BranchRef), p->azName[i]);
+      int dirty = 0;
+      if( iRef>=0 ){
+        rc = doltliteBranchRefIsDirty(db, cs, &cs->refs.aBranches[iRef],
+                                      &dirty);
+        if( rc!=SQLITE_OK ) return rc;
+      }
+      if( dirty ){
+        p->isDirty = 1;
+        return SQLITE_CONSTRAINT;
+      }
       rc = doltliteFindAncestor(db, &currentHead, &branchHead, &ancestor);
       if( rc!=SQLITE_OK && rc!=SQLITE_NOTFOUND ) return rc;
       if( rc==SQLITE_NOTFOUND
@@ -292,6 +307,9 @@ static void doltBranchParsedFunc(
             "call dolt_default_branch(<other>) first");
         }else if( m.notMerged ){
           branchError(ctx, hadSavepoint, "branch is not fully merged");
+        }else if( m.isDirty ){
+          branchError(ctx, hadSavepoint,
+            "branch has uncommitted changes; use --force to delete it");
         }else{
           branchErrorCode(ctx, hadSavepoint, rc);
         }

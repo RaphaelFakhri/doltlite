@@ -130,7 +130,7 @@ static int brEof(sqlite3_vtab_cursor *c){
   return pCur->iRow >= pCur->nRows;
 }
 
-static int brIsDirty(
+int doltliteBranchRefIsDirty(
   sqlite3 *db,
   ChunkStore *cs,
   const BranchRef *br,
@@ -226,7 +226,7 @@ static int brColumn(sqlite3_vtab_cursor *c, sqlite3_context *ctx, int col){
       return SQLITE_OK;
     case 8: {
       int dirty = 0;
-      int rc = brIsDirty(v->db, cs, br, &dirty);
+      int rc = doltliteBranchRefIsDirty(v->db, cs, br, &dirty);
       if( rc!=SQLITE_OK ){
         sqlite3_result_error_code(ctx, rc);
         return rc;
