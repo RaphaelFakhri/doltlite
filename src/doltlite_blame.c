@@ -917,8 +917,10 @@ static int bmConnect(sqlite3 *db, void *pAux, int argc,
   v->bHasRowid = pTab && HasRowid(pTab);
   if( !pTab || v->nPkCols == 0 ){
     if( pzErr ){
-      *pzErr = sqlite3_mprintf(
-        "dolt_blame_%s: table has no primary key", v->zTableName);
+      *pzErr = pTab
+          ? sqlite3_mprintf("dolt_blame_%s: table has no primary key",
+                            v->zTableName)
+          : sqlite3_mprintf("no such table: dolt_blame_%s", v->zTableName);
     }
     blameFreePkColumns(v->azPkNames, v->azPkColl, v->aPkColIdx, v->nPkCols);
     sqlite3_free(v->zTableName);

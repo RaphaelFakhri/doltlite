@@ -171,7 +171,9 @@ static int refreshBranchScopedTables(sqlite3 *db){
   doltliteHistoricalModulesReset(db);
   rc = doltliteRegisterWorkspaceTables(db);
   if( rc!=SQLITE_OK ) return rc;
-  return doltliteRegisterBlameTables(db);
+  rc = doltliteRegisterBlameTables(db);
+  if( rc!=SQLITE_OK ) return rc;
+  return doltliteRefreshConstraintViolationTables(db);
 }
 
 typedef struct CheckoutMutationCtx CheckoutMutationCtx;

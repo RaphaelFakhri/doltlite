@@ -1144,7 +1144,9 @@ void doltliteHistoricalModulesReset(sqlite3 *db){
     if( sqlite3_strnicmp(zName, "dolt_at_", 8)==0
      || sqlite3_strnicmp(zName, "dolt_diff_", 10)==0
      || sqlite3_strnicmp(zName, "dolt_history_", 13)==0
-     || sqlite3_strnicmp(zName, "dolt_workspace_", 15)==0 ){
+     || sqlite3_strnicmp(zName, "dolt_workspace_", 15)==0
+     || sqlite3_strnicmp(zName, "dolt_blame_", 11)==0
+     || sqlite3_strnicmp(zName, "dolt_constraint_violations_", 27)==0 ){
       sqlite3VtabEponymousTableClear(db, pModule);
     }
   }
