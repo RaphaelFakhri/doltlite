@@ -322,6 +322,54 @@ CREATE TABLE keep(x INT PRIMARY KEY);
 SELECT dolt_commit('-A', '-m', 'second');
 "
 
+for stage in "dolt_add('.')" "dolt_add('-A')"; do
+  tag=dot; [ "$stage" = "dolt_add('-A')" ] && tag=A
+  oracle "add_${tag}_rename_into_ignored_unstaged" "
+CREATE TABLE t(id INT PRIMARY KEY, v INT);
+INSERT INTO t VALUES (1, 1);
+SELECT dolt_commit('-Am', 'base');
+INSERT INTO dolt_ignore VALUES ('tmp_*', 1);
+SELECT dolt_commit('-Am', 'pattern');
+ALTER TABLE t RENAME TO tmp_t;
+SELECT $stage;
+"
+  oracle "add_${tag}_renames_across_ignore" "
+CREATE TABLE t(id INT PRIMARY KEY, v INT);
+CREATE TABLE tmp_old(id INT PRIMARY KEY, v INT);
+INSERT INTO t VALUES (1, 1);
+INSERT INTO tmp_old VALUES (5, 5);
+SELECT dolt_commit('-Am', 'base');
+INSERT INTO dolt_ignore VALUES ('tmp_*', 1);
+SELECT dolt_commit('-Am', 'pattern');
+ALTER TABLE t RENAME TO tmp_t;
+ALTER TABLE tmp_old RENAME TO kept;
+SELECT $stage;
+"
+done
+
+oracle_head_commit "commit_A_head_renames_across_ignore" "
+CREATE TABLE t(id INT PRIMARY KEY, v INT);
+CREATE TABLE tmp_old(id INT PRIMARY KEY, v INT);
+INSERT INTO t VALUES (1, 1);
+INSERT INTO tmp_old VALUES (5, 5);
+SELECT dolt_commit('-Am', 'base');
+INSERT INTO dolt_ignore VALUES ('tmp_*', 1);
+SELECT dolt_commit('-Am', 'pattern');
+ALTER TABLE t RENAME TO tmp_t;
+ALTER TABLE tmp_old RENAME TO kept;
+SELECT dolt_commit('-Am', 'renames');
+"
+
+oracle_head_commit "commit_A_head_rename_into_ignored_nothing_to_commit" "
+CREATE TABLE t(id INT PRIMARY KEY, v INT);
+INSERT INTO t VALUES (1, 1);
+SELECT dolt_commit('-Am', 'base');
+INSERT INTO dolt_ignore VALUES ('tmp_*', 1);
+SELECT dolt_commit('-Am', 'pattern');
+ALTER TABLE t RENAME TO tmp_t;
+SELECT dolt_commit('-Am', 'rename');
+" --expect-error
+
 echo "--- scope: only gates new tables ---"
 
 oracle "already_tracked_still_shows" "
