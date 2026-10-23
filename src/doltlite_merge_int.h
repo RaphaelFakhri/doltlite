@@ -642,7 +642,8 @@ int mergeCatalogPass2(
   SchemaRootpageRemap **ppaRemap,
   int *pnRemap,
   char ***pazReindex,
-  int *pnReindex
+  int *pnReindex,
+  char **pzErrMsg
 );
 
 #endif /* DOLTLITE_MERGE_INT_H */

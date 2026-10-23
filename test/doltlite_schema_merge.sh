@@ -165,6 +165,41 @@ run_test "drop_vs_modify_later_table_u" "SELECT w FROM u WHERE id=1;" "x" "$DB"
 
 rm -f "$DB"
 
+# Rootpages stay in name order, so a new table can occupy the rootpage of a
+# table the other branch recreated. Pass 1 treats that alias as ours still
+# holding the dropped table. The merge must name the deletion.
+DB=/tmp/test_drop_recreate_alias_$$.db; rm -f "$DB"
+echo "CREATE TABLE t(a INTEGER PRIMARY KEY, v TEXT);
+CREATE TABLE keeper(a INTEGER PRIMARY KEY, w TEXT);
+INSERT INTO t VALUES(1,'base');
+INSERT INTO keeper VALUES(1,'k');
+SELECT dolt_commit('-Am','init');
+SELECT dolt_branch('feat');
+DROP TABLE t;
+CREATE TABLE s(a INTEGER PRIMARY KEY, z TEXT);
+CREATE TABLE s2(a INTEGER PRIMARY KEY, z TEXT);
+INSERT INTO s VALUES(1,'ours');
+SELECT dolt_commit('-Am','ours adds s2');
+SELECT dolt_checkout('feat');
+DROP TABLE t;
+CREATE TABLE pad(a INTEGER PRIMARY KEY, p TEXT);
+CREATE TABLE t(a INTEGER PRIMARY KEY, v TEXT);
+INSERT INTO t VALUES(9,'theirs');
+SELECT dolt_commit('-Am','theirs recreates t');
+SELECT dolt_checkout('main');" | $DOLTLITE "$DB" > /dev/null 2>&1
+
+run_test_error_match "drop_recreate_alias_merge" \
+  "SELECT dolt_merge('feat');" \
+  "schema conflict on table 't'.*cannot merge a table deletion with data modification" "$DB"
+run_test "drop_recreate_alias_head" \
+  "SELECT message FROM dolt_log LIMIT 1;" "ours adds s2" "$DB"
+run_test "drop_recreate_alias_tables" \
+  "SELECT group_concat(name) FROM (SELECT name FROM sqlite_master WHERE type='table' ORDER BY name);" \
+  "keeper,s,s2" "$DB"
+run_test "drop_recreate_alias_keeper" "SELECT w FROM keeper WHERE a=1;" "k" "$DB"
+
+rm -f "$DB"
+
 DB=/tmp/test_alter_cp_$$.db; rm -f "$DB"
 echo "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);
 INSERT INTO t VALUES(1,'a');

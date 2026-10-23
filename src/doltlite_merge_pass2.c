@@ -344,7 +344,8 @@ int mergeCatalogPass2(
   SchemaRootpageRemap **ppaRemap,
   int *pnRemap,
   char ***pazReindex,
-  int *pnReindex
+  int *pnReindex,
+  char **pzErrMsg
 ){
   int i, rc = SQLITE_OK;
 
@@ -565,7 +566,29 @@ int mergeCatalogPass2(
       }else{
 
         int theirsChanged = prollyHashCompare(&aTheirs[i].root, &ancEntry->root)!=0;
-        if( theirsChanged ) return SQLITE_ERROR;
+        /* Pass 1 misses this when ours reused theirs' rootpage for a new
+        ** table. Theirs changed an ancestor table ours no longer has. */
+        if( theirsChanged ){
+          SchemaEntry *pAncSe;
+          SchemaEntry *pTheirSe;
+          const char *zKind;
+          pAncSe = findSchemaEntry(aAncSchema, nAncSchema, zName);
+          pTheirSe = findSchemaEntry(aTheirsSchema, nTheirsSchema, zName);
+          if( pAncSe && pTheirSe && pAncSe->zSql && pTheirSe->zSql
+           && strcmp(pAncSe->zSql, pTheirSe->zSql)==0 ){
+            zKind = "data modification";
+          }else{
+            zKind = "schema modification";
+          }
+          if( pzErrMsg && !*pzErrMsg ){
+            *pzErrMsg = sqlite3_mprintf(
+                "schema conflict on table '%s' \xe2\x80\x94 "
+                "cannot merge a table deletion with %s",
+                zName, zKind);
+            if( !*pzErrMsg ) return SQLITE_NOMEM;
+          }
+          return SQLITE_ERROR;
+        }
 
       }
     }
