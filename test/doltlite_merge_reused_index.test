@@ -1,0 +1,105 @@
+set testdir [file dirname $argv0]
+source $testdir/tester.tcl
+
+foreach {layout key} {rowid {INTEGER PRIMARY KEY} clustered {INT PRIMARY KEY}} {
+  foreach padding {0 32} {
+    foreach direction {forward reverse} {
+      foreach mode {autocommit explicit savepoint} {
+        reset_db
+        execsql "CREATE TABLE a(id $key,v TEXT,n INT)"
+        execsql {
+          CREATE INDEX ai ON a(v);
+          INSERT INTO a VALUES(1,'base',10);
+        }
+        for {set i 0} {$i<$padding} {incr i} {
+          execsql "CREATE TABLE pad_${i}(id INTEGER PRIMARY KEY)"
+        }
+        execsql {
+          SELECT dolt_commit('-Am','base');
+          SELECT dolt_checkout('-b','side');
+          DROP TABLE a;
+        }
+        execsql "CREATE TABLE b(id $key,v TEXT,n INT)"
+        execsql {
+          CREATE INDEX ai ON b(v);
+          INSERT INTO b VALUES(3,'side',30);
+          BEGIN;
+          CREATE TABLE tx(id INTEGER PRIMARY KEY,payload TEXT);
+          CREATE INDEX tx_idx ON tx(payload);
+          INSERT INTO tx VALUES(1,'transaction');
+          SELECT dolt_add('-A');
+          SELECT dolt_commit('-m','side');
+          COMMIT;
+          SELECT dolt_checkout('main');
+          INSERT INTO a VALUES(2,'main',20);
+          SELECT dolt_commit('-Am','main');
+        }
+        set target side
+        set owner a
+        set branch main
+        if {$direction eq "reverse"} {
+          execsql {SELECT dolt_checkout('side')}
+          set target main
+          set owner b
+          set branch side
+        }
+        set before [execsql {
+          SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name;
+          SELECT dolt_hashof('HEAD');
+        }]
+        set prefix reused-index-$layout-$padding-$direction-$mode
+        if {$mode ne "autocommit"} {execsql BEGIN}
+        if {$mode eq "savepoint"} {execsql {SAVEPOINT before_merge}}
+        do_test $prefix.conflict {
+          set result [catchsql "SELECT dolt_merge('$target')"]
+          list [lindex $result 0] [string match {*conflict*} [lindex $result 1]]
+        } {1 1}
+        if {$mode eq "explicit"} {
+          do_execsql_test $prefix.recorded {
+            SELECT table_name FROM dolt_schema_conflicts;
+            SELECT is_merging FROM dolt_merge_status;
+          } {a 1}
+          do_execsql_test $prefix.owner {
+            SELECT tbl_name FROM sqlite_schema WHERE name='ai';
+            PRAGMA integrity_check;
+          } [list $owner ok]
+          do_execsql_test $prefix.transaction-index {
+            SELECT id,payload FROM tx INDEXED BY tx_idx WHERE payload='transaction';
+          } {1 transaction}
+          if {$direction eq "forward"} {
+            do_execsql_test $prefix.retained {
+              SELECT id,v,n FROM a INDEXED BY ai WHERE v='main';
+              SELECT id,v,n FROM b;
+            } {2 main 20 3 side 30}
+          }
+          do_execsql_test $prefix.abort {SELECT dolt_merge('--abort')} {0}
+        }
+        if {$mode eq "savepoint"} {
+          do_execsql_test $prefix.savepoint {ROLLBACK TO before_merge} {}
+        }
+        if {$mode ne "autocommit"} {execsql ROLLBACK}
+        do_test $prefix.restored {
+          execsql {
+            SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name;
+            SELECT dolt_hashof('HEAD');
+          }
+        } $before
+        do_execsql_test $prefix.clean {
+          SELECT count(*) FROM dolt_schema_conflicts;
+          SELECT is_merging FROM dolt_merge_status;
+          PRAGMA integrity_check;
+        } {0 0 ok}
+        db close
+        sqlite3 db test.db/$branch
+        do_test $prefix.reopen {
+          execsql {
+            SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name;
+            SELECT dolt_hashof('HEAD');
+          }
+        } $before
+        do_execsql_test $prefix.reopen-integrity {PRAGMA integrity_check} {ok}
+      }
+    }
+  }
+}
+finish_test

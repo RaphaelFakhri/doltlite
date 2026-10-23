@@ -2578,4 +2578,65 @@ SELECT dolt_commit('-Am','defaults');"
   done
 done
 
+for keymode in integer text; do
+  key='id INTEGER PRIMARY KEY'
+  if [ "$keymode" = text ]; then key='id VARCHAR(32) PRIMARY KEY'; fi
+  for direction in forward reverse; do
+    tag="reused_index_${keymode}_${direction}"
+    DB="$TMPROOT/$tag.db"
+    dl_setup "$DB" "$tag" <<SQL
+CREATE TABLE a($key,v VARCHAR(100),n INT);
+CREATE INDEX ai ON a(v);
+INSERT INTO a VALUES(1,'base',10);
+SELECT dolt_commit('-Am','base');
+SELECT dolt_checkout('-b','feat');
+DROP TABLE a;
+CREATE TABLE b($key,v VARCHAR(100),n INT);
+CREATE INDEX ai ON b(v);
+INSERT INTO b VALUES(3,'feat',30);
+BEGIN;
+CREATE TABLE tx(id INTEGER PRIMARY KEY,payload VARCHAR(100));
+CREATE INDEX tx_idx ON tx(payload);
+INSERT INTO tx VALUES(1,'transaction');
+SELECT dolt_add('-A');
+SELECT dolt_commit('-m','feat');
+COMMIT;
+SELECT dolt_checkout('main');
+INSERT INTO a VALUES(2,'main',20);
+SELECT dolt_commit('-Am','main');
+SQL
+    target=feat
+    owner=a
+    open=''
+    rows=$'1|base|10\n2|main|20'
+    repo=$(dt_repo_for_db "$DB")
+    if [ "$direction" = reverse ]; then
+      (cd "$repo" && "$DOLT" checkout feat) \
+        >"$TMPROOT/$tag.dt.checkout.out" 2>"$TMPROOT/$tag.dt.checkout.err"
+      open=".open '$DB/feat'"
+      target=main
+      owner=b
+      rows='3|feat|30'
+    fi
+    (cd "$repo" && "$DOLT" sql -q \
+      "SET @@dolt_allow_commit_conflicts=1; SET autocommit=0; CALL dolt_merge('$target'); COMMIT;") \
+      >"$TMPROOT/$tag.dt.merge.out" 2>"$TMPROOT/$tag.dt.merge.err"
+    expect_dual_value "${tag}_conflict" "$DB" a \
+      "$open
+BEGIN; SELECT dolt_merge('$target');
+SELECT table_name FROM dolt_schema_conflicts;" \
+      "SELECT table_name FROM dolt_schema_conflicts;"
+    expect_dual_value "${tag}_indexed_rows" "$DB" "$rows" \
+      "$open
+BEGIN; SELECT dolt_merge('$target');
+SELECT concat(id,'|',v,'|',n) FROM $owner INDEXED BY ai ORDER BY id;" \
+      "SELECT concat(id,'|',v,'|',n) FROM $owner FORCE INDEX(ai) ORDER BY id;"
+    expect_dual_value "${tag}_transaction_index" "$DB" '1|transaction' \
+      "$open
+BEGIN; SELECT dolt_merge('$target');
+SELECT concat(id,'|',payload) FROM tx INDEXED BY tx_idx WHERE payload='transaction';" \
+      "SELECT concat(id,'|',payload) FROM tx FORCE INDEX(tx_idx) WHERE payload='transaction';"
+  done
+done
+
 vc_oracle_finish
