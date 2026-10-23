@@ -5420,8 +5420,8 @@ fts5content fts5content-3.4 class=intentional issue=1840  # rowids continue afte
 fts5content fts5content-3.5 class=intentional issue=1840  # rowids continue after delete-all instead of restarting at 1
 fts5content fts5content-6.1 class=intentional issue=1852  # canonical adoption: sqlite_master order of fts5 shadow tables
 fts5contentless fts5contentless-3.1 class=intentional issue=1852  # canonical adoption: unquoted shadow-table SQL text
-fts5contentless4 fts5contentless4-2.3.*{500} class=engine-gap issue=4163  # contentless_delete nentry counts drift after delete and reinsert
-fts5contentless4 fts5contentless4-3.12 class=engine-gap issue=4163  # deletemerge tombstone and entry counts
+fts5contentless4 fts5contentless4-2.3.*{500} class=intentional issue=1840  # shared rowid counter: reinsert does not reuse the deleted rowids, so the replacement delete misses
+fts5contentless4 fts5contentless4-3.12 class=intentional issue=1840  # shared rowid counter: after delete-all, rowid<95 misses the new rows and both segments remain
 fts5corrupt7 fts5corrupt7-3.0 class=intentional issue=2493  # journal_mode reports wal
 fts5corruptA fts5corruptA-1.4 class=intentional issue=2493  # page_count is a chunk-store metric, not a SQLite page count
 fts5corruptA fts5corruptA-1.5 class=intentional  # injected blob is not a SQLite page, so the store reports a malformed image
