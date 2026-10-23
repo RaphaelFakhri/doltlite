@@ -767,6 +767,7 @@ int btreeReadWorkingCatalog(ChunkStore*, const char*, ProllyHash*, ProllyHash*);
 int btreeWriteWorkingState(ChunkStore*, const char*, const ProllyHash*,
                            const ProllyHash*);
 void btreeBumpLocalDataVersion(Btree*);
+void btreeBumpExternalDataVersion(Btree*);
 int btreeRefreshFromDisk(Btree*);
 int btreeRefreshSharedWorkingState(Btree*);
 int btreeReadResult(Btree*, int);

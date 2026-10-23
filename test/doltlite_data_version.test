@@ -93,5 +93,91 @@ do_test doltlite_data_version-1.10 {
   }
 } {3}
 
+# A write transaction is what first notices the peer commit. A read would
+# bump the version; BEGIN IMMEDIATE has to as well, or the new rows are
+# visible under the old cookie.
+do_test doltlite_data_version-1.11 {
+  db eval {
+    INSERT INTO t1 VALUES(600);
+  }
+  db2 eval {
+    BEGIN IMMEDIATE;
+    SELECT count(*) FROM t1;
+    PRAGMA data_version;
+    INSERT INTO t1 VALUES(601);
+    PRAGMA data_version;
+    COMMIT;
+    PRAGMA data_version;
+  }
+} {6 4 4 4}
+
+# Each do_test reports only its last command. The FTS writes below are the
+# sequence that corrupts the inverted index when the adopter keeps the old
+# data_version: peer match, peer insert, local match, optimize, then a
+# third connection's integrity check.
+do_test doltlite_data_version-1.12.1 {
+  db eval {
+    CREATE VIRTUAL TABLE f USING fts5(x);
+    INSERT INTO f VALUES('one');
+    PRAGMA data_version;
+  }
+} {3}
+
+do_test doltlite_data_version-1.12.2 {
+  db2 eval {
+    SELECT rowid FROM f('one');
+    PRAGMA data_version;
+  }
+} {1 5}
+
+do_test doltlite_data_version-1.12.3 {
+  db2 eval { INSERT INTO f VALUES('two'); }
+  db eval {
+    SELECT rowid FROM f('one OR two') ORDER BY rowid;
+    PRAGMA data_version;
+  }
+} {1 2 4}
+
+do_test doltlite_data_version-1.12.4 {
+  db2 eval {
+    INSERT INTO f VALUES('three');
+    INSERT INTO f(f) VALUES('optimize');
+  }
+  db eval {
+    INSERT INTO f VALUES('four');
+    SELECT rowid FROM f('one OR two OR three OR four') ORDER BY rowid;
+    PRAGMA integrity_check;
+    PRAGMA data_version;
+  }
+} {1 2 3 4 ok 5}
+
+do_test doltlite_data_version-1.12.5 {
+  sqlite3 db3 test.db
+  db3 eval {
+    SELECT rowid FROM f('one OR two OR three OR four') ORDER BY rowid;
+    PRAGMA integrity_check;
+  }
+} {1 2 3 4 ok}
+
+# A later write transaction on the connection that just committed stays on
+# the same data version. Adopting a peer commit is what changes it.
+do_test doltlite_data_version-1.13 {
+  set before [db one {PRAGMA data_version}]
+  db eval {
+    BEGIN IMMEDIATE;
+    INSERT INTO t1 VALUES(700);
+    COMMIT;
+  }
+  set mid [db one {PRAGMA data_version}]
+  db eval {
+    BEGIN IMMEDIATE;
+    INSERT INTO t1 VALUES(701);
+    COMMIT;
+  }
+  set after [db one {PRAGMA data_version}]
+  expr {$before==$mid && $mid==$after}
+} {1}
+
+db3 close
 db2 close
 finish_test
