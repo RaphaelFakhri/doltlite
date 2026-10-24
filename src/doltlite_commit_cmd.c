@@ -1010,10 +1010,10 @@ static void doltliteCommitFuncImpl(
 
   if( !sealTopLevel
    && (!db->autoCommit
-       || db->pSavepoint)
-   && !doltliteDeferJoinedCommandSeal(db) ){
+       || db->pSavepoint) ){
     /* Plain BEGIN and nested SAVEPOINT stay rollbackable until validation. */
-    rc = sqlite3_exec(db, "COMMIT", 0, 0, 0);
+    rc = doltlitePrepareJoinedCommit(db);
+    if( rc==SQLITE_DONE ) rc = sqlite3_exec(db, "COMMIT", 0, 0, 0);
     if( rc!=SQLITE_OK ){
       sqlite3_result_error(context, sqlite3_errmsg(db), -1);
       sqlite3_result_error_code(context, rc);
@@ -1101,7 +1101,11 @@ static void doltliteCommitFuncImpl(
           return;
         }
       }
-      if( rc==SQLITE_OK && bSame ){
+      if( rc!=SQLITE_OK ){
+        sqlite3_result_error_code(context, rc);
+        return;
+      }
+      if( bSame ){
         if( allowEmpty ){
 
         }else if( skipEmpty ){

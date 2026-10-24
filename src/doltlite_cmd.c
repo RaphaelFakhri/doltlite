@@ -101,12 +101,22 @@ struct AtomicJoinedCommand {
   u8 bUserSavepoint;
   u8 bReleaseSavepoints;
   u8 bSqlWrite;
+  u8 bSealOnError;
 };
 
 static int cmdBeginAtomicJoined(Btree *p){
   AtomicJoinedCommand *s;
   sqlite3 *db = p->db;
+  ChunkStore *cs = &p->pBt->store;
+  ProllyHash tip;
+  int found = 0;
   int rc;
+  if( !cs->isMemory && !cs->isBuffer ){
+    rc = chunkStoreReadDiskBranchTip(cs, doltliteGetSessionBranch(db),
+                                    &tip, &found);
+    if( rc!=SQLITE_OK ) return rc;
+    if( !found && cs->refs.nBranches>0 ) return SQLITE_DONE;
+  }
   rc = sqlite3BtreeBeginTrans(p, 0, 0);
   if( rc!=SQLITE_OK ) return rc;
   s = sqlite3_malloc64(sizeof(*s));
@@ -148,6 +158,22 @@ int doltliteDeferJoinedCommandSeal(sqlite3 *db){
   return 1;
 }
 
+int doltlitePrepareJoinedCommit(sqlite3 *db){
+  Btree *p = db->nDb>0 ? db->aDb[0].pBt : 0;
+  int rc = SQLITE_OK;
+  if( !p || !p->pAtomicCommand ) return SQLITE_DONE;
+  if( p->inTrans==TRANS_READ ){
+    rc = sqlite3BtreeCommit(p);
+    if( rc==SQLITE_OK ) rc = doltliteReloadSessionWorkingState(db);
+    if( rc==SQLITE_OK ) rc = sqlite3BtreeBeginTrans(p, 0, 0);
+  }
+  if( rc==SQLITE_OK ){
+    p->bAtomicCommandSeal = 1;
+    ((AtomicJoinedCommand*)p->pAtomicCommand)->bSealOnError = 1;
+  }
+  return rc;
+}
+
 int doltliteCommandHasUserSavepoint(sqlite3 *db){
   Btree *p = db->nDb>0 ? db->aDb[0].pBt : 0;
   if( p && p->pAtomicCommand ){
@@ -178,8 +204,9 @@ static int cmdEndAtomicJoined(Btree *p, sqlite3_context *ctx){
   int i;
   int rc = SQLITE_OK;
   int restoreRc;
+  int sealError = s && s->bSealOnError && ctx->isError==SQLITE_ERROR;
   if( !s ) return SQLITE_OK;
-  if( !ctx->isError && p->bAtomicCommandSeal ){
+  if( (!ctx->isError || sealError) && p->bAtomicCommandSeal ){
     rc = sqlite3VtabSync(db, ctx->pVdbe);
     if( rc==SQLITE_OK && sqlite3VdbeCheckFkDeferred(ctx->pVdbe)!=SQLITE_OK ){
       rc = ctx->pVdbe->rc;
@@ -258,6 +285,10 @@ static int cmdEndAtomicJoined(Btree *p, sqlite3_context *ctx){
   doltliteTxnStateClear(&s->state);
   sqlite3_free(s);
   doltliteBtreeFinishJoinedCommand(p, installed ? &catalog : 0, preparedCatalog);
+  if( sealError && rc!=SQLITE_OK ){
+    sqlite3_result_error(ctx, sqlite3ErrStr(rc), -1);
+    sqlite3_result_error_code(ctx, rc);
+  }
   return rc;
 }
 
@@ -321,7 +352,7 @@ static int cmdScopeBegin(
   if( pScope->bInBegin && eScope==DOLTLITE_CMD_ATOMIC ){
     rc = cmdBeginAtomicJoined(pMain);
     pScope->bAtomic = rc==SQLITE_OK;
-    if( rc!=SQLITE_OK ){
+    if( rc!=SQLITE_OK && rc!=SQLITE_DONE ){
       doltliteBtreeEndJoinedCommand(pMain);
       cs->nOuterLockHold = 0;
       chunkStoreUnlock(cs);
@@ -477,6 +508,9 @@ static void doltliteAtomicCommandFunc(
   sqlite3_value **argv
 ){
   int eScope = DOLTLITE_CMD_ATOMIC;
+  if( sqlite3_context_db_handle(ctx)->nVdbeWrite>0 ){
+    eScope = DOLTLITE_CMD_SCOPED;
+  }
   if( argc==1 && sqlite3_value_type(argv[0])==SQLITE_TEXT ){
     const char *z = (const char*)sqlite3_value_text(argv[0]);
     if( z && strcmp(z, "--abort")==0 ) eScope = DOLTLITE_CMD_SCOPED;
