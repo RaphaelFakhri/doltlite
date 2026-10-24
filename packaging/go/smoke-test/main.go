@@ -108,6 +108,31 @@ func main() {
 	_, err = db.Query(`SELECT * FROM missing_table`)
 	check("bad SQL errors", err != nil, true)
 
+	_, err = db.Exec(`CREATE TABLE m(pk INTEGER PRIMARY KEY, s TEXT);
+		INSERT INTO m VALUES (1, 'a');`)
+	must(err)
+	err = db.QueryRow(`SELECT s FROM m`).Scan(&s)
+	check("multi-statement exec runs every statement", err == nil && s == "a", true)
+	res, err = db.Exec(`DELETE FROM m;
+		INSERT INTO m VALUES (?, ?); -- first row
+		INSERT INTO m VALUES (?, 'b'), (3, 'c');`, 1, "a", 2)
+	must(err)
+	n, err = res.RowsAffected()
+	must(err)
+	check("multi-statement exec rows affected", n, int64(2))
+	must(db.QueryRow(`SELECT group_concat(s, '') FROM (SELECT s FROM m ORDER BY pk)`).Scan(&s))
+	check("multi-statement exec binds args in order", s, "abc")
+	_, err = db.Exec(`INSERT INTO m VALUES (?, 'd'); INSERT INTO m VALUES (?, 'e')`, 4)
+	check("multi-statement exec with too few args errors", err != nil, true)
+	_, err = db.Exec(`INSERT INTO m VALUES (?, 'f')`, 6, 7)
+	check("exec with extra args errors", err != nil, true)
+	_, err = db.Exec(` -- nothing`)
+	check("exec with no statement errors", err != nil, true)
+	_, err = db.Exec(`INSERT INTO m VALUES (:pk, 'g')`, sql.Named("pk", 7))
+	check("exec with named args errors", err != nil, true)
+	_, err = db.Exec(`DELETE FROM m; DELETE FROM m WHERE pk = ?`, 1, 2)
+	check("multi-statement exec with extra args errors", err != nil, true)
+
 	// Transactions.
 	tx, err := db.Begin()
 	must(err)
