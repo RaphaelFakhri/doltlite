@@ -1010,7 +1010,8 @@ static void doltliteCommitFuncImpl(
 
   if( !sealTopLevel
    && (!db->autoCommit
-       || db->pSavepoint) ){
+       || db->pSavepoint)
+   && !doltliteDeferJoinedCommandSeal(db) ){
     /* Plain BEGIN and nested SAVEPOINT stay rollbackable until validation. */
     rc = sqlite3_exec(db, "COMMIT", 0, 0, 0);
     if( rc!=SQLITE_OK ){
