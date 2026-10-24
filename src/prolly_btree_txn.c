@@ -788,18 +788,50 @@ int prollyBtreeBeginTrans(Btree *p, int wrFlag, int *pSchemaVersion){
       }
     }
 
+    /* A refresh can adopt a peer tip and spend the change signal without
+    ** reloading this session. The next version-control command then
+    ** confirms the head it still holds. Pick up that tip before the
+    ** command reads it. An open transaction keeps its snapshot, and a
+    ** commit that lands after this point still fails the confirm. */
+    if( p->inTrans==TRANS_NONE && p->db && p->db->pVcCommand
+     && p->db->autoCommit && !p->db->pSavepoint && !p->isDetached
+     && pBt->store.staging.nRecentUncommitted==0
+     && pBt->store.staging.nPending==0
+     && prollyHashCompare(&pBt->store.refs.refsHash,
+                          &pBt->store.refs.committedRefsHash)==0 ){
+      rc = chunkStoreForceRefresh(&pBt->store);
+      if( rc!=SQLITE_OK ){
+        chunkStoreUnlock(&pBt->store);
+        return rc;
+      }
+    }
+
     /* bStoreChanged is any refresh, including another branch. Only a peer
     ** write to this branch's working set changes the data version: a cached
     ** vtab index otherwise keeps the old cookie and writes into the new
-    ** catalog. The basis is captured before the reload, which adopts it. */
+    ** catalog. The basis is captured before the reload, which adopts it.
+    ** bStaleHead is that same peer tip already in memory while this session
+    ** still names the previous one, which is what a spent signal leaves. */
     {
       const char *zBranch = p->zBranch ? p->zBranch : "main";
       int bPeerWrite;
+      int bStaleHead;
       ProllyHash loadedCatHash;
+      ProllyHash branchTip;
       bPeerWrite = chunkStoreWorkingSetMovedFromBasis(&pBt->store, zBranch);
+      bStaleHead = 0;
+      memset(&branchTip, 0, sizeof(branchTip));
+      if( p->inTrans==TRANS_NONE && p->db && p->db->autoCommit
+       && !p->db->pSavepoint && !p->isDetached
+       && chunkStoreFindBranch(&pBt->store, zBranch, &branchTip)==SQLITE_OK
+       && prollyHashCompare(&branchTip, &p->headCommit)!=0 ){
+        bStaleHead = 1;
+      }
+      if( bStaleHead ) p->bForceCatalogReload = 1;
       if( p->inTrans==TRANS_READ
        || bStoreChanged
        || bPeerWrite
+       || bStaleHead
        || (prollyHashIsEmpty(&p->committedCatalogHash) && p->cat.n>1) ){
         memset(&loadedCatHash, 0, sizeof(loadedCatHash));
         rc = btreeReloadBranchWorkingStateInto(p, 1, &loadedCatHash);
@@ -809,7 +841,7 @@ int prollyBtreeBeginTrans(Btree *p, int wrFlag, int *pSchemaVersion){
         }
         btreeStoreCommittedFromCurrent(p, &loadedCatHash);
         p->bCatalogDropped = 0;
-        if( bPeerWrite ){
+        if( bPeerWrite || bStaleHead ){
           p->bForceCatalogReload = 0;
           p->iLoadedWorkingStateVersion = pBt->iWorkingStateVersion;
           btreeBumpExternalDataVersion(p);

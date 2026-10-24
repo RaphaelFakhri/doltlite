@@ -4292,6 +4292,24 @@ static void staleCloseSession(sqlite3 *db, const char *zDb, const char *zRemote)
   if( zRemote && zRemote[0] ) removeDbFiles(zRemote);
 }
 
+/* Adopt the peer tip into this handle and retarget the working-set basis,
+** without reloading the session. The change signal is spent, so the next
+** command no longer sees a store refresh of its own. */
+static int spendRefreshOnPeerTip(sqlite3 *db, int bReadopt){
+  ChunkStore *cs;
+  int rc;
+  cs = doltliteGetChunkStore(db);
+  if( !cs ) return SQLITE_MISUSE;
+  rc = chunkStoreLockAndRefresh(cs);
+  if( rc==SQLITE_OK ) rc = chunkStoreForceRefresh(cs);
+  /* Matching the basis is what leaves the next autocommit write with
+  ** nothing to reload: the peer tip is in memory, and the session head
+  ** is not. A transaction still has its old basis, so it must refuse. */
+  if( rc==SQLITE_OK && bReadopt ) chunkStoreReadoptWorkingSetBasis(cs);
+  if( cs->lockDepth>0 ) chunkStoreUnlock(cs);
+  return rc;
+}
+
 static void checkPeerVisible(sqlite3 *db, const char *zRow, const char *zHead,
                              const char *zAgain){
   check(zRow, strcmp(queryScalarText(db,
@@ -4522,6 +4540,90 @@ static void run_refresh_then_vc(void){
       }
     }
   }
+}
+
+/* A refresh that already adopted a peer commit must not make the next
+** autocommit reset or pull report that commit as a new conflict. An open
+** transaction still refuses: its snapshot is the pre-commit head. */
+static void run_reset_after_spent_refresh(void){
+  sqlite3 *db = 0;
+  char zDb[256];
+  char zRemote[256];
+  char zMsg[512];
+  const char *zGot;
+  int rc;
+
+  printf("=== Reset After Spent Refresh Test ===\n\n");
+
+  rc = staleOpenSession("spent_reset", 0, 0, &db,
+                        zDb, (int)sizeof(zDb), zRemote, (int)sizeof(zRemote));
+  check("spent_reset_open", rc==SQLITE_OK);
+  if( rc!=SQLITE_OK ) return;
+  check("spent_reset_warm",
+        strcmp(queryScalarText(db, "SELECT count(*) FROM t"), "0")==0);
+  check("spent_reset_peer", stalePeerCommit(zDb)==SQLITE_OK);
+  check("spent_reset_refresh", spendRefreshOnPeerTip(db, 1)==SQLITE_OK);
+  zGot = queryScalarText(db, "SELECT dolt_reset('--soft','HEAD')");
+  snprintf(zMsg, sizeof(zMsg), "%s", zGot ? zGot : "");
+  check("spent_reset_soft_head", strcmp(zMsg, "0")==0);
+  if( strcmp(zMsg, "0")!=0 ){
+    fprintf(stderr, "  spent_reset_soft_head got: %s\n", zMsg);
+  }
+  checkPeerVisible(db, "spent_reset_keeps_row", "spent_reset_keeps_head",
+                   "spent_reset_keeps_count");
+  staleCloseSession(db, zDb, zRemote);
+  db = 0;
+
+  rc = staleOpenSession("spent_reset_txn", 0, 0, &db,
+                        zDb, (int)sizeof(zDb), zRemote, (int)sizeof(zRemote));
+  check("spent_txn_open", rc==SQLITE_OK);
+  if( rc!=SQLITE_OK ) return;
+  check("spent_txn_begin", execSql(db, "BEGIN")==SQLITE_OK);
+  check("spent_txn_warm",
+        strcmp(queryScalarText(db, "SELECT count(*) FROM t"), "0")==0);
+  check("spent_txn_peer", stalePeerCommit(zDb)==SQLITE_OK);
+  check("spent_txn_refresh", spendRefreshOnPeerTip(db, 0)==SQLITE_OK);
+  zGot = queryScalarText(db, "SELECT dolt_reset('--soft','HEAD')");
+  snprintf(zMsg, sizeof(zMsg), "%s", zGot ? zGot : "");
+  check("spent_txn_busy", strncmp(zMsg, "ERROR:", 6)==0);
+  if( strncmp(zMsg, "ERROR:", 6)!=0 ){
+    fprintf(stderr, "  spent_txn_busy got: %s\n", zMsg);
+  }
+  check("spent_txn_keeps_snapshot",
+        strcmp(queryScalarText(db, "SELECT count(*) FROM t"), "0")==0);
+  check("spent_txn_keeps_head",
+        strcmp(queryScalarText(db,
+            "SELECT message FROM dolt_log LIMIT 1"), "init")==0);
+  check("spent_txn_rollback", execSql(db, "ROLLBACK")==SQLITE_OK);
+  zGot = queryScalarText(db, "SELECT dolt_reset('--soft','HEAD')");
+  snprintf(zMsg, sizeof(zMsg), "%s", zGot ? zGot : "");
+  check("spent_txn_retry", strcmp(zMsg, "0")==0);
+  checkPeerVisible(db, "spent_txn_retry_row", "spent_txn_retry_head",
+                   "spent_txn_retry_count");
+  staleCloseSession(db, zDb, zRemote);
+  db = 0;
+
+  rc = staleOpenSession("spent_pull", 1, 1, &db,
+                        zDb, (int)sizeof(zDb), zRemote, (int)sizeof(zRemote));
+  check("spent_pull_open", rc==SQLITE_OK);
+  if( rc!=SQLITE_OK ) return;
+  check("spent_pull_warm",
+        strcmp(queryScalarText(db, "SELECT count(*) FROM t"), "0")==0);
+  check("spent_pull_peer", stalePeerCommit(zDb)==SQLITE_OK);
+  check("spent_pull_refresh", spendRefreshOnPeerTip(db, 1)==SQLITE_OK);
+  zGot = queryScalarText(db, "SELECT dolt_pull('origin')");
+  snprintf(zMsg, sizeof(zMsg), "%s", zGot ? zGot : "");
+  check("spent_pull_ok", strcmp(zMsg, "0")==0);
+  if( strcmp(zMsg, "0")!=0 ){
+    fprintf(stderr, "  spent_pull_ok got: %s\n", zMsg);
+  }
+  check("spent_pull_keeps_peer_row", strcmp(queryScalarText(db,
+      "SELECT count(*) FROM t WHERE id=900"), "1")==0);
+  check("spent_pull_keeps_peer_commit", strcmp(queryScalarText(db,
+      "SELECT count(*) FROM dolt_log WHERE message='peer'"), "1")==0);
+  check("spent_pull_brings_remote", strcmp(queryScalarText(db,
+      "SELECT count(*) FROM z WHERE a=1"), "1")==0);
+  staleCloseSession(db, zDb, zRemote);
 }
 
 static void run_chunk_walk_corruption(void){
@@ -18886,6 +18988,7 @@ static const RegressionCase aCases[] = {
   { "file_remote_url_absolute", "File Remote URL Absolute Test", run_file_remote_url_absolute },
   { "fetch_gc_sees_peer_commit", "Fetch GC Sees Peer Commit Test", run_fetch_gc_sees_peer_commit },
   { "refresh_then_vc", "Refresh Then VC Test", run_refresh_then_vc },
+  { "reset_after_spent_refresh", "Reset After Spent Refresh Test", run_reset_after_spent_refresh },
   { "chunk_walk_corruption", "Chunk Walk Corruption Test", run_chunk_walk_corruption },
   { "catalog_deserialize_corruption", "Catalog Deserialize Corruption Test", run_catalog_deserialize_corruption },
   { "schema_loader_missing_master", "Schema Loader Missing Master Test", run_schema_loader_missing_master },
