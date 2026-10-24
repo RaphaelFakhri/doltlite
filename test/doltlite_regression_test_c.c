@@ -2272,6 +2272,9 @@ static void test_concurrent_refs_gc_on_deleted_branch_keeps_add(void){
     execSql(peer, "SELECT dolt_branch('-D','b3')")==SQLITE_OK);
   check("gcdel_peer_insert",
     execSql(peer, "INSERT INTO w VALUES(92,'acked')")==SQLITE_OK);
+  /* Windows cannot sweep a file another connection holds open. */
+  sqlite3_close(peer);
+  peer = 0;
   check("gcdel_gc", execSql(stranded, "SELECT dolt_gc()")==SQLITE_OK);
   check("gcdel_checkout",
     execSql(stranded, "SELECT dolt_checkout('b2')")==SQLITE_OK);
@@ -2279,7 +2282,6 @@ static void test_concurrent_refs_gc_on_deleted_branch_keeps_add(void){
   check("gcdel_commit",
     execSql(stranded, "SELECT dolt_commit('-m','after gc')")==SQLITE_OK);
   sqlite3_close(stranded);
-  sqlite3_close(peer);
 
   check("gcdel_open_fresh", open_db(b2path, &fresh)==SQLITE_OK);
   check("gcdel_commit_has_acked_row", strcmp(queryScalarText(fresh,
