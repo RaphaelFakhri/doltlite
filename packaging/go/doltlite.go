@@ -387,10 +387,45 @@ func (c *conn) prepare(query string) (*stmt, string, error) {
 	return s, rest, nil
 }
 
+// tailHasNoStatement reports whether rest, the uncompiled tail after a
+// prepared statement, holds only semicolons, whitespace, and comments.
+// sqlite3_prepare_v2 stops at the first statement, so those leftovers are
+// still in rest and are not another statement. The parameter count has to
+// be decided before this statement runs.
+func tailHasNoStatement(rest string) bool {
+	for i := 0; i < len(rest); {
+		switch rest[i] {
+		case ' ', '\t', '\n', '\r', '\f', '\v', ';':
+			i++
+		case '-':
+			if i+1 >= len(rest) || rest[i+1] != '-' {
+				return false
+			}
+			i += 2
+			for i < len(rest) && rest[i] != '\n' {
+				i++
+			}
+		case '/':
+			if i+1 >= len(rest) || rest[i+1] != '*' {
+				return false
+			}
+			i += 2
+			end := strings.Index(rest[i:], "*/")
+			if end < 0 {
+				return true
+			}
+			i += end + 2
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // ExecContext runs every statement in query in order, as other SQLite drivers
 // for database/sql do, and binds args to their parameters in sequence. The
 // result is the last statement's.
-func (c *conn) ExecContext(_ context.Context, query string, named []driver.NamedValue) (driver.Result, error) {
+func (c *conn) ExecContext(ctx context.Context, query string, named []driver.NamedValue) (driver.Result, error) {
 	args := make([]driver.Value, len(named))
 	for i, nv := range named {
 		if nv.Name != "" {
@@ -400,6 +435,9 @@ func (c *conn) ExecContext(_ context.Context, query string, named []driver.Named
 	}
 	var res driver.Result
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		s, rest, err := c.prepare(query)
 		if err != nil {
 			return nil, err
@@ -407,7 +445,7 @@ func (c *conn) ExecContext(_ context.Context, query string, named []driver.Named
 		if s == nil {
 			break
 		}
-		last := strings.TrimSpace(rest) == ""
+		last := tailHasNoStatement(rest)
 		if s.nInput > len(args) || (last && s.nInput != len(args)) {
 			s.Close()
 			return nil, errArgCount

@@ -6,6 +6,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"database/sql/driver"
 	"fmt"
@@ -126,6 +127,29 @@ func main() {
 	check("multi-statement exec with too few args errors", err != nil, true)
 	_, err = db.Exec(`INSERT INTO m VALUES (?, 'f')`, 6, 7)
 	check("exec with extra args errors", err != nil, true)
+	var nRow int
+	_, err = db.Exec(`INSERT INTO m VALUES (?, 'z'); -- trailing`, 8, 9)
+	check("trailing comment with extra args errors", err != nil, true)
+	must(db.QueryRow(`SELECT count(*) FROM m WHERE pk = 8`).Scan(&nRow))
+	check("trailing comment with extra args does not write", nRow, 0)
+	_, err = db.Exec(`INSERT INTO m VALUES (?, 'y');;`, 9, 10)
+	check("extra semicolon with extra args errors", err != nil, true)
+	must(db.QueryRow(`SELECT count(*) FROM m WHERE pk = 9`).Scan(&nRow))
+	check("extra semicolon with extra args does not write", nRow, 0)
+	_, err = db.Exec(`INSERT INTO m VALUES (?, 'w'); /* done */`, 10, 11)
+	check("block comment with extra args errors", err != nil, true)
+	must(db.QueryRow(`SELECT count(*) FROM m WHERE pk = 10`).Scan(&nRow))
+	check("block comment with extra args does not write", nRow, 0)
+	_, err = db.Exec(`INSERT INTO m VALUES (?, 'kept'); -- note`, 12)
+	must(err)
+	must(db.QueryRow(`SELECT s FROM m WHERE pk = 12`).Scan(&s))
+	check("trailing comment with exact args runs", s, "kept")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = db.ExecContext(ctx, `INSERT INTO m VALUES (11, 'no')`)
+	check("cancelled exec errors", err != nil, true)
+	must(db.QueryRow(`SELECT count(*) FROM m WHERE pk = 11`).Scan(&nRow))
+	check("cancelled exec does not write", nRow, 0)
 	_, err = db.Exec(` -- nothing`)
 	check("exec with no statement errors", err != nil, true)
 	_, err = db.Exec(`INSERT INTO m VALUES (:pk, 'g')`, sql.Named("pk", 7))
